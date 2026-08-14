@@ -38,12 +38,26 @@ import kotlinx.coroutines.flow.flow
  * for them. Bytes seen before the very first `0x7E` this instance has ever observed are treated
  * as pre-frame noise and discarded; once a frame has started, all bytes up to its closing
  * delimiter are buffered as that frame's content.
+ *
+ * ### Runaway-stream protection
+ *
+ * A `TonexTransport` connection is held open for the length of a gig by a foreground service; a
+ * flaky OTG cable, a partially-seated connector, or a pedal power-cycle mid-stream can all produce
+ * a run of bytes with no valid closing delimiter. Per FR11, that must surface as a failure, not be
+ * silently absorbed — so buffered, not-yet-delimited frame content is capped at
+ * [MAX_FRAME_CONTENT_BYTES]. Exceeding the cap emits exactly one
+ * [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame], discards the
+ * runaway buffer, and resynchronizes: no further bytes are buffered (or further overflow errors
+ * emitted) until the next `0x7E` is seen, at which point that byte starts a fresh frame exactly as
+ * it would after a normal closing delimiter. A transient burst of noise degrades to a single
+ * dropped frame, not a permanently wedged stream.
  */
 class FrameReassembler {
 
     private var sawOpeningFlag = false
     private var buffer = ByteArrayOutputStream()
     private var escapePending = false
+    private var overflowed = false
 
     /**
      * Feeds the next chunk of bytes read off the wire into the reassembler.
@@ -51,7 +65,9 @@ class FrameReassembler {
      * @param chunk raw bytes as delivered by the transport. May be empty, may split a frame at
      *   any byte offset (including mid-escape-sequence), and may contain several frames.
      * @return the decoded result for each frame this chunk completed, in the order their closing
-     *   delimiters appeared. Empty if [chunk] did not complete any frame.
+     *   delimiters appeared, plus one [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame]
+     *   per runaway-content episode this chunk triggered (see "Runaway-stream protection" above).
+     *   Empty if [chunk] did not complete any frame and did not trigger an overflow.
      */
     fun feed(chunk: ByteArray): List<TonexResult<ByteArray>> {
         if (chunk.isEmpty()) return emptyList()
@@ -67,27 +83,85 @@ class FrameReassembler {
 
             when {
                 escapePending -> {
-                    buffer.write((b.toInt() xor FRAME_ESCAPE_XOR.toInt()) and 0xFF)
                     escapePending = false
+                    if (!overflowed) {
+                        appendContentByte((b.toInt() xor FRAME_ESCAPE_XOR.toInt()) and 0xFF, results)
+                    }
                 }
                 b == FRAME_ESCAPE -> {
                     escapePending = true
                 }
                 b == FRAME_FLAG -> {
-                    val content = buffer.toByteArray()
-                    buffer = ByteArrayOutputStream()
-                    if (content.isNotEmpty()) {
-                        results.add(finishDecoding(content))
+                    if (overflowed) {
+                        // Resynchronize: this flag both closes out the discarded runaway content
+                        // and opens whatever frame follows.
+                        overflowed = false
+                        buffer = ByteArrayOutputStream()
+                    } else {
+                        val content = buffer.toByteArray()
+                        buffer = ByteArrayOutputStream()
+                        if (content.isNotEmpty()) {
+                            results.add(finishDecoding(content))
+                        }
                     }
                     // This same flag also serves as the opening delimiter of whatever follows,
                     // so we stay "in frame" (sawOpeningFlag remains true) rather than going idle.
                 }
                 else -> {
-                    buffer.write(b.toInt() and 0xFF)
+                    if (!overflowed) {
+                        appendContentByte(b.toInt() and 0xFF, results)
+                    }
                 }
             }
         }
         return results
+    }
+
+    /**
+     * Appends [byteValue] to the in-progress frame's content buffer, or — if that would push the
+     * buffer past [MAX_FRAME_CONTENT_BYTES] — discards the buffer, enters overflow/resync mode,
+     * and records exactly one [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame]
+     * in [results] for this episode. Must only be called while not already [overflowed].
+     */
+    private fun appendContentByte(byteValue: Int, results: MutableList<TonexResult<ByteArray>>) {
+        if (buffer.size() >= MAX_FRAME_CONTENT_BYTES) {
+            val bufferedBytes = buffer.size()
+            overflowed = true
+            buffer = ByteArrayOutputStream()
+            results.add(
+                TonexResult.Failure(
+                    TonexError.MalformedFrame(
+                        "frame content exceeded $MAX_FRAME_CONTENT_BYTES bytes without a closing " +
+                            "delimiter (buffered $bufferedBytes byte(s) before giving up); " +
+                            "discarding and resynchronizing on the next 0x7E"
+                    )
+                )
+            )
+            return
+        }
+        buffer.write(byteValue)
+    }
+
+    companion object {
+        /**
+         * Maximum size, in bytes, of a single frame's *unstuffed* content (payload plus the
+         * trailing 2-byte CRC) this reassembler will buffer while waiting for a closing
+         * delimiter.
+         *
+         * Derived from the largest legitimate frame this protocol is known to produce:
+         * - [dev.tonexotg.protocol.PedalState.MAX_STATE_BYTES] caps the state blob at 512 bytes.
+         * - The largest other legitimate response, the preset-details summary, is roughly 2 KB.
+         * - Byte stuffing can double the *on-wire* length in the worst case (every content byte
+         *   needing escaping) — but that inflates the wire representation, not the unstuffed
+         *   content counted here, so it is not itself a reason to raise this cap.
+         *
+         * `8 * 1024` (8 KB) is roughly 4x the largest known legitimate frame (~2 KB): comfortable
+         * headroom for anything this protocol actually sends, while still catching a desynced or
+         * flag-less stream (a flaky OTG cable, a half-seated connector, a pedal power-cycle
+         * mid-stream) quickly rather than growing this buffer unboundedly inside the long-lived
+         * foreground service that owns the USB connection for the length of a gig.
+         */
+        const val MAX_FRAME_CONTENT_BYTES: Int = 8 * 1024
     }
 }
 

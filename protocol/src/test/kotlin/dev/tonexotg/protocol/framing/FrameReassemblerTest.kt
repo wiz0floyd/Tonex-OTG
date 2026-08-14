@@ -217,4 +217,105 @@ class FrameReassemblerTest {
         assertEquals(1, secondResults.size)
         assertContentEquals(payload, payloadOf(secondResults[0]))
     }
+
+    // ---------------------------------------------------------------------
+    // Runaway-stream protection (unbounded-buffer cap)
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `a stream with no closing flag past the cap emits exactly one MalformedFrame, not one per byte`() {
+        // Well past the cap, and well past it again, with no delimiter anywhere -- a stuck OTG
+        // link. Avoid 0x7E/0x7D so this is pure unescaped content and isn't accidentally
+        // resynchronizing partway through.
+        val junk = ByteArray(FrameReassembler.MAX_FRAME_CONTENT_BYTES * 10) { 0x41 }
+
+        val reassembler = FrameReassembler()
+        val results = reassembler.feed(byteArrayOf(0x7E) + junk)
+
+        assertEquals(1, results.size, "expected exactly one overflow error, got ${results.size}")
+        val failure = results[0]
+        assertIs<TonexResult.Failure>(failure)
+        assertIs<TonexError.MalformedFrame>(failure.error)
+    }
+
+    @Test
+    fun `overflow is also silent across multiple feed calls, not just within one chunk`() {
+        val reassembler = FrameReassembler()
+        val firstResults = reassembler.feed(byteArrayOf(0x7E) + ByteArray(FrameReassembler.MAX_FRAME_CONTENT_BYTES + 1) { 0x41 })
+        assertEquals(1, firstResults.size)
+        assertIs<TonexError.MalformedFrame>((firstResults[0] as TonexResult.Failure).error)
+
+        // Keep feeding junk, still no closing flag: must not emit a second error.
+        val secondResults = reassembler.feed(ByteArray(FrameReassembler.MAX_FRAME_CONTENT_BYTES * 5) { 0x42 })
+        assertEquals(0, secondResults.size, "overflow must not re-fire per byte on a still-stuck stream")
+    }
+
+    @Test
+    fun `a valid frame arriving after an overflow decodes correctly (resync recovery)`() {
+        val junk = ByteArray(FrameReassembler.MAX_FRAME_CONTENT_BYTES * 3) { 0x41 }
+        val recoveryPayload = byteArrayOf(0x10, 0x20, 0x30, 0x40, 0x50)
+        val recoveryFrame = HdlcFrame.encode(recoveryPayload)
+
+        val reassembler = FrameReassembler()
+        val results = reassembler.feed(byteArrayOf(0x7E) + junk + recoveryFrame)
+
+        assertEquals(2, results.size, "expected one overflow error followed by one successful frame")
+
+        val overflow = results[0]
+        assertIs<TonexResult.Failure>(overflow)
+        assertIs<TonexError.MalformedFrame>(overflow.error)
+
+        assertContentEquals(recoveryPayload, payloadOf(results[1]))
+    }
+
+    @Test
+    fun `a valid frame arriving after an overflow still decodes correctly when split across feed calls`() {
+        // Same recovery scenario as above, but the overflow and the recovery frame arrive in
+        // separate reads, matching how a real reconnect/resync would actually show up.
+        val junk = ByteArray(FrameReassembler.MAX_FRAME_CONTENT_BYTES * 2) { 0x41 }
+        val recoveryPayload = byteArrayOf(0x9, 0x8, 0x7)
+        val recoveryFrame = HdlcFrame.encode(recoveryPayload)
+
+        val reassembler = FrameReassembler()
+        val overflowResults = reassembler.feed(byteArrayOf(0x7E) + junk)
+        assertEquals(1, overflowResults.size)
+        assertIs<TonexError.MalformedFrame>((overflowResults[0] as TonexResult.Failure).error)
+
+        val recoveryResults = reassembler.feed(recoveryFrame)
+        assertEquals(1, recoveryResults.size)
+        assertContentEquals(recoveryPayload, payloadOf(recoveryResults[0]))
+    }
+
+    @Test
+    fun `a legitimate large frame just under the cap still decodes fine`() {
+        // Content (payload + 2 CRC bytes) lands one byte under the cap, so this must NOT trip
+        // the overflow path -- the cap must not be so tight it rejects real large traffic (e.g.
+        // a preset-details response).
+        val random = Random(seed = 99)
+        val payloadSize = FrameReassembler.MAX_FRAME_CONTENT_BYTES - 2 - 1
+        val payload = ByteArray(payloadSize) { random.nextInt(0, 256).toByte() }
+
+        val reassembler = FrameReassembler()
+        val results = reassembler.feed(HdlcFrame.encode(payload))
+
+        assertEquals(1, results.size)
+        assertContentEquals(payload, payloadOf(results[0]))
+    }
+
+    @Test
+    fun `content of exactly the cap size decodes fine, one byte more overflows`() {
+        val random = Random(seed = 100)
+
+        val exactPayloadSize = FrameReassembler.MAX_FRAME_CONTENT_BYTES - 2
+        val exactPayload = ByteArray(exactPayloadSize) { random.nextInt(0, 256).toByte() }
+        val exactResults = FrameReassembler().feed(HdlcFrame.encode(exactPayload))
+        assertEquals(1, exactResults.size, "content exactly at the cap must decode, not overflow")
+        assertContentEquals(exactPayload, payloadOf(exactResults[0]))
+
+        val overSize = exactPayloadSize + 1
+        val overPayload = ByteArray(overSize) { random.nextInt(0, 256).toByte() }
+        val overResults = FrameReassembler().feed(HdlcFrame.encode(overPayload))
+        assertEquals(1, overResults.size)
+        assertIs<TonexError.MalformedFrame>((overResults[0] as TonexResult.Failure).error)
+    }
 }
