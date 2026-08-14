@@ -1,0 +1,152 @@
+package dev.tonexotg.protocol
+
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+
+/**
+ * One onboard preset as known to the controller: its position and the pedal's own name for it.
+ *
+ * Deliberately does not include a user-assigned local alias — per FR10/S14, aliasing is an
+ * override layer resolved in the UI/view-model as `localAlias ?: pedalName`, not something
+ * `:protocol` merges in itself. `:protocol` only ever reports what the pedal actually said.
+ *
+ * @property index the preset's onboard position; see [PresetIndex].
+ * @property pedalName the pedal's own name for this preset, as read from the preset-details
+ *   response (a 32-byte fixed field, trailing padding trimmed). Names are read-only on this
+ *   pedal — there is no name-write command — so this can change only by re-reading from the
+ *   pedal, never by a local edit.
+ */
+data class PresetInfo(
+    val index: PresetIndex,
+    val pedalName: String,
+)
+
+/**
+ * Notable happenings a caller cannot infer from [TonexController.connectionState] alone —
+ * things that occur *within* [ConnectionState.Ready] rather than being a transition between
+ * states.
+ */
+sealed interface TonexEvent {
+
+    /**
+     * The first parameter write of this session that will actually alter the pedal's saved
+     * preset is about to happen (or has just happened — see [TonexController] for exactly when
+     * this fires). Fires at most once per session (S9b); presentation is a UI concern (D3), but
+     * the underlying signal originates here because only the protocol layer knows this pedal
+     * has no undo.
+     */
+    data class FirstDestructiveWrite(val presetIndex: PresetIndex) : TonexEvent
+
+    /**
+     * The pedal's active preset changed for a reason other than this controller's own
+     * [TonexController.selectPreset] call — i.e. it was changed externally, at the footswitch
+     * (FR6). Observing this is also what should trigger a re-snapshot (S9b): a snapshot taken
+     * of the *previous* active preset is not valid for this one.
+     */
+    data class ExternalPresetChange(val newIndex: PresetIndex) : TonexEvent
+}
+
+/**
+ * The facade the UI layer consumes: everything above the wire-protocol details, exposed as
+ * suspend functions and [Flow]s rather than callbacks.
+ *
+ * `TonexController` is where the pieces built across S4-S9b compose — framing, codecs, the
+ * parameter registry, state-blob patching, the connection state machine, and the snapshot
+ * safety net — into the single object the UI needs. It does not expose [PedalState] or
+ * [SessionId] at all: those stay internal to how preset selection and reverting are implemented
+ * safely, never surfaced as something a UI-layer caller could misuse.
+ *
+ * Every operation that can fail for more than one reason returns a [TonexResult] rather than
+ * throwing or returning a bare `Boolean` — per FR11, a write that fails or times out must never
+ * be reported as success, and a UI cannot show a specific reason for a failure it cannot
+ * distinguish from any other.
+ */
+interface TonexController {
+
+    /** The connection's current lifecycle state. See [ConnectionState]. */
+    val connectionState: StateFlow<ConnectionState>
+
+    /**
+     * The pedal's currently active preset, or `null` before it is known (i.e. before
+     * [ConnectionState.Ready]). Reflects changes made through this controller *and* changes
+     * made externally at the footswitch (FR6) — see [events] for a distinguishable signal when
+     * it's the latter.
+     */
+    val activePreset: StateFlow<PresetIndex?>
+
+    /**
+     * All 20 onboard presets, harvested immediately after reaching [ConnectionState.Ready].
+     * Empty before then.
+     */
+    val presets: StateFlow<List<PresetInfo>>
+
+    /**
+     * The last known value of every parameter belonging to the active preset, plus the 7
+     * globals, keyed by [ParameterId]. An id absent from this map means its value is not yet
+     * known (e.g. before [ConnectionState.Ready]) — absence is not the same as a value of zero.
+     * Updated on preset load/change and after each successful [setParameter].
+     */
+    val parameterValues: StateFlow<Map<ParameterId, Float>>
+
+    /**
+     * Notable happenings that are not themselves [connectionState] transitions. See
+     * [TonexEvent]. A [SharedFlow] (not a [StateFlow]): these are one-off occurrences, not
+     * ongoing state, so there is no "current value" to replay a value for — only new collectors
+     * miss events emitted before they started collecting, by design.
+     */
+    val events: SharedFlow<TonexEvent>
+
+    /**
+     * Begins a connection using [transport], driving [connectionState] through
+     * [ConnectionState.Connecting], [ConnectionState.Hello], and [ConnectionState.GetState] to
+     * [ConnectionState.Ready] (or to [ConnectionState.Error] on failure).
+     *
+     * Suspends until the connection either reaches [ConnectionState.Ready] or fails; callers
+     * that only want to observe progress along the way should collect [connectionState]
+     * concurrently rather than waiting on this call alone.
+     */
+    suspend fun connect(transport: TonexTransport): TonexResult<Unit>
+
+    /**
+     * Ends the current connection and returns [connectionState] to [ConnectionState.Idle].
+     * Safe to call from any state, including [ConnectionState.Idle] itself (a no-op then).
+     */
+    suspend fun disconnect()
+
+    /**
+     * Makes [index] the pedal's active preset.
+     *
+     * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation]
+     * otherwise. Implemented as a read-modify-write against the pedal's current state blob
+     * (patching only the relevant slot bytes) rather than a synthesized write — see
+     * [PedalState] for why that distinction is load-bearing.
+     */
+    suspend fun selectPreset(index: PresetIndex): TonexResult<Unit>
+
+    /**
+     * Writes [value] for parameter [id] on the pedal, using the single-parameter write path
+     * (never a whole-state write).
+     *
+     * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation]
+     * otherwise, and with [TonexError.UnsupportedByFirmware] if the connected pedal's firmware
+     * predates per-parameter write support. [value] must fall within the corresponding
+     * [ParameterSpec.min]/[max] for [id]; out-of-range values are rejected rather than silently
+     * clamped, so a caller cannot mistake a clamped write for the value it asked for.
+     *
+     * This is the first operation this session that can permanently alter the active preset —
+     * see [TonexEvent.FirstDestructiveWrite].
+     */
+    suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit>
+
+    /**
+     * Restores the active preset's parameters to the values captured in its most recent
+     * [PresetSnapshot], by replaying them as per-parameter writes.
+     *
+     * Fails with [TonexError.UnsupportedByFirmware] if the pedal's firmware lacks
+     * per-parameter write support — this operation never falls back to a whole-state write to
+     * compensate, because that fallback is itself the dangerous path this safety net exists to
+     * avoid (S9b).
+     */
+    suspend fun revertActivePreset(): TonexResult<Unit>
+}
