@@ -1,7 +1,7 @@
 /*
  * Ported/adapted from: TonexOneController
  * Upstream repository: https://github.com/Builty/TonexOneController
- * Upstream file:        source/main/usb_tonex_one.h
+ * Upstream file:        source/main/usb_tonex_one.c and usb_tonex_one.h
  * Upstream licence:     Apache-2.0 — Copyright 2025 Greg Smith
  * Full licence text:    LICENSE
  *
@@ -10,10 +10,14 @@
  *
  * NOTE ON PROVENANCE: the message-type wire IDs in [MessageType] correspond to the
  * `TYPE_*` constants in the cited upstream header (the same file CREDITS.md already
- * attributes the preset-details `TYPE_STATE_PRESET_DETAILS*` handling to). The outer
- * `B9 03 <type> <size> <opaque>` envelope shape and the varint encoding it is built on
- * (see [dev.tonexotg.protocol.codec.TonexVarint]) come from `vit3k/tonex_controller`'s
- * `protocol.md`, per github.com/wiz0floyd/tonex-otg issue #9.
+ * attributes the preset-details `TYPE_STATE_PRESET_DETAILS*` handling to). The four-varint
+ * `B9 03 <type> <size> <unknownA> <unknownB>` envelope shape was corrected from issue #9's
+ * original (incorrect) three-varint description by testing a four-varint model against every
+ * complete message literal in `usb_tonex_one.c` (lines 204, 224, 246, 347) — all five match,
+ * including the size field now being an exact body-length match rather than an approximation.
+ * See github.com/wiz0floyd/tonex-otg issue #9 for the corrected writeup. The varint encoding
+ * itself (see [dev.tonexotg.protocol.codec.TonexVarint]) still traces to `vit3k/tonex_controller`'s
+ * `protocol.md`.
  */
 package dev.tonexotg.protocol.codec
 
@@ -83,34 +87,35 @@ sealed class MessageType {
 }
 
 /**
- * The fixed three-field envelope every Tonex message opens with, immediately after the `B9 03`
+ * The fixed four-field envelope every Tonex message opens with, immediately after the `B9 03`
  * prefix (see [MessageHeaderCodec]).
  *
  * @property type the message's [MessageType], decoded from the header's first varint.
- * @property declaredSize the header's second varint, as sent on the wire. Despite the name, this
- *   is **not** reliably equal to the number of payload bytes that follow — see
- *   [MessageHeaderCodec] for why this codec does not use it to slice the payload, only to sanity
- *   check that enough bytes are actually present.
- * @property opaqueField the header's third varint. Its meaning is **not documented upstream**;
- *   this codec deliberately does not name it as anything more specific than that, or assume what
- *   it is for — it is decoded and preserved verbatim so a caller that later works out its meaning
- *   (or the pedal firmware that requires a particular value) is not blocked by this codec having
- *   guessed wrong. See [MessageHeaderCodec.encode] for the one observation this codec does rely
- *   on about it (its wire width), clearly marked there as inferred, not documented.
+ * @property declaredSize the header's second varint. This **is** an exact byte count: the number
+ *   of bytes in [DecodedMessage.payload] always equals this value — [MessageHeaderCodec.decode]
+ *   rejects the frame otherwise. (An earlier version of this codec treated `size` as merely a
+ *   lower bound, based on a three-varint reading of the header that mis-attributed [unknownB] to
+ *   the payload; that reading was confirmed wrong against upstream source and has been corrected.
+ *   See [MessageHeaderCodec] for the full story and the five confirmed data points behind it.)
+ * @property unknownA the header's third varint. Its meaning is **not documented upstream**.
+ *   Observed value across every known message: `11`, with no variation seen yet.
+ * @property unknownB the header's fourth varint. Its meaning is **not documented upstream**.
+ *   Observed values: `1` for a hello request, `3` for every other message type seen so far —
+ *   consistent with, but not confirmed as, a "is this the first message of the session" flag.
+ *   Named positionally rather than guessing at that or any other meaning.
  */
 data class MessageHeader(
     val type: MessageType,
     val declaredSize: Long,
-    val opaqueField: Long,
+    val unknownA: Long,
+    val unknownB: Long,
 )
 
 /**
- * A fully decoded Tonex message: its [header] and the raw bytes that followed it.
- *
- * [payload] is **not** truncated to [MessageHeader.declaredSize] — see [MessageHeaderCodec] for
- * why. It is every byte of the input buffer after the header, verbatim; interpreting it further
- * (full/summary preset details, state update fields, a changed parameter) is downstream work
- * (S7, S8), not this codec's job.
+ * A fully decoded Tonex message: its [header] and the payload bytes that followed it, exactly
+ * [MessageHeader.declaredSize] bytes long (see [MessageHeaderCodec.decode]'s size validation).
+ * Interpreting the payload's internal structure — full/summary preset details, state update
+ * fields, a changed parameter — is downstream work (S7, S8), not this codec's job.
  *
  * Overrides `equals`/`hashCode`/`toString` by hand (rather than being a `data class`) because
  * `payload` is a `ByteArray`, whose auto-generated `data class` semantics would compare by
@@ -134,51 +139,58 @@ class DecodedMessage(val header: MessageHeader, val payload: ByteArray) {
  * ## Wire format
  *
  * ```
- * B9 03 <type: varint> <size: varint> <opaque: varint> <payload...>
+ * B9 03 <type: varint> <size: varint> <unknownA: varint> <unknownB: varint> <payload...>
  * ```
  *
- * The two literal bytes `B9 03` are followed by three [TonexVarint]-encoded integers — `type`,
- * `size`, and a third field whose meaning is not documented upstream (see
- * [MessageHeader.opaqueField]) — and then the rest of the message.
+ * The two literal bytes `B9 03` are followed by **four** [TonexVarint]-encoded integers — `type`,
+ * `size`, and two further fields whose meaning is not documented upstream (see
+ * [MessageHeader.unknownA] / [MessageHeader.unknownB]) — and then exactly `size` bytes of payload.
+ *
+ * This is a correction to this codec's original three-varint reading (issue #9's initial writeup
+ * of "type, size, and one opaque field"). Testing a four-varint model against every complete
+ * message literal in upstream `usb_tonex_one.c` confirms it exactly, `size` included — it is a
+ * precise body-length match once the fourth field is accounted for as part of the header rather
+ * than folded into the payload:
+ *
+ * | Source | type | size | unknownA | unknownB | body length |
+ * |---|---|---|---|---|---|
+ * | `usb_tonex_one.c:204` (hello) | `0x0000` | `4` | `11` | `1` | `4` |
+ * | `usb_tonex_one.c:224` (request state) | `0x0000` | `6` | `11` | `3` | `6` |
+ * | `usb_tonex_one.c:246` (preset details) | `0x0300` | `6` | `11` | `3` | `6` |
+ * | `usb_tonex_one.c:347` | `0x030D` | `5` | `11` | `3` | `5` |
+ * | `usb_tonex_one.c:272` (header-only template) | `0x0309` | `10` | `11` | `3` | `0` (body appended at runtime) |
+ *
+ * The last row is a header upstream constructs and then appends a body to at runtime, not a
+ * complete message — decoding it as-is (`size = 10`, zero bytes following) correctly fails this
+ * codec's size validation below; that is expected, not a counterexample.
  *
  * ## Validation
  *
- * Per issue #9's stated upstream validation rules, [decode] rejects:
- * - a buffer shorter than the minimum possible header (`B9 03` + 3 single-byte literal varints
- *   = 5 bytes) — [TonexError.MalformedFrame];
+ * [decode] rejects:
+ * - a buffer shorter than the minimum possible header (`B9 03` + 4 single-byte literal varints
+ *   = 6 bytes) — [TonexError.MalformedFrame];
  * - a buffer whose first two bytes are not exactly `B9 03` — [TonexError.MalformedFrame];
- * - a `size` field declaring more bytes than actually remain after the header —
- *   [TonexError.UnexpectedBlobShape].
+ * - a `size` field that does not exactly equal the number of bytes remaining after the header —
+ *   [TonexError.UnexpectedBlobShape]. `size` is an exact body length (see the table above), so
+ *   both too few bytes (truncation) and too many (trailing garbage / a framing bug upstream)
+ *   are rejected the same way.
  *
  * A truncated varint *within* the header (e.g. a `0x82` marker with no data bytes following) is
  * also rejected, as a [TonexError.MalformedFrame] surfaced from [TonexVarint.decode] — never a
  * raw `IndexOutOfBoundsException`.
- *
- * ## Why `size` is not used to slice the payload
- *
- * The two byte-exact handshake fixtures this codec is tested against (issue #9) both have **one
- * more byte remaining after the header than `size` declares** (e.g. the "Hello" fixture declares
- * `size = 4` but 5 bytes actually follow). Both fixtures are stated to be complete, verbatim
- * framed payloads, not truncated captures — so this is not a truncation bug in the fixtures, it
- * is a real property of the wire format that this codec does not have an explanation for. Rather
- * than guess a slicing rule that happens to fit two data points and risk silently dropping a real
- * trailing byte from every future message, [decode] exposes the **entire** remainder of the
- * buffer as [DecodedMessage.payload] and only uses `size` as a lower bound (enough bytes must be
- * present) for [TonexError.UnexpectedBlobShape] detection. Interpreting the payload's internal
- * structure — including whatever this extra byte turns out to be — is left to the message-body
- * codecs downstream (S7, S8).
  */
 object MessageHeaderCodec {
 
     private const val PREFIX_0: Int = 0xB9
     private const val PREFIX_1: Int = 0x03
 
-    /** `B9 03` + the smallest possible encoding (1 byte each) of `type`, `size`, and `opaque`. */
-    private const val MIN_FRAME_LENGTH = 5
+    /** `B9 03` + the smallest possible encoding (1 byte each) of the four header varints. */
+    private const val MIN_FRAME_LENGTH = 6
 
     /**
      * Decodes a full message (header + payload) from [bytes]. See the class KDoc for the
-     * validation rules applied and why `size` does not bound [DecodedMessage.payload].
+     * validation rules applied. On success, [DecodedMessage.payload] is exactly
+     * [MessageHeader.declaredSize] bytes long.
      */
     fun decode(bytes: ByteArray): TonexResult<DecodedMessage> {
         if (bytes.size < MIN_FRAME_LENGTH) {
@@ -213,23 +225,31 @@ object MessageHeaderCodec {
         }
         cursor += size.bytesConsumed
 
-        val opaque = when (val result = decodeIntField(bytes, cursor, "opaque field")) {
+        val unknownA = when (val result = decodeIntField(bytes, cursor, "unknownA")) {
             is TonexResult.Failure -> return result
             is TonexResult.Success -> result.value
         }
-        cursor += opaque.bytesConsumed
+        cursor += unknownA.bytesConsumed
 
-        val payload = bytes.copyOfRange(cursor, bytes.size)
-        if (size.value > payload.size) {
+        val unknownB = when (val result = decodeIntField(bytes, cursor, "unknownB")) {
+            is TonexResult.Failure -> return result
+            is TonexResult.Success -> result.value
+        }
+        cursor += unknownB.bytesConsumed
+
+        val remaining = bytes.size - cursor
+        if (size.value != remaining.toLong()) {
             return TonexResult.Failure(
-                TonexError.UnexpectedBlobShape(expectedSize = size.value.toInt(), actualSize = payload.size),
+                TonexError.UnexpectedBlobShape(expectedSize = size.value.toInt(), actualSize = remaining),
             )
         }
+        val payload = bytes.copyOfRange(cursor, bytes.size)
 
         val header = MessageHeader(
             type = MessageType.fromWireId(type.value),
             declaredSize = size.value,
-            opaqueField = opaque.value,
+            unknownA = unknownA.value,
+            unknownB = unknownB.value,
         )
         return TonexResult.Success(DecodedMessage(header, payload))
     }
@@ -238,23 +258,33 @@ object MessageHeaderCodec {
      * Encodes [header] and [payload] back into the wire form [decode] parses.
      *
      * **Judgement call — per-field encoding width:** [TonexVarint.encodeInt] alone, applied
-     * uniformly, would encode `type = 0` and `opaqueField = 11` as their minimal single literal
-     * byte — but neither of the two confirmed handshake fixtures (issue #9) does that: both
-     * always encode `size` via the 2-byte `0x82` marker and the opaque field via the 1-byte
-     * `0x80` marker, even though both values would fit a shorter literal form. To reproduce those
-     * fixtures byte-for-byte, this method encodes `size` and `opaqueField` using their observed
-     * *marker* forms unconditionally (falling back to the 2-byte form only if a value exceeds
-     * what the 1-byte form of that marker can hold), and only `type` via [TonexVarint.encodeInt]'s
-     * ordinary minimal-form rule. This is inferred from exactly two data points, not a documented
-     * rule — flagged here, and in the story report, rather than papered over.
+     * uniformly, would encode `unknownA = 11` as its minimal single literal byte — but neither
+     * confirmed handshake fixture (issue #9) does that: both always encode `unknownA` via the
+     * 1-byte `0x80` marker even though the value would fit a shorter literal form, while `size`
+     * always uses the 2-byte `0x82` marker and `type`/`unknownB` both use plain minimal encoding
+     * (both fixtures happen to have small `type`/`unknownB` values, so minimal for those two also
+     * matches the observed marker-form fields — see [MessageHeader.unknownB] for the specific
+     * values). To reproduce those fixtures byte-for-byte, this method encodes `size` and
+     * `unknownA` using their observed *marker* forms unconditionally (falling back to the 2-byte
+     * form only if a value exceeds what the 1-byte form of that marker can hold), and encodes
+     * `type` and `unknownB` via [TonexVarint.encodeInt]'s ordinary minimal-form rule. This is
+     * inferred from the confirmed fixtures, not a documented rule — flagged here, and in the
+     * story report, rather than papered over. In particular: upstream source shows `type` using
+     * the `0x81` 2-byte marker for at least one larger value (`0x0300`), which this encoder does
+     * not reproduce (it always emits `0x82` for a 2-byte `type`, per the same "no documented rule,
+     * pick the fixture-confirmed choice" reasoning used for the ambiguous `0x81`/`0x82` pair
+     * generally) — no byte-exact fixture with a wide `type` value is available to verify this
+     * against directly, only the decoded field values, so this is a known, called-out gap rather
+     * than a silently-guessed one.
      */
     fun encode(header: MessageHeader, payload: ByteArray): ByteArray {
-        val out = ArrayList<Byte>(2 + 6 + payload.size)
+        val out = ArrayList<Byte>(2 + 8 + payload.size)
         out.add(PREFIX_0.toByte())
         out.add(PREFIX_1.toByte())
         out.addAll(TonexVarint.encodeInt(header.type.wireId).asIterable())
         out.addAll(encodeSizeField(header.declaredSize).asIterable())
-        out.addAll(encodeOpaqueField(header.opaqueField).asIterable())
+        out.addAll(encodeUnknownAField(header.unknownA).asIterable())
+        out.addAll(TonexVarint.encodeInt(header.unknownB).asIterable())
         out.addAll(payload.asIterable())
         return out.toByteArray()
     }
@@ -292,9 +322,9 @@ object MessageHeaderCodec {
      * falling back to the 2-byte marker form beyond that so an unusually large decoded value can
      * still round-trip instead of throwing. See [encode] KDoc for why this is not simply minimal.
      */
-    private fun encodeOpaqueField(value: Long): ByteArray {
+    private fun encodeUnknownAField(value: Long): ByteArray {
         require(value in 0..TonexVarint.MAX_INT_VALUE) {
-            "opaque field $value out of representable range 0..${TonexVarint.MAX_INT_VALUE}"
+            "unknownA $value out of representable range 0..${TonexVarint.MAX_INT_VALUE}"
         }
         return if (value <= 0xFF) {
             byteArrayOf(TonexVarint.MARKER_UINT8.toByte(), value.toByte())
