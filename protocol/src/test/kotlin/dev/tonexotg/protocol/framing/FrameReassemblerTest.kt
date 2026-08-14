@@ -318,4 +318,90 @@ class FrameReassemblerTest {
         assertEquals(1, overResults.size)
         assertIs<TonexError.MalformedFrame>((overResults[0] as TonexResult.Failure).error)
     }
+
+    // ---------------------------------------------------------------------
+    // A raw flag is always a delimiter, even with a dangling escape pending
+    //
+    // Regression coverage: a 0x7D immediately followed by 0x7E can never be produced by a
+    // correct encoder (see the class KDoc), so the flag must win -- an earlier version of this
+    // reassembler let escapePending swallow the next frame's opening flag as content instead,
+    // silently losing the frame that followed. These tests pin the fix.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `a dangling escape immediately before a delimiter emits a MalformedFrame, not a silent swallow`() {
+        // 0x7E (open), 0x01 0x02 (ordinary content), 0x7D (dangling escape marker), 0x7E (close).
+        val malformed = byteArrayOf(0x7E, 0x01, 0x02, 0x7D, 0x7E)
+
+        val results = FrameReassembler().feed(malformed)
+
+        assertEquals(1, results.size)
+        val failure = results[0]
+        assertIs<TonexResult.Failure>(failure)
+        assertIs<TonexError.MalformedFrame>(failure.error)
+    }
+
+    @Test
+    fun `a dangling escape immediately before a delimiter resyncs and the following valid frame still decodes`() {
+        val malformed = byteArrayOf(0x7E, 0x01, 0x02, 0x7D, 0x7E)
+        val recoveryPayload = byteArrayOf(0x11, 0x22, 0x33)
+        val recoveryFrame = HdlcFrame.encode(recoveryPayload)
+
+        val results = FrameReassembler().feed(malformed + recoveryFrame)
+
+        assertEquals(2, results.size, "expected one dangling-escape error followed by one successful frame")
+        val failure = results[0]
+        assertIs<TonexResult.Failure>(failure)
+        assertIs<TonexError.MalformedFrame>(failure.error)
+        assertContentEquals(recoveryPayload, payloadOf(results[1]))
+    }
+
+    @Test
+    fun `a dangling escape split across a feed call boundary still resyncs and the next frame decodes`() {
+        // The 0x7D lands in one chunk, the delimiter that follows it lands in the next -- exercises
+        // that escapePending correctly carries across feed() calls into this path too.
+        val recoveryPayload = byteArrayOf(0x44, 0x55)
+        val recoveryFrame = HdlcFrame.encode(recoveryPayload)
+
+        val reassembler = FrameReassembler()
+        val firstResults = reassembler.feed(byteArrayOf(0x7E, 0x01, 0x02, 0x7D))
+        assertEquals(0, firstResults.size, "no delimiter seen yet -- nothing should be emitted")
+
+        val secondResults = reassembler.feed(byteArrayOf(0x7E) + recoveryFrame)
+
+        assertEquals(2, secondResults.size)
+        val failure = secondResults[0]
+        assertIs<TonexResult.Failure>(failure)
+        assertIs<TonexError.MalformedFrame>(failure.error)
+        assertContentEquals(recoveryPayload, payloadOf(secondResults[1]))
+    }
+
+    @Test
+    fun `a dangling escape left over from an overflow episode does not swallow the next valid frame`() {
+        // Exact reported repro: strand the parser on a dangling 0x7D right after an overflow,
+        // then send a perfectly valid frame. The valid frame must not be lost.
+        val payload = byteArrayOf(0xAA.toByte(), 0xBB.toByte())
+        val reassembler = FrameReassembler()
+
+        val openResults = reassembler.feed(byteArrayOf(0x7E))
+        assertEquals(0, openResults.size)
+
+        val overflowResults = (1..20).flatMap { reassembler.feed(ByteArray(1024) { 0x41 }) }
+        assertEquals(1, overflowResults.size, "expected exactly one overflow error")
+        assertIs<TonexError.MalformedFrame>((overflowResults[0] as TonexResult.Failure).error)
+
+        val danglingEscapeResults = reassembler.feed(byteArrayOf(0x7D))
+        assertEquals(0, danglingEscapeResults.size, "no delimiter seen yet -- nothing should be emitted")
+
+        val recoveryResults = reassembler.feed(HdlcFrame.encode(payload))
+
+        // The dangling escape is itself a genuine, distinct anomaly and is reported as such
+        // (never silently absorbed, per FR11) -- but the important part is that the good frame
+        // that follows is NOT lost.
+        assertEquals(2, recoveryResults.size)
+        val danglingEscapeFailure = recoveryResults[0]
+        assertIs<TonexResult.Failure>(danglingEscapeFailure)
+        assertIs<TonexError.MalformedFrame>(danglingEscapeFailure.error)
+        assertContentEquals(payload, payloadOf(recoveryResults[1]))
+    }
 }

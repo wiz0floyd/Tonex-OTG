@@ -18,17 +18,28 @@ import kotlinx.coroutines.flow.flow
  * [feed] call. An instance is not thread-safe — feed it from a single reader, matching the
  * ordering guarantee [dev.tonexotg.protocol.TonexTransport.incoming] already provides.
  *
- * ### Escape-aware scanning
+ * ### A raw `0x7E` is always a delimiter, unconditionally
  *
- * Upstream's frame-end scanner looks for the next raw `0x7E` byte without tracking whether it is
- * preceded by an unconsumed `0x7D` escape marker. That happens to be safe *for upstream's own
- * encoder*, because a byte that is itself `0x7E` is never emitted unescaped once stuffed — but it
- * is fragile: a scanner that doesn't track escape state cannot tell a real delimiter from an
- * escaped payload byte that happens to decode to `0x7E`, and would misframe if it ever received
- * one from a source that isn't equally careful. This implementation is escape-aware instead: a
- * `0x7D` puts the scanner into an "next byte is escaped content, not a delimiter" state for
- * exactly one byte, and that state is preserved across a [feed] call boundary if the chunk ends
- * mid-escape-sequence.
+ * Byte stuffing exists precisely so that a `0x7E` (or `0x7D`) that occurs in content is never
+ * written to the wire in raw form: the encoder always replaces it with `0x7D` followed by
+ * `byte xor 0x20`, i.e. `0x5E` or `0x5D`. A correctly-encoded stream can therefore **never**
+ * contain the two-byte sequence `0x7D 0x7E` — if that sequence appears, it is unambiguously
+ * corruption (a dropped byte, a flipped bit, a desynced resume point), not a legitimate escaped
+ * flag. Consequently a raw `0x7E` is treated as a frame boundary the instant it is seen, with no
+ * exception for a preceding, still-pending `0x7D`: if [escapePending] is set when a `0x7E`
+ * arrives, that dangling escape makes the just-buffered content unrecoverable, so it is discarded
+ * and reported as [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame] —
+ * but the `0x7E` itself is still honored as a delimiter and the frame after it still starts
+ * cleanly. (Per RFC 1662's async-HDLC framing, the flag byte is a frame boundary unconditionally;
+ * escaping exists so a flag never has to appear literally in data, not so that it can be masked
+ * by one.) The earlier, narrower version of this reassembler let a pending escape swallow the
+ * next frame's opening flag as content instead — that swallow is the bug this note replaces.
+ *
+ * What escape state genuinely buys, and what is preserved: within an in-progress frame's content,
+ * `0x7D` followed by any *non-`0x7E`* byte correctly decodes `0x7D 0x5D` back to a literal `0x7D`
+ * and any other escaped byte back to its original value, and [escapePending] is carried across a
+ * [feed] call boundary so a chunk split between the `0x7D` and its escaped byte still decodes
+ * correctly.
  *
  * ### Resynchronization
  *
@@ -82,6 +93,33 @@ class FrameReassembler {
             }
 
             when {
+                // A raw flag is always a delimiter, unconditionally -- checked first, ahead of
+                // escapePending, so a dangling escape can never swallow the next frame's opening
+                // flag as content. See the class KDoc for why this is safe (and required).
+                b == FRAME_FLAG -> {
+                    if (escapePending) {
+                        escapePending = false
+                        results.add(
+                            TonexResult.Failure(
+                                TonexError.MalformedFrame(
+                                    "dangling escape byte (0x7D) immediately before a delimiter " +
+                                        "-- a correctly-stuffed frame can never end this way"
+                                )
+                            )
+                        )
+                    } else {
+                        val content = buffer.toByteArray()
+                        if (content.isNotEmpty()) {
+                            results.add(finishDecoding(content))
+                        }
+                        // If we were overflowed, content is guaranteed empty here (appendContentByte
+                        // never writes while overflowed), so this falls through as a silent resync.
+                    }
+                    overflowed = false
+                    buffer = ByteArrayOutputStream()
+                    // This same flag also serves as the opening delimiter of whatever follows,
+                    // so we stay "in frame" (sawOpeningFlag remains true) rather than going idle.
+                }
                 escapePending -> {
                     escapePending = false
                     if (!overflowed) {
@@ -90,22 +128,6 @@ class FrameReassembler {
                 }
                 b == FRAME_ESCAPE -> {
                     escapePending = true
-                }
-                b == FRAME_FLAG -> {
-                    if (overflowed) {
-                        // Resynchronize: this flag both closes out the discarded runaway content
-                        // and opens whatever frame follows.
-                        overflowed = false
-                        buffer = ByteArrayOutputStream()
-                    } else {
-                        val content = buffer.toByteArray()
-                        buffer = ByteArrayOutputStream()
-                        if (content.isNotEmpty()) {
-                            results.add(finishDecoding(content))
-                        }
-                    }
-                    // This same flag also serves as the opening delimiter of whatever follows,
-                    // so we stay "in frame" (sawOpeningFlag remains true) rather than going idle.
                 }
                 else -> {
                     if (!overflowed) {
