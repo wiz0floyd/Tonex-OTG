@@ -30,3 +30,6 @@ replay_pid*
 build/
 !gradle/wrapper/gradle-wrapper.jar
 local.properties
+
+# Claude Code agent worktrees (transient; nested git worktrees, never commit)
+.claude/worktrees/
