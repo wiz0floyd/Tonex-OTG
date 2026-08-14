@@ -22,10 +22,9 @@ private val REQUEST_STATE_FIXTURE = hex("b9 03 00 82 06 00 80 0b 03 b9 02 81 06 
 /**
  * The four-varint header field values for every complete message literal in upstream
  * `usb_tonex_one.c`, confirmed by testing this exact model against all of them (see
- * [MessageHeaderCodec] KDoc). The first two rows are also confirmed byte-exact via the raw
- * fixtures above; the rest are confirmed at the field-value level only (no raw bytes available
- * for those to this codec), which is why they're tested via round trip rather than byte-exact
- * comparison.
+ * [MessageHeaderCodec] KDoc). Used below for the round-trip test (a synthetic, size-exact body is
+ * attached and the whole message is decoded back). See [REFERENCE_HEADER_BYTES] for the raw
+ * header bytes of all five, used for the byte-exact encode test.
  */
 private data class UpstreamLiteral(
     val label: String,
@@ -40,6 +39,37 @@ private val UPSTREAM_LITERALS = listOf(
     UpstreamLiteral("request state (usb_tonex_one.c:224)", type = 0x0000L, size = 6L, unknownA = 11L, unknownB = 3L),
     UpstreamLiteral("preset details (usb_tonex_one.c:246)", type = 0x0300L, size = 6L, unknownA = 11L, unknownB = 3L),
     UpstreamLiteral("usb_tonex_one.c:347", type = 0x030DL, size = 5L, unknownA = 11L, unknownB = 3L),
+)
+
+/**
+ * The raw header bytes (prefix + all four varints, no body) for all five reference literals,
+ * extracted directly from upstream `usb_tonex_one.c` — this is what pins down each field's own
+ * encoding convention (see [MessageHeaderCodec.encode] KDoc), most importantly that `type` uses
+ * `0x81` for its 2-byte form and never `0x82`, which nothing else in this test file would catch a
+ * regression in.
+ */
+private data class ReferenceHeader(
+    val label: String,
+    val type: Long,
+    val size: Long,
+    val unknownA: Long,
+    val unknownB: Long,
+    val headerBytesHex: String,
+)
+
+private val REFERENCE_HEADER_BYTES = listOf(
+    ReferenceHeader("hello (usb_tonex_one.c:204)", 0x0000L, 4L, 11L, 1L, "b9 03 00 82 04 00 80 0b 01"),
+    ReferenceHeader("request state (usb_tonex_one.c:224)", 0x0000L, 6L, 11L, 3L, "b9 03 00 82 06 00 80 0b 03"),
+    ReferenceHeader("preset details (usb_tonex_one.c:246)", 0x0300L, 6L, 11L, 3L, "b9 03 81 00 03 82 06 00 80 0b 03"),
+    ReferenceHeader("usb_tonex_one.c:347", 0x030DL, 5L, 11L, 3L, "b9 03 81 0d 03 82 05 00 80 0b 03"),
+    ReferenceHeader(
+        "usb_tonex_one.c:272 (header-only template, body appended at runtime)",
+        0x0309L,
+        10L,
+        11L,
+        3L,
+        "b9 03 81 09 03 82 0a 00 80 0b 03",
+    ),
 )
 
 class MessageHeaderCodecTest {
@@ -88,6 +118,31 @@ class MessageHeaderCodecTest {
             reEncoded.contentEquals(REQUEST_STATE_FIXTURE),
             "expected ${REQUEST_STATE_FIXTURE.hex()}, got ${reEncoded.hex()}",
         )
+    }
+
+    @Test
+    fun `encodes each reference literal's header byte-exact, including per-field marker choice`() {
+        // This is what closes the gap flagged in the previous pass: type's marker choice (0x81,
+        // never 0x82, for wide values) is only pinned down by comparing against real upstream
+        // bytes - a round trip through this codec's own decode() cannot catch a regression here,
+        // since decode() accepts 0x81 and 0x82 interchangeably by design.
+        for (reference in REFERENCE_HEADER_BYTES) {
+            val header = MessageHeader(
+                type = MessageType.fromWireId(reference.type),
+                declaredSize = reference.size,
+                unknownA = reference.unknownA,
+                unknownB = reference.unknownB,
+            )
+            val expectedHeaderBytes = hex(reference.headerBytesHex)
+            // Body is irrelevant here - only the header bytes are asserted, so an empty payload
+            // is used even for the four literals that have a real body (encode() does not
+            // validate declaredSize against payload.size; that is decode()'s job).
+            val actualHeaderBytes = MessageHeaderCodec.encode(header, ByteArray(0))
+            assertTrue(
+                actualHeaderBytes.contentEquals(expectedHeaderBytes),
+                "${reference.label}: expected ${expectedHeaderBytes.hex()}, got ${actualHeaderBytes.hex()}",
+            )
+        }
     }
 
     // ---- all five upstream usb_tonex_one.c literals -------------------------------------------

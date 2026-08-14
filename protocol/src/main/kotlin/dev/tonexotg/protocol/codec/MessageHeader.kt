@@ -257,31 +257,42 @@ object MessageHeaderCodec {
     /**
      * Encodes [header] and [payload] back into the wire form [decode] parses.
      *
-     * **Judgement call — per-field encoding width:** [TonexVarint.encodeInt] alone, applied
-     * uniformly, would encode `unknownA = 11` as its minimal single literal byte — but neither
-     * confirmed handshake fixture (issue #9) does that: both always encode `unknownA` via the
-     * 1-byte `0x80` marker even though the value would fit a shorter literal form, while `size`
-     * always uses the 2-byte `0x82` marker and `type`/`unknownB` both use plain minimal encoding
-     * (both fixtures happen to have small `type`/`unknownB` values, so minimal for those two also
-     * matches the observed marker-form fields — see [MessageHeader.unknownB] for the specific
-     * values). To reproduce those fixtures byte-for-byte, this method encodes `size` and
-     * `unknownA` using their observed *marker* forms unconditionally (falling back to the 2-byte
-     * form only if a value exceeds what the 1-byte form of that marker can hold), and encodes
-     * `type` and `unknownB` via [TonexVarint.encodeInt]'s ordinary minimal-form rule. This is
-     * inferred from the confirmed fixtures, not a documented rule — flagged here, and in the
-     * story report, rather than papered over. In particular: upstream source shows `type` using
-     * the `0x81` 2-byte marker for at least one larger value (`0x0300`), which this encoder does
-     * not reproduce (it always emits `0x82` for a 2-byte `type`, per the same "no documented rule,
-     * pick the fixture-confirmed choice" reasoning used for the ambiguous `0x81`/`0x82` pair
-     * generally) — no byte-exact fixture with a wide `type` value is available to verify this
-     * against directly, only the decoded field values, so this is a known, called-out gap rather
-     * than a silently-guessed one.
+     * **Each header field has its own fixed encoding convention — this is *not* [TonexVarint]'s
+     * general-purpose minimal-marker rule applied per field.** [TonexVarint.encodeInt]'s
+     * "smallest marker that fits" policy is the right default for a generic varint (and is what
+     * [encodeInt] itself still does, unchanged), but it does not describe how any of these four
+     * header fields are actually encoded on the wire. That policy would, for instance, encode a
+     * wide `type` value via the `0x82` marker — upstream never does that; see below.
+     *
+     * These four conventions are **observed from five reference literals in upstream
+     * `usb_tonex_one.c`** (lines 204, 224, 246, 272, 347 — see [MessageHeaderCodec] class KDoc for
+     * the full table), not derived from any specification, and each is confirmed consistent
+     * across all five:
+     *
+     * | Field | Convention | Example |
+     * |---|---|---|
+     * | `type` | bare literal when `<= 0x7F`; otherwise the `0x81` 2-byte marker. **Never `0x82`.** No reference value falls in `0x80..0xFF`, so whether a `0x80` 1-byte form is ever used for `type` is unconfirmed — this method skips straight to the 2-byte `0x81` form above `0x7F`, which is an extrapolation beyond the confirmed data points, not itself observed. | `0x0300` → `81 00 03` |
+     * | `size` | always the `0x82` 2-byte marker, even for tiny values that would fit a shorter form. | `4` → `82 04 00` |
+     * | `unknownA` | always the `0x80` 1-byte marker — every reference value is `11`, which would fit a bare literal, so this is a genuine per-field convention, not a size optimisation. | `11` → `80 0b` |
+     * | `unknownB` | always a bare literal. | `1` → `01`, `3` → `03` |
+     *
+     * **Whether the pedal actually requires these exact marker choices — as opposed to merely
+     * tolerating any valid encoding of the same value — is unverified.** The reasoning for
+     * reproducing them exactly anyway: this is the encoding the reference implementation
+     * demonstrably ships against real hardware with, and that is the only evidence available:
+     * matching it exactly cannot be wrong, where deviating from it might silently produce bytes a
+     * production pedal firmware rejects. Confirming a real pedal accepts a differently-encoded
+     * (but value-equal) frame is a hardware question for S20, not something this codec asserts.
+     *
+     * `unknownA` falls back to the 2-byte marker form beyond `0xFF` (unobserved, but needed so an
+     * unusually large decoded value can still round-trip instead of throwing); `type` and `size`
+     * are capped at [TonexVarint.MAX_INT_VALUE] by the same `require` [encodeInt] uses.
      */
     fun encode(header: MessageHeader, payload: ByteArray): ByteArray {
         val out = ArrayList<Byte>(2 + 8 + payload.size)
         out.add(PREFIX_0.toByte())
         out.add(PREFIX_1.toByte())
-        out.addAll(TonexVarint.encodeInt(header.type.wireId).asIterable())
+        out.addAll(encodeTypeField(header.type.wireId).asIterable())
         out.addAll(encodeSizeField(header.declaredSize).asIterable())
         out.addAll(encodeUnknownAField(header.unknownA).asIterable())
         out.addAll(TonexVarint.encodeInt(header.unknownB).asIterable())
@@ -302,6 +313,25 @@ object MessageHeaderCodec {
                     ),
                 )
             }
+        }
+    }
+
+    /**
+     * Bare literal below `0x80`; otherwise the `0x81` 2-byte marker — **never** `0x82`. See
+     * [encode] KDoc for the reference literals this convention is observed from.
+     */
+    private fun encodeTypeField(value: Long): ByteArray {
+        require(value in 0..TonexVarint.MAX_INT_VALUE) {
+            "type $value out of representable range 0..${TonexVarint.MAX_INT_VALUE}"
+        }
+        return if (value <= 0x7F) {
+            byteArrayOf(value.toByte())
+        } else {
+            byteArrayOf(
+                TonexVarint.MARKER_UINT16_A.toByte(),
+                (value and 0xFF).toByte(),
+                ((value shr 8) and 0xFF).toByte(),
+            )
         }
     }
 
