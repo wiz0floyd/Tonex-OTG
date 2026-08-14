@@ -59,15 +59,19 @@ come from the two upstream projects our USB protocol logic was ported from.
 
 ## What was ported from where
 
-| Area of our code | Derived from | Upstream file(s) |
+| Area of our code | Derived from | Upstream file |
 |---|---|---|
-| HDLC-style byte-stuffing / frame delimiting, and the CRC-16 checksum (reversed polynomial `0x8408`) used to validate USB packets | **Both** projects — the same framing and CRC algorithm appears independently in each | Builty: `source/main/usb_tonex_common.c` / `.h` (`tonex_common_calculate_CRC`, byte-stuffing helpers)<br>vit3k: `main/hdlc.cpp` / `.h` (`calculateCRC`, `addByteWithStuffing`) |
-| Tonex parameter table (parameter IDs, scaling, min/max) | **Builty/TonexOneController only** | `source/main/tonex_params.c` / `.h` |
-| Preset-details response handling (`TYPE_STATE_PRESET_DETAILS`, `TYPE_STATE_PRESET_DETAILS_FULL`, preset name parsing) | **Builty/TonexOneController only** | `source/main/usb_tonex_one.c` / `.h` |
-| State-blob field offsets (e.g. input trim, stomp mode, cab bypass, tuning mode/reference, BPM, tempo source, direct monitor, current slot, bypass mode, slot presets) | **Builty/TonexOneController only** | `source/main/usb_tonex_one.h` (`TONEX_STATE_OFFSET_*` definitions) |
+| HDLC-style byte-stuffing / frame delimiting, and the CRC-16 checksum (reversed polynomial `0x8408`) used to validate USB packets — the same algorithm appears independently in both upstream projects | TonexOneController | `source/main/usb_tonex_common.c` / `.h` (`tonex_common_calculate_CRC`, byte-stuffing helpers) |
+| HDLC-style byte-stuffing / frame delimiting, and the CRC-16 checksum (reversed polynomial `0x8408`) used to validate USB packets — the same algorithm appears independently in both upstream projects | tonex_controller | `main/hdlc.cpp` / `.h` (`calculateCRC`, `addByteWithStuffing`) |
+| Tonex parameter table (parameter IDs, scaling, min/max) | TonexOneController only | `source/main/tonex_params.c` / `.h` |
+| Preset-details response handling (`TYPE_STATE_PRESET_DETAILS`, `TYPE_STATE_PRESET_DETAILS_FULL`, preset name parsing) | TonexOneController only | `source/main/usb_tonex_one.c` / `.h` |
+| State-blob field offsets (e.g. input trim, stomp mode, cab bypass, tuning mode/reference, BPM, tempo source, direct monitor, current slot, bypass mode, slot presets) | TonexOneController only | `source/main/usb_tonex_one.h` (`TONEX_STATE_OFFSET_*` definitions) |
 
-When new files are ported, add a row here (or extend an existing one) so this
-table stays the single source of truth for provenance.
+The first two rows describe the same logic, once per upstream source file —
+that logic derives from both projects independently, it is not a single
+shared upstream file. When new files are ported, add a row here (or extend
+an existing one) so this table stays the single source of truth for
+provenance.
 
 ---
 
@@ -81,9 +85,8 @@ modified, and MIT requires the copyright/permission notice to travel with
 copies of the code. Naming the exact upstream file also keeps provenance
 traceable as the port evolves.
 
-Place the header as the first block in the file, before the `package`
-declaration's surrounding license boilerplate is otherwise unnecessary — put
-it directly above `package`.
+Place the header at the very top of the file, directly above the `package`
+declaration.
 
 ### Template — logic from a single upstream project
 
