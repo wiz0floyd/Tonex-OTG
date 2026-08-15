@@ -11,6 +11,50 @@ per-screen annotations first; this covers what didn't fit in a margin note.
 
 ---
 
+## 0. Revision 2 — the real parameter table changed the structure
+
+The lead recovered the real parameter table after the first pass and it
+invalidated a structural assumption: **64 of the 109 preset parameters are
+not independent — they belong to four mutually-exclusive model banks**
+(Reverb: 6 models × 4 params = 24; Modulation: 5 models, 28 params;
+Delay: 2 models × 6 params = 12; Cabinet's VIR mic block: 9 params, live
+only in VIR mode), each gated by its own selector. Only one model's block
+per selector is ever live. Real live parameter count is roughly 52–61 of
+109, not 109.
+
+This forced three concrete changes, covered in detail in §2 below:
+
+1. **The "All Parameters" screen (2c) now shows a model-selector chip row
+   at the top of Reverb, Modulation, Delay, and Cabinet**, rendering only
+   the active model's block and *hiding* — not graying out — every other
+   model's parameters. The previous revision showed all six reverb
+   models' parameters flat and simultaneously, which would have let a
+   player edit a "Spring 2" knob that does nothing while Plate is active.
+   That was wrong, not just incomplete.
+2. **The quick tier's "Reverb Mix" and "Delay Mix" cards now resolve
+   dynamically** to whichever model's mix parameter is currently live
+   (`RVB PL M` when Plate is selected, `DLY DIG M` when Digital is
+   selected, etc.), shown explicitly via a "→ resolves to `RVB PL M` ·
+   Plate model is active" caption, rather than pretending Reverb Mix is
+   one fixed wire parameter.
+3. **A human-readable-label layer over the pedal's raw abbreviations is
+   now shown explicitly** wherever a parameter is displayed (a small
+   monospace caption under every label, e.g. "Threshold / `NG THRESH`"),
+   including a worked example of the one confirmed case where the raw
+   abbreviation is not unique (`MOD RO S` = both Rotary Sync, index 88,
+   and Rotary Speed, index 90).
+
+Master Volume also moved from "flagged as possible new scope" to "built":
+it now has a persistent bottom dock present on the preset list and
+parameter editor screens (§1).
+
+Everything accepted as-is by the lead (the destructive-action color
+reasoning, the six-item quick-tier ceiling, the contrast self-checks, the
+412dp viewport assumption) is unchanged from Revision 1 and not repeated
+here beyond what's needed for context.
+
+---
+
 ## 1. The quick tier: what and why
 
 **Promoted (6):** Gain, Bass, Mid, Treble, Reverb Mix, Delay Mix.
@@ -29,7 +73,16 @@ Reasoning:
   wetter for an ambient intro) without wanting to dig into a full effect
   submenu (rate, feedback, decay, tone). Their *Mix* control is promoted;
   their other parameters (Time, Feedback, Decay, Type, etc.) are not —
-  those get set once during rehearsal, not mid-set.
+  those get set once during rehearsal, not mid-set. **These are not single
+  wire parameters** — the pedal has one mix value per reverb model
+  (`RVB S1 M` … `RVB PL M`, six total) and one per delay model (`DLY DIG
+  M`, `DLY TAPE M`), and only one of each is ever live. The quick-tier
+  card resolves to whichever model is currently active on this preset and
+  shows that explicitly (a "→ resolves to `RVB PL M` · Plate model is
+  active" caption) rather than silently picking one or, worse, showing
+  six sliders. Switching the underlying model happens in the full editor
+  (screen 2c), not from the quick tier — the quick tier is not a place to
+  discover you've accidentally changed which reverb algorithm is running.
 - Six was a deliberate ceiling, not a rounding. At `touch.target.min` (64dp)
   per card plus 12dp inner padding and 8dp gaps, six cards run to roughly
   6×(64+~40)+5×8 ≈ 664dp of vertical space — enough to need a short scroll
@@ -51,51 +104,153 @@ Reasoning:
   which enumerates it alongside BPM, Input Trim, Cab Sim Bypass, Tempo
   Source, Tuning Reference, and Bypass). Putting it inside a per-preset
   quick tier would visually imply it resets or varies with the preset,
-  which it doesn't and mustn't. The mockup instead shows it living in the
-  "Global — not saved to any preset" section of the full parameter list
-  (screen 2c). **Open question:** should Master Volume additionally get
-  its own always-visible affordance (e.g. a persistent control outside any
-  preset screen, closer to how a real amp's volume knob is never "inside"
-  a channel), rather than requiring a trip into the full parameter list?
-  I did not design that in this pass — it felt like new scope (a
-  persistent global control surface) rather than a D2 layout call, and I'd
-  rather flag it than invent it silently.
+  which it doesn't and mustn't.
 
-## 2. The 103 buried parameters: category structure
+  **Revision 2: built, not just flagged.** Master Volume now has a
+  persistent dock pinned to the bottom of the preset list and parameter
+  editor screens (shown in both `mockups.html` screens 1 and 2), always
+  reachable without navigating into Settings or the full parameter list.
+  It reuses `surface.raised-1` — the exact token D1 assigns to "top app
+  bar, bottom bar" (§2.1) — rather than `surface.raised-2` (the
+  per-preset param-card token), extending the visual grammar this mockup
+  already used to keep global scope legible, rather than inventing a new
+  pattern for it.
 
-The full parameter list is grouped by signal-chain block (Noise Gate →
-Compressor → Amp/Preamp → Power Amp → Tone Model → Cabinet → EQ →
-Modulation → Delay → Reverb → FX Loop → Expression/Wah), collapsed by
-default, at `touch.target.secondary` (48dp) rows — correctly the smaller
-tier per D1 §4.2, since menu-diving through 109 parameters is a
-between-songs action, not a mid-song one.
+  **Display scale — dB vs. 0–10, and why:** the parameter's real
+  engineering range is −40..+3 dB (confirmed in `ParameterSpec`'s own doc
+  comment: "master volume's *engineering* range is -40..3 ... even though
+  the ToneX One's own display shows 0..10 — the wire/display conversion
+  is S7's concern"). I chose to show the **0–10 scale as the primary,
+  large numeral**, with the dB value in a small caption underneath
+  (e.g. "7.5" primary, "≈ −6.8 dB" secondary) — the same reasoning as
+  Gain/Bass/Mid/Treble in the quick tier: 0–10 is what's printed on the
+  physical pedal's own screen, so it's the number a guitarist's hand
+  already trusts, and it costs nothing to keep the dB value visible for
+  anyone cross-referencing documentation. The 0↔dB mapping used in the
+  mockup (`dB = −40 + value/10 × 43`, i.e. linear) is my own assumption
+  for display purposes only — **not verified against the pedal's actual
+  curve**, which `ParameterSpec`'s own comment already assigns to S7, not
+  to this story. Flagged, not invented as fact.
 
-**This category breakdown is illustrative, not authoritative.** I checked
-the repo for a recovered 109-parameter name table before inventing
-anything, and found none: `ParameterSpec`/`ParameterId.kt` defines the
-*shape* a parameter takes (id, scope, name, type, min/max/default, unit)
-but the actual 109-entry registry is explicitly `TODO`'d out to S6
-(`PresetSnapshot.valueOf`/`toMap` are literal `TODO()`s pointing at "S6:
-look up id's position"). So there is nothing yet in this repo to be
-faithful *to* for the buried 103. Rather than block on that or invent
-names with no grounding, I built category names and counts (summing to
-109, matching FR9's number) that follow the known ToneX-style
-signal-chain architecture — gate, comp, amp, cab, EQ, mod, delay, reverb —
-so the mockup demonstrates the *tiering pattern* honestly rather than
-reading as lorem ipsum, without asserting these are the real upstream
-names. The **7 global parameters are the one part of this I can call
-authoritative**: they're copied verbatim from `ParameterId.kt`'s own doc
-comment enumerating `ParameterScope.GLOBAL` (BPM, Input Trim, Cab Sim
-Bypass, Tempo Source, Tuning Reference, Bypass, Master Volume).
+## 2. The 109 parameters: banked structure, not a flat list
 
-**Flag for the lead:** when S6's real registry lands, someone (S6, D3, or
-a follow-up to D2) needs to reconcile the illustrative categories/counts
-here against the real 109 names. I do not consider this mockup's category
-list a spec — it's a demonstration that *a* sensible grouping exists and
-fits the space, not a claim about which specific parameter lands in which
-bucket.
+**This is the section that changed most.** The lead's recovered table
+established four confirmed facts that Revision 1 didn't know:
 
-## 3. Snapshot / revert / first-write-warning
+| Selector | Options | Params total | Live at once |
+|---|---|---|---|
+| `RVB MODEL` | Spring 1–4, Room, Plate (6) | 1 selector + 24 (6 × T/P/C/M) | 4 |
+| `MOD MODEL` | Chorus, Tremolo, Phaser, Flanger, Rotary (5) | 1 selector + 28 | 5–6 |
+| `DLY MODEL` | Digital, Tape (2) | 1 selector + 12 (6 each) | 6 |
+| `MDL CAB` | Tone Model / VIR / Disabled (3) | 1 selector + 9 (VIR mic block) | 0 or 9 |
+
+64 of 109 parameters belong to these four banks; only one model per
+selector is ever live, so real live count is roughly 52–61 of 109
+depending on which models and cabinet mode a preset uses — not 109.
+
+**Information-architecture consequence:** a flat, always-visible list
+would have been actively wrong here, not just cluttered — it would show
+(for example) four "Spring 2" parameters that do nothing while Plate is
+selected, and a player could edit them believing they're editing the live
+sound. The parameter editor (screen 2c) now renders a **model-selector
+chip row** at the top of each banked group's accordion body; choosing a
+chip swaps which block of parameters renders beneath it, and the other
+models' parameters are not rendered at all — no grayed-out rows. Cabinet
+gets the same treatment for its VIR mic sub-block: 4 always-on core
+params (Low Cut, High Cut, Resonance, Air) plus the 9 VIR-specific mic
+params, shown only when Cabinet mode = VIR.
+
+**Reconsideration prompted by the smaller live count:** in Revision 1 I
+reasoned the quick tier's 6-item ceiling was necessary specifically to
+avoid a "wall of 109 sliders." With the real live count closer to
+52–61 — and, more importantly, with most of that total now organized into
+4–9-parameter *blocks* behind a single selector rather than 109
+independent rows — a well-organized full editor is more viable than
+either the story brief or I assumed going in. I did **not** loosen the
+quick-tier ceiling because of this: the six promoted items (§1) were
+chosen for "what a guitarist's hand already knows how to reach for," a
+criterion that has nothing to do with how many parameters technically
+exist. But it does mean I'm less worried than I was that the "buried"
+tier is a bad experience — hiding inactive banks turns a 109-parameter
+space into effectively ~11 category taps, each showing at most ~14 rows
+(Cabinet, the largest, sized because of its VIR block). That's a much
+smaller information-architecture problem than "109 flat sliders," and
+worth the lead knowing I updated my own mental model on, not just the
+mockup.
+
+**Category totals reconcile exactly to 109** across 11 preset-scoped
+groups: Noise Gate 3, Compressor 4, Tone Model 7, Cabinet 14 (1 selector
++ 4 core + 9 VIR), EQ 3, Power Amp 5, Modulation 29 (1 + 28), Delay 13
+(1 + 12), Reverb 25 (1 + 24), FX Loop 3, Expression/Wah 3 — plus the 7
+confirmed globals = 116 total, matching the issue's own number.
+
+**What's confirmed vs. still illustrative**, to be precise about
+provenance:
+
+- **Confirmed, used verbatim:** the four selectors' option lists and
+  param-per-model counts (table above); `MDL GAIN` (idx 20), `EQ BASS`
+  (idx 11), `EQ MID` (idx 13), `EQ TREBLE` (idx 16); `NG THRESH`; the
+  `MOD RO S` collision at indices 88/90 (Rotary Sync and Rotary Speed);
+  `VIR M1Z`; `MDL CABU`; and the 7 global names.
+- **Still illustrative:** which specific leaf parameters make up Noise
+  Gate's other 2, Compressor's 4, Tone Model's other 6, Power Amp's 5, FX
+  Loop's 3, Expression/Wah's 3, Cabinet's 4 non-VIR core params, and the
+  specific per-model parameter names within Reverb/Modulation/Delay
+  beyond what the lead confirmed (e.g. I invented "Character" for
+  reverb's `C` slot, matching the given T/P/C/M shape, but did not
+  confirm that letter means "Character" specifically). These were sized
+  to keep the category math consistent with the confirmed banked totals,
+  not sourced from a real recovered table — S6/D3 still owns closing this
+  out. I did not use the `:protocol` registry as an import (it isn't
+  merged) and worked only from the facts given directly.
+- **One deliberate non-guess:** `MDL CABU` is shown in the mockup with
+  its raw abbreviation as the primary text and no invented human label —
+  I could not confidently expand it from the information given, and
+  showing a wrong label would be worse than admitting it isn't understood
+  yet. This is also the fallback behavior the label layer should have
+  generally (§3): show the raw abbreviation when confidence is low,
+  rather than a fluent-sounding guess.
+
+## 3. Human-readable labels over the pedal's raw abbreviations
+
+The pedal's own parameter names are terse hardware-screen abbreviations —
+`NG THRESH`, `MDL CABU`, `VIR M1Z`, `MOD RO S` — and at least one pair is
+not even unique: indices 88 and 90 are both literally `MOD RO S` (Rotary
+Sync and Rotary Speed). That's upstream truth, confirmed by the lead, not
+a bug to route around.
+
+Every parameter row in the mockup now carries two lines: a human-readable
+label as the primary text, and the raw pedal abbreviation underneath in a
+small monospace caption (`.pedal-abbr` in the CSS) — the same visual
+treatment already used for "from pedal: PRESET 07" on the preset-list
+screen, extended rather than reinvented. This does two things at once:
+
+1. **Makes the pedal's abbreviation discoverable**, per the lead's
+   instruction — a player cross-referencing the hardware screen will
+   search for `MOD RO S`, not "Rotary Speed," so the raw string has to
+   stay visible somewhere, not be replaced.
+2. **Disambiguates what the abbreviation alone cannot.** The Modulation
+   block (screen 2c) shows the Rotary model expanded specifically to
+   demonstrate the `MOD RO S` collision: both rows show the identical
+   abbreviation, colored with `status.error` and flagged in a bank-note
+   explaining that the label layer must be keyed by **wire index**, not
+   by parsing the abbreviation string, or Sync and Speed will silently
+   get conflated. (This is the one deliberate non-connection use of
+   `status.error` in the mockup — flagging a genuine data-integrity
+   hazard the implementation must not get wrong, which I judged distinct
+   enough from both "connection error" and "destructive action" to be a
+   defensible third use of the same token; flagged for the lead to
+   confirm rather than assumed.)
+
+The principle is demonstrated on every parameter actually shown in this
+mockup — the full quick tier, and every expanded block in screen 2c
+(Noise Gate, Tone Model, Cabinet/VIR, EQ, Modulation/Rotary, Delay/
+Digital, Reverb/Plate) — which per the lead's instruction is the scope
+asked for, not all 109. Extending it to the remaining collapsed
+categories is S17's job once the real registry lands; the pattern here is
+meant to be copy-pasteable, not a one-off.
+
+## 4. Snapshot / revert / first-write-warning
 
 Two things I resolved by reading `protocol/` (read-only — I did not touch
 it) that shifted the design slightly from the story's own framing:
@@ -148,7 +303,7 @@ token (e.g. `color.status.destructive`, or an explicit ruling that
 `status.error` may double for it) — I did not invent one, per the
 brief's instruction to stop and flag rather than invent.
 
-## 4. Connection states
+## 5. Connection states
 
 D1 pins four states; `protocol/`'s actual `ConnectionState` sealed
 interface has six (`Idle`, `Connecting`, `Hello`, `GetState`, `Ready`,
@@ -174,7 +329,7 @@ to "design the unhappy paths properly." The error banner uses a realistic
 `TransportFailure` message shape (`"Transport failure: <cause>"`) matching
 `TonexError.kt`'s actual message format, not a placeholder string.
 
-## 5. Contrast — what I actually checked
+## 6. Contrast — what I actually checked
 
 D1 §2.4 verifies a specific set of pairs. Several pairs used in this
 mockup aren't in that table (e.g. secondary/tertiary text on
@@ -205,7 +360,7 @@ mockup — I kept error-colored text on `surface.base` or `raised-1` only
 only for the error glyph, which is graphical (3:1 floor). Flagging the
 number anyway since it's the tightest margin I found.
 
-## 6. Other assumptions, flagged
+## 7. Other assumptions, flagged
 
 - **Viewport width.** Neither D1 nor the issue states the Pixel 10 Pro's
   exact dp width. I assumed ~412dp (typical of recent Pixel Pro-class
@@ -226,16 +381,28 @@ number anyway since it's the tightest margin I found.
   semantics, connection-state shape, error message format) was read, not
   written.
 
-## 7. Summary of what needs a decision
+## 8. Summary of what needs a decision
 
 1. Confirm or correct the 6 promoted quick-tier parameters (§1) —
    specifically whether Noise Gate Threshold should swap in for one of
    the six.
-2. Decide whether Master Volume needs a persistent, always-reachable
-   control of its own beyond "inside the global settings list" (§1).
+2. ~~Decide whether Master Volume needs a persistent, always-reachable
+   control~~ — resolved this pass: built as a persistent dock (§1).
+   Confirm the 0–10-primary/dB-secondary display choice and flag if the
+   assumed linear dB conversion is materially wrong once S7 defines the
+   real curve.
 3. Rule on whether D1 needs a `color.status.destructive` token, or
-   whether the placement/hierarchy-only approach to the revert flow (§3)
-   is sufficient as designed.
+   whether the placement/hierarchy-only approach to the revert flow (§4)
+   is sufficient as designed. Also confirm the one non-connection use of
+   `status.error` introduced this pass — flagging the `MOD RO S`
+   duplicate-abbreviation collision (§3) — is an acceptable third use of
+   that token, or should be styled differently.
 4. Nothing here should be treated as the final 109-parameter taxonomy
-   (§2) — that's D3's job; this mockup only proves the tiering pattern
-   fits and reads well.
+   (§2) — that's D3's/S6's job. The four banked-model groups (Reverb,
+   Modulation, Delay, Cabinet-VIR) and the confirmed leaf names (§2,
+   §3) are load-bearing; everything else is still illustrative,
+   sized only to keep the category math consistent with 109.
+5. `MDL CABU` (§2, §3) could not be confidently expanded to a human label
+   from the facts given — shown with its raw abbreviation and no guessed
+   name. If the lead knows what it means, that's a one-line fix; otherwise
+   it's a question for S6/firmware docs.
