@@ -77,8 +77,14 @@ enum class ParameterType {
  *
  * @property id this parameter's wire position; see [ParameterId].
  * @property scope whether this is a per-preset or a global parameter.
- * @property name the parameter's short upstream name (e.g. `"GATE_THRESH"`), for logging/lookup
- *   — not necessarily fit for direct UI display.
+ * @property name the parameter's abbreviated display string from the upstream table (e.g.
+ *   `"NG THRESH"`), exactly as the pedal uses it on its small hardware screen. This string is
+ *   **not unique** across all parameters — some abbreviations collide (e.g., `"MOD RO S"` for
+ *   both SYNC and SPEED). Use [enumName] for unique identification, and `name` only for display.
+ * @property enumName the upstream parameter's unique stable identifier, from the trailing enum
+ *   comment without the `TONEX_PARAM_` or `TONEX_GLOBAL_` prefix (e.g., `"NOISE_GATE_THRESHOLD"`,
+ *   `"MASTER_VOLUME"`). This **is unique** and should be used for lookups, logging, and
+ *   persisted data keys — not `name`.
  * @property type see [ParameterType].
  * @property min the lowest legal value, in this parameter's engineering units (see [unit]).
  *   **This, not [default], is load-bearing**: upstream clamps to `min`/`max` and (for some UI
@@ -101,6 +107,7 @@ data class ParameterSpec(
     val id: ParameterId,
     val scope: ParameterScope,
     val name: String,
+    val enumName: String,
     val type: ParameterType,
     val min: Float,
     val max: Float,
