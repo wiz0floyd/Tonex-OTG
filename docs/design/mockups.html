@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tonex-OTG — D2 Screen Mockups</title>
+<style>
+/* ============================================================
+   TOKENS — copied verbatim from docs/design/ui-design-tokens.md (D1).
+   No color, size, or spacing value below exists that is not in that
+   document. If you go looking for a value and can't find its token
+   name in a comment, that's a bug in this file, not a new decision.
+   ============================================================ */
+:root{
+  /* 2.1 surfaces & content */
+  --surface-base:#121212;
+  --surface-raised-1:#1D1D1D;
+  --surface-raised-2:#262626;
+  --surface-raised-3:#303030;
+  --on-surface-primary:#FFFFFF;
+  --on-surface-secondary:#E0E0E0;
+  --on-surface-tertiary:#9E9E9E;
+  --on-surface-disabled:#6B6B6B;
+  /* 2.2 accent */
+  --accent-primary:#52B8FF;
+  --on-accent:#121212;
+  /* 2.3 connection status */
+  --status-connected:#34D177;
+  --status-connecting:#52B8FF; /* = accent-primary, per D1 */
+  --status-disconnected:#9AA0A6;
+  --status-error:#FF5252;
+  --on-status:#121212;
+
+  /* 3. type scale — sp treated as 1:1 css px in this static mockup */
+  --type-display-preset-size:57px;
+  --type-display-preset-lh:64px;
+  --type-display-index-size:45px;
+  --type-display-index-lh:52px;
+  --type-headline-size:24px;
+  --type-headline-lh:32px;
+  --type-title-size:22px;
+  --type-title-lh:28px;
+  --type-body-large-size:18px;
+  --type-body-large-lh:26px;
+  --type-body-size:16px;
+  --type-body-lh:22px;
+  --type-label-size:16px;
+  --type-label-lh:20px;
+  --type-caption-size:13px;
+  --type-caption-lh:18px;
+
+  /* 4.1 spacing — dp treated as 1:1 css px */
+  --space-0-5:4px;
+  --space-1:8px;
+  --space-2:12px;
+  --space-3:16px;
+  --space-4:24px;
+  --space-5:32px;
+  --space-6:48px;
+  --space-7:64px;
+
+  /* 4.2 touch targets */
+  --touch-min:64px;
+  --touch-secondary:48px;
+  --touch-gap:8px;
+
+  /* 5. motion */
+  --motion-fast:100ms;
+  --motion-standard:150ms;
+  --motion-easing:cubic-bezier(0.2,0,0,1);
+
+  /* Reviewer-facing annotation chrome (page meta, not app UI) is built
+     entirely from the D1 tokens above — no additional colors are defined.
+     --meta-bg reuses surface.base itself; --meta-border is on-surface.disabled
+     at reduced alpha, used only as a hairline divider between meta and
+     screen content. */
+  --meta-bg:var(--surface-base);
+  --meta-border:rgba(107,107,107,0.4); /* on-surface.disabled #6B6B6B @ 40% — divider only */
+}
+
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--surface-base);
+  color:var(--on-surface-secondary);
+  font-family:Roboto,"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+img,svg{max-width:100%;}
+.page{
+  max-width:412px; /* assumed Pixel-Pro-class dp width — see mockups.md open question */
+  margin:0 auto;
+  overflow-x:hidden;
+}
+@media (min-width:900px){
+  .page{max-width:412px;} /* deliberately NOT widened on desktop: reviewing at phone width is the point */
+  body{padding:var(--space-4) 0;}
+}
+
+/* ---------- meta / page chrome (not part of the app) ---------- */
+.meta-header{
+  padding:var(--space-4) var(--space-3);
+  background:var(--meta-bg);
+  border-bottom:1px solid var(--meta-border);
+}
+.meta-header h1{
+  font-size:var(--type-headline-size);
+  line-height:var(--type-headline-lh);
+  font-weight:600;
+  margin:0 0 var(--space-1);
+  color:var(--on-surface-primary);
+}
+.meta-header p{
+  font-size:var(--type-body-size);
+  line-height:var(--type-body-lh);
+  color:var(--on-surface-tertiary);
+  margin:0 0 var(--space-1);
+}
+.meta-header .badge{
+  display:inline-block;
+  font-size:var(--type-caption-size);
+  line-height:var(--type-caption-lh);
+  color:var(--on-accent);
+  background:var(--accent-primary);
+  padding:2px var(--space-1);
+  border-radius:4px;
+  font-weight:600;
+  margin-right:var(--space-1);
+}
+
+.screen-label{
+  padding:var(--space-4) var(--space-3) var(--space-1);
+  background:var(--meta-bg);
+}
+.screen-label .num{
+  color:var(--on-accent);
+  background:var(--accent-primary);
+  border-radius:50%;
+  width:28px;height:28px;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:var(--type-body-size);
+  font-weight:700;
+  margin-right:var(--space-1);
+  vertical-align:middle;
+}
+.screen-label h2{
+  display:inline;
+  font-size:var(--type-title-size);
+  line-height:var(--type-title-lh);
+  font-weight:500;
+  color:var(--on-surface-primary);
+  vertical-align:middle;
+}
+.screen-label .sub{
+  display:block;
+  margin:var(--space-1) 0 0 36px;
+  font-size:var(--type-body-size);
+  color:var(--on-surface-tertiary);
+  line-height:var(--type-body-lh);
+}
+
+/* ---------- the actual app-screen mock ---------- */
+.screen{
+  background:var(--surface-base);
+  border-top:1px solid var(--meta-border);
+  border-bottom:1px solid var(--meta-border);
+  position:relative;
+}
+.sysbar{
+  height:24px;
+  background:var(--surface-base);
+}
+.sysbar .caption{
+  font-size:10px;color:var(--on-surface-disabled);
+  text-align:center;line-height:24px;letter-spacing:.04em;
+}
+
+/* ---------- annotation panel ---------- */
+.annotate{
+  padding:var(--space-3);
+  background:var(--meta-bg);
+  border-bottom:1px solid var(--meta-border);
+}
+.annotate h3{
+  font-size:var(--type-caption-size);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--on-surface-tertiary);
+  margin:0 0 var(--space-1);
+  font-weight:600;
+}
+.annotate ul{
+  margin:0 0 var(--space-2);
+  padding-left:var(--space-3);
+  font-size:var(--type-body-size);
+  line-height:var(--type-body-lh);
+  color:var(--on-surface-secondary);
+}
+.annotate ul:last-child{margin-bottom:0;}
+.annotate li{margin-bottom:2px;}
+.annotate code{
+  font-family:"SF Mono",SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;
+  font-size:12px;
+  color:var(--accent-primary);
+  background:rgba(82,184,255,0.08);
+  padding:1px 4px;
+  border-radius:3px;
+}
+.annotate .pass{color:var(--status-connected);font-weight:600;}
+.annotate .flag{
+  border-left:3px solid var(--accent-primary);
+  padding:var(--space-1) var(--space-2);
+  margin-top:var(--space-2);
+  background:rgba(82,184,255,0.06); /* accent.primary #52B8FF @ low alpha — same token, not a new color */
+  font-size:var(--type-body-size);
+  color:var(--on-surface-secondary);
+}
+.annotate .flag b{color:var(--accent-primary);}
+
+/* ---------- app-bar ---------- */
+.appbar{
+  display:flex;align-items:center;
+  min-height:var(--touch-secondary);
+  padding:0 var(--space-3);
+  background:var(--surface-raised-1);
+  gap:var(--space-2);
+}
+.appbar .title{
+  font-size:var(--type-title-size);
+  line-height:var(--type-title-lh);
+  font-weight:500;
+  color:var(--on-surface-primary);
+  flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.icon-btn{
+  width:var(--touch-secondary);height:var(--touch-secondary);
+  display:flex;align-items:center;justify-content:center;
+  color:var(--on-surface-secondary);
+  font-size:20px;
+  border-radius:8px;
+  flex-shrink:0;
+}
+.icon-btn.perf{width:var(--touch-min);height:var(--touch-min);}
+
+/* connection chip — shape+color+text, D1 §2.3 */
+.status-chip{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:var(--type-body-size);
+  line-height:var(--type-body-lh);
+  font-weight:600;
+  padding:2px var(--space-1) 2px 2px;
+  border-radius:16px;
+  white-space:nowrap;
+}
+.status-glyph{width:14px;height:14px;flex-shrink:0;display:inline-block;}
+.status-connected .status-glyph{background:var(--status-connected);border-radius:50%;}
+.status-connected{color:var(--status-connected);}
+.status-connecting .status-glyph{border:2px solid var(--status-connecting);border-radius:50%;background:transparent;}
+.status-connecting{color:var(--status-connecting);}
+.status-disconnected .status-glyph{border:2px solid var(--status-disconnected);border-radius:50%;background:transparent;}
+.status-disconnected{color:var(--status-disconnected);}
+.status-error .status-glyph{
+  background:var(--status-error);
+  clip-path:polygon(50% 6%, 95% 92%, 5% 92%);
+}
+.status-error{color:var(--status-error);}
+
+/* ---------- preset list screen ---------- */
+.now-playing{
+  margin:var(--space-3);
+  padding:var(--space-4) var(--space-3);
+  background:var(--surface-raised-1);
+  border-radius:12px;
+  border-left:4px solid var(--accent-primary);
+}
+.now-playing .eyebrow{
+  font-size:var(--type-caption-size);
+  line-height:var(--type-caption-lh);
+  color:var(--on-surface-tertiary);
+  text-transform:uppercase;letter-spacing:.08em;
+  margin-bottom:var(--space-1);
+}
+.now-playing .row{display:flex;align-items:baseline;gap:var(--space-2);}
+.now-playing .idx{
+  font-size:var(--type-display-index-size);
+  line-height:var(--type-display-index-lh);
+  font-weight:700;
+  color:var(--on-surface-tertiary);
+}
+.now-playing .name{
+  font-size:var(--type-display-preset-size);
+  line-height:var(--type-display-preset-lh);
+  font-weight:700;
+  color:var(--on-surface-primary);
+  word-break:break-word;
+}
+.now-playing .alias-of{
+  margin-top:var(--space-1);
+  font-size:var(--type-body-size);
+  color:var(--on-surface-tertiary);
+}
+
+.preset-list{padding:0 var(--space-3) var(--space-4);}
+.preset-row{
+  display:flex;align-items:center;gap:var(--space-2);
+  min-height:var(--touch-min);
+  padding:var(--space-2) var(--space-2);
+  margin-bottom:var(--touch-gap);
+  background:var(--surface-raised-1);
+  border-radius:10px;
+  border:2px solid transparent;
+}
+.preset-row.active{
+  background:var(--surface-raised-3);
+  border-color:var(--accent-primary);
+}
+.preset-row .num{
+  width:36px;height:36px;flex-shrink:0;
+  border-radius:8px;
+  background:var(--surface-raised-2);
+  display:flex;align-items:center;justify-content:center;
+  font-size:var(--type-body-size);
+  font-weight:600;
+  color:var(--on-surface-tertiary);
+}
+.preset-row.active .num{background:var(--accent-primary);color:var(--on-accent);}
+.preset-row .text{flex:1;min-width:0;}
+.preset-row .primary{
+  font-size:var(--type-title-size);
+  line-height:var(--type-title-lh);
+  font-weight:500;
+  color:var(--on-surface-primary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.preset-row .secondary{
+  font-size:var(--type-caption-size);
+  line-height:var(--type-caption-lh);
+  color:var(--on-surface-tertiary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.preset-row .check{
+  width:24px;height:24px;flex-shrink:0;
+  color:var(--accent-primary);
+  font-size:20px;
+  display:flex;align-items:center;justify-content:center;
+}
+
+/* ---------- parameter editor ---------- */
+.section-label{
+  padding:var(--space-3) var(--space-3) var(--space-1);
+  font-size:var(--type-caption-size);
+  letter-spacing:.08em;text-transform:uppercase;
+  color:var(--on-surface-tertiary);
+  font-weight:600;
+}
+.section-hint{
+  padding:0 var(--space-3) var(--space-2);
+  font-size:var(--type-body-size);
+  color:var(--on-surface-tertiary);
+  line-height:var(--type-body-lh);
+}
+.param-card{
+  margin:0 var(--space-3) var(--space-2);
+  padding:var(--space-3);
+  background:var(--surface-raised-2);
+  border-radius:12px;
+}
+.param-card .row1{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);margin-bottom:var(--space-1);}
+.param-card .pname{
+  font-size:var(--type-body-large-size);
+  line-height:var(--type-body-large-lh);
+  color:var(--on-surface-secondary);
+  font-weight:400;
+}
+.param-value{
+  display:flex;align-items:center;justify-content:center;
+  min-width:var(--touch-secondary);height:var(--touch-secondary);
+  padding:0 var(--space-2);
+  border-radius:8px;
+  background:var(--surface-raised-3);
+  font-size:var(--type-title-size);
+  font-weight:700;
+  color:var(--on-surface-primary);
+  font-variant-numeric:tabular-nums;
+}
+
+/* pedal-side abbreviation, shown under every human label so a player
+   cross-referencing the hardware screen can still find "NG THRESH" —
+   this is app UI, not meta chrome, so it uses on-surface tokens, not
+   the annotation-only <code> styling used elsewhere in this file. */
+.pedal-abbr{
+  font-family:"SF Mono",SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;
+  font-size:var(--type-caption-size);
+  line-height:var(--type-caption-lh);
+  color:var(--on-surface-tertiary);
+  letter-spacing:.02em;
+}
+.resolves-to{
+  font-size:var(--type-caption-size);
+  line-height:var(--type-caption-lh);
+  color:var(--accent-primary);
+  margin-top:2px;
+}
+
+/* banked-model selector: shown at the top of a mutually-exclusive block
+   (Reverb / Modulation / Delay / Cabinet-VIR). Choosing a chip swaps
+   which parameter block is rendered below it — the others are not
+   shown at all, not grayed out. */
+.model-selector{
+  display:flex;flex-wrap:wrap;gap:var(--space-1);
+  padding:var(--space-2) var(--space-3);
+}
+.model-chip{
+  min-height:var(--touch-secondary);
+  padding:0 var(--space-2);
+  border-radius:20px;
+  display:flex;align-items:center;
+  font-size:var(--type-body-size);
+  font-weight:600;
+  color:var(--on-surface-secondary);
+  background:var(--surface-raised-2);
+  border:1.5px solid transparent;
+}
+.model-chip.active{
+  background:var(--accent-primary);
+  color:var(--on-accent);
+}
+.bank-note{
+  padding:0 var(--space-3) var(--space-1);
+  font-size:var(--type-caption-size);
+  line-height:var(--type-caption-lh);
+  color:var(--on-surface-tertiary);
+}
+
+/* Master Volume — persistent, global, always reachable. Uses surface.raised-1,
+   the same token D1 assigns to "top app bar, bottom bar" (§2.1) — deliberately
+   NOT surface.raised-2 (the per-preset param-card token), so its global scope
+   stays visually distinct from anything preset-scoped, exactly as the
+   preset-list/param-editor split already established. */
+.mv-dock{
+  position:sticky;bottom:0;
+  display:flex;align-items:center;gap:var(--space-2);
+  min-height:var(--touch-min);
+  padding:var(--space-1) var(--space-3);
+  background:var(--surface-raised-1);
+  border-top:1px solid var(--meta-border);
+}
+.mv-dock .mv-label{flex:0 0 auto;}
+.mv-dock .mv-tag{
+  display:block;
+  font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--on-surface-tertiary);
+  font-weight:600;
+}
+.mv-dock .mv-name{
+  font-size:var(--type-body-large-size);
+  color:var(--on-surface-primary);
+  font-weight:500;
+}
+.mv-dock .mv-slider{flex:1;}
+.mv-dock .mv-readout{
+  flex:0 0 auto;text-align:right;
+}
+.mv-dock .mv-primary{
+  font-size:var(--type-title-size);
+  font-weight:700;
+  color:var(--on-surface-primary);
+  font-variant-numeric:tabular-nums;
+}
+.mv-dock .mv-secondary{
+  font-size:11px;
+  color:var(--on-surface-tertiary);
+  font-variant-numeric:tabular-nums;
+}
+.slider-wrap{
+  position:relative;
+  height:var(--touch-min); /* full 64dp tap band around the thumb, per D1 §4.2 */
+  display:flex;align-items:center;
+}
+.slider-track{
+  position:relative;width:100%;height:8px;border-radius:4px;
+  background:var(--surface-raised-3);
+}
+.slider-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--accent-primary);}
+.slider-thumb{
+  position:absolute;top:50%;
+  width:28px;height:28px;border-radius:50%;
+  background:var(--accent-primary);
+  border:3px solid var(--surface-base);
+  transform:translate(-50%,-50%);
+}
+.slider-minmax{display:flex;justify-content:space-between;font-size:var(--type-caption-size);color:var(--on-surface-disabled);padding:0 2px;}
+
+.accordion{
+  margin:0 var(--space-3) var(--space-2);
+  background:var(--surface-raised-1);
+  border-radius:10px;
+  overflow:hidden;
+}
+.accordion-head{
+  display:flex;align-items:center;gap:var(--space-2);
+  min-height:var(--touch-secondary);
+  padding:var(--space-1) var(--space-3);
+}
+.accordion-head .cname{
+  flex:1;
+  font-size:var(--type-body-large-size);
+  color:var(--on-surface-primary);
+  font-weight:500;
+}
+.accordion-head .ccount{
+  font-size:var(--type-caption-size);
+  color:var(--on-surface-tertiary);
+}
+.accordion-head .chev{color:var(--on-surface-tertiary);font-size:14px;}
+.accordion-body{
+  border-top:1px solid var(--surface-raised-2);
+  padding:var(--space-1) 0;
+}
+.mini-row{
+  display:flex;align-items:center;gap:var(--space-2);
+  min-height:var(--touch-secondary);
+  padding:0 var(--space-3);
+}
+.mini-row .mname{
+  flex:1;
+  font-size:var(--type-body-size);
+  color:var(--on-surface-secondary);
+}
+.mini-row .mval{
+  font-size:var(--type-body-size);
+  color:var(--on-surface-tertiary);
+  font-variant-numeric:tabular-nums;
+}
+.mini-row .promoted{
+  font-size:11px;
+  color:var(--accent-primary);
+  border:1px solid var(--accent-primary);
+  border-radius:4px;
+  padding:1px 4px;
+  margin-left:var(--space-1);
+}
+/* Marks a label that is inferred, unconfirmed, or flagged for hardware
+   verification (S20) — deliberately the quietest token available
+   (on-surface.disabled), not status.error: this is a provenance note for
+   whoever built the mockup to read, not a problem for the player to react
+   to on stage. */
+.illustrative-tag{
+  font-size:11px;
+  color:var(--on-surface-disabled);
+  border:1px solid var(--on-surface-disabled);
+  border-radius:4px;
+  padding:1px 4px;
+  margin-left:var(--space-1);
+}
+.mini-row.switch .mval{
+  width:36px;height:20px;border-radius:10px;background:var(--surface-raised-3);position:relative;
+}
+.mini-row.switch.on .mval{background:var(--accent-primary);}
+.mini-row.switch .mval::after{
+  content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--on-surface-secondary);
+}
+.mini-row.switch.on .mval::after{left:18px;background:var(--on-accent);}
+
+/* numeric-entry keypad sheet */
+.keypad-sheet{
+  margin:0 var(--space-3);
+  background:var(--surface-raised-2);
+  border-radius:16px 16px 0 0;
+  padding:var(--space-3);
+}
+.keypad-sheet .grabber{width:36px;height:4px;border-radius:2px;background:var(--surface-raised-3);margin:0 auto var(--space-3);}
+.keypad-sheet .field{
+  display:flex;align-items:baseline;justify-content:center;gap:4px;
+  margin-bottom:var(--space-3);
+}
+.keypad-sheet .field input-like{font:inherit;}
+.keypad-sheet .field .n{
+  font-size:var(--type-display-index-size);
+  line-height:1;
+  font-weight:700;
+  color:var(--on-surface-primary);
+  border-bottom:3px solid var(--accent-primary);
+  padding:0 var(--space-1) 4px;
+  min-width:64px;text-align:center;
+}
+.keypad-sheet .field .u{font-size:var(--type-body-large-size);color:var(--on-surface-tertiary);}
+.keypad-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-1);}
+.key{
+  height:var(--touch-min);
+  border-radius:10px;
+  background:var(--surface-raised-3);
+  display:flex;align-items:center;justify-content:center;
+  font-size:var(--type-title-size);
+  color:var(--on-surface-primary);
+  font-weight:500;
+}
+.key.wide{grid-column:span 1;}
+.keypad-actions{display:flex;gap:var(--space-2);margin-top:var(--space-3);}
+
+/* ---------- buttons ---------- */
+.btn{
+  display:flex;align-items:center;justify-content:center;
+  min-height:var(--touch-secondary);
+  padding:0 var(--space-4);
+  border-radius:10px;
+  font-size:var(--type-label-size);
+  line-height:var(--type-label-lh);
+  font-weight:600;
+  flex:1;
+}
+.btn-primary{background:var(--accent-primary);color:var(--on-accent);}
+.btn-outline{background:transparent;color:var(--on-surface-secondary);border:1.5px solid var(--surface-raised-3);}
+.btn-tall{min-height:var(--touch-min);}
+
+/* ---------- banners / dialogs ---------- */
+.banner{
+  margin:var(--space-3);
+  padding:var(--space-3);
+  border-radius:12px;
+  background:var(--surface-raised-1);
+}
+.banner-head{display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-1);}
+.banner-head .glyph{width:22px;height:22px;flex-shrink:0;}
+.banner .btitle{font-size:var(--type-body-large-size);font-weight:600;color:var(--on-surface-primary);}
+.banner .bbody{font-size:var(--type-body-size);line-height:var(--type-body-lh);color:var(--on-surface-secondary);margin:0 0 var(--space-2);}
+.banner .bactions{display:flex;gap:var(--space-2);}
+
+.dialog-scrim{
+  background:var(--surface-base);
+  padding:var(--space-4) var(--space-3);
+  display:flex;align-items:flex-end;min-height:340px;
+}
+.dialog{
+  width:100%;
+  background:var(--surface-raised-2);
+  border-radius:16px;
+  padding:var(--space-4) var(--space-3) var(--space-3);
+}
+.dialog h4{
+  font-size:var(--type-headline-size);
+  line-height:var(--type-headline-lh);
+  color:var(--on-surface-primary);
+  margin:0 0 var(--space-2);
+  font-weight:600;
+}
+.dialog p{
+  font-size:var(--type-body-size);
+  line-height:var(--type-body-lh);
+  color:var(--on-surface-secondary);
+  margin:0 0 var(--space-3);
+}
+.dialog p strong{color:var(--on-surface-primary);}
+.dialog .actions{display:flex;gap:var(--space-2);}
+.dialog .actions .btn{flex:1;}
+
+.snapshot-pill{
+  display:flex;align-items:center;gap:var(--space-1);
+  min-height:var(--touch-secondary);
+  padding:0 var(--space-2);
+  border-radius:20px;
+  background:var(--surface-raised-1);
+  font-size:var(--type-body-size);
+  color:var(--on-surface-secondary);
+  width:fit-content;
+  margin:var(--space-2) var(--space-3);
+}
+.snapshot-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--accent-primary);flex-shrink:0;}
+.snapshot-pill.clean .dot{background:var(--on-surface-disabled);}
+
+/* ---------- about / credits ---------- */
+.about-hero{text-align:center;padding:var(--space-5) var(--space-3) var(--space-3);}
+.about-hero .appname{
+  font-size:var(--type-headline-size);
+  line-height:var(--type-headline-lh);
+  font-weight:700;
+  color:var(--on-surface-primary);
+}
+.about-hero .ver{
+  font-size:var(--type-caption-size);
+  color:var(--on-surface-tertiary);
+  margin-top:2px;
+}
+.credits-block{
+  margin:0 var(--space-3) var(--space-4);
+  padding:var(--space-3);
+  background:var(--surface-raised-1);
+  border-radius:12px;
+}
+.credits-block h5{
+  font-size:var(--type-body-large-size);
+  color:var(--on-surface-primary);
+  font-weight:600;
+  margin:0 0 var(--space-1);
+}
+.credits-block .txt{
+  font-size:var(--type-body-size);
+  line-height:var(--type-body-lh);
+  color:var(--on-surface-secondary);
+  white-space:pre-wrap;
+  font-family:inherit;
+  margin:0 0 var(--space-2);
+}
+.credits-block .txt:last-child{margin-bottom:0;}
+
+hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
+.footer-note{
+  padding:var(--space-5) var(--space-3) var(--space-6);
+  font-size:var(--type-body-size);
+  color:var(--on-surface-tertiary);
+  line-height:var(--type-body-lh);
+  background:var(--meta-bg);
+}
+.footer-note code{color:var(--accent-primary);}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="meta-header">
+    <span class="badge">D2</span>
+    <h1>Tonex-OTG — Screen Mockups</h1>
+    <p>Reviewable static mockups for issue #6. Every value below traces to a token in
+      <code style="color:var(--accent-primary)">docs/design/ui-design-tokens.md</code> (D1).
+      This page is itself sized to phone width — the screens below are drawn at their
+      real proportions, edge-to-edge, no device bezel illustration — so touch targets
+      can be judged honestly on a Pixel 10 Pro. Companion rationale: <code style="color:var(--accent-primary)">docs/design/mockups.md</code>.</p>
+    <p style="color:var(--on-surface-disabled);font-size:12px;">Dark-only, per D1 §6 (no light theme exists in v1). Static — no animation
+      beyond what D1 §5 permits; nothing here demonstrates motion since D1 caps it at 150ms and mandates
+      a static connecting glyph.</p>
+  </div>
+
+  <!-- ============================================================
+       SCREEN 1 — PRESET LIST
+       ============================================================ -->
+  <div class="screen-label">
+    <span class="num">1</span><h2>Preset List</h2>
+    <span class="sub">FR4/FR5/FR6 — all 20 onboard presets, active preset unmistakable, local alias layered over the pedal's raw name.</span>
+  </div>
+
+  <div class="screen">
+    <div class="sysbar"><div class="caption">— system status bar area (not app content) —</div></div>
+    <div class="appbar">
+      <div class="title">Presets</div>
+      <span class="status-chip status-connected"><span class="status-glyph"></span>Connected</span>
+      <div class="icon-btn" aria-label="Settings">⚙</div>
+    </div>
+
+    <div class="now-playing">
+      <div class="eyebrow">Now on the pedal</div>
+      <div class="row">
+        <span class="idx">07</span>
+        <span class="name">Set&nbsp;Opener</span>
+      </div>
+      <div class="alias-of">Alias for pedal preset name “PRESET 07”</div>
+    </div>
+
+    <div class="preset-list">
+      <div class="preset-row active">
+        <div class="num">07</div>
+        <div class="text">
+          <div class="primary">Set Opener</div>
+          <div class="secondary">from pedal: PRESET 07</div>
+        </div>
+        <div class="check">✓</div>
+      </div>
+      <div class="preset-row"><div class="num">01</div><div class="text"><div class="primary">CLEAN AMBIENT</div></div></div>
+      <div class="preset-row"><div class="num">02</div><div class="text"><div class="primary">CRUNCH RHYTHM</div></div></div>
+      <div class="preset-row"><div class="num">03</div><div class="text"><div class="primary">BLUES OD</div></div></div>
+      <div class="preset-row"><div class="num">04</div><div class="text"><div class="primary">FUNK CLEAN</div></div></div>
+      <div class="preset-row"><div class="num">05</div><div class="text"><div class="primary">Twang Country</div><div class="secondary">from pedal: PRESET 05</div></div></div>
+      <div class="preset-row"><div class="num">06</div><div class="text"><div class="primary">VOX CHIME</div></div></div>
+      <div class="preset-row"><div class="num">08</div><div class="text"><div class="primary">LEAD BOOST</div></div></div>
+      <div class="preset-row"><div class="num">09</div><div class="text"><div class="primary">SOLO CREAM</div></div></div>
+      <div class="preset-row"><div class="num">10</div><div class="text"><div class="primary">HIGH GAIN WALL</div></div></div>
+      <div class="preset-row"><div class="num">11</div><div class="text"><div class="primary">METAL DROP</div></div></div>
+      <div class="preset-row"><div class="num">12</div><div class="text"><div class="primary">DJENT TIGHT</div></div></div>
+      <div class="preset-row"><div class="num">13</div><div class="text"><div class="primary">ROCK RHYTHM</div></div></div>
+      <div class="preset-row"><div class="num">14</div><div class="text"><div class="primary">SLIDE BLUES</div></div></div>
+      <div class="preset-row"><div class="num">15</div><div class="text"><div class="primary">ACOUSTIC SIM</div></div></div>
+      <div class="preset-row"><div class="num">16</div><div class="text"><div class="primary">CHORUS CLEAN</div></div></div>
+      <div class="preset-row"><div class="num">17</div><div class="text"><div class="primary">AMBIENT DELAY</div></div></div>
+      <div class="preset-row"><div class="num">18</div><div class="text"><div class="primary">BRIDGE CRUNCH</div></div></div>
+      <div class="preset-row"><div class="num">19</div><div class="text"><div class="primary">INTRO CLEAN</div></div></div>
+      <div class="preset-row"><div class="num">20</div><div class="text"><div class="primary">Backup Clean</div><div class="secondary">from pedal: PRESET 20</div></div></div>
+    </div>
+
+    <div class="mv-dock">
+      <div class="mv-label"><span class="mv-tag">Global</span><span class="mv-name">Master Volume</span><span class="pedal-abbr" style="display:block;">MVOL</span></div>
+      <div class="mv-slider"><div class="slider-track"><div class="slider-fill" style="width:75%"></div><div class="slider-thumb" style="left:75%"></div></div></div>
+      <div class="mv-readout"><div class="mv-primary">7.5</div><div class="mv-secondary">≈ &minus;6.8 dB</div></div>
+    </div>
+  </div>
+
+  <div class="annotate">
+    <h3>Tokens in play</h3>
+    <ul>
+      <li>Colors: <code>surface.base</code>, <code>surface.raised-1</code> (rows, app bar), <code>surface.raised-3</code> (active row fill — this is exactly D1's documented use for raised-3: "pressed/active fill on a raised-1 element"), <code>accent.primary</code> (selection ring + index badge fill), <code>status.connected</code> (app-bar chip).</li>
+      <li>Type: <code>type.display.preset</code> 57sp/700 for the active preset name — the one non-negotiable tier per D1 §3 — plus <code>type.display.index</code> 45sp for its slot number, <code>type.title</code> 22sp for list rows, <code>type.caption</code> 13sp for the "from pedal:" provenance line and alias sub-line.</li>
+      <li>Spacing: <code>space.3</code> (16dp) content padding, <code>touch.target.spacing</code> (8dp) gap between rows.</li>
+    </ul>
+    <h3>Touch targets</h3>
+    <ul>
+      <li>Each preset row: <code>touch.target.min</code> = <b>64dp</b> tall (measured, including the active row) — a preset switch is the single most performance-critical action in the app. <span class="pass">Pass.</span></li>
+      <li>Row-to-row gap: 8dp, matching <code>touch.target.spacing</code>, so a mis-tap at arm's length can't land on the neighboring preset. <span class="pass">Pass.</span></li>
+      <li>Settings gear (top-right): <code>touch.target.secondary</code> = 48dp — correct, it's overflow chrome never touched mid-song.</li>
+      <li><b>Master Volume dock</b> (bottom, new in this revision): the whole bar is <code>touch.target.min</code> 64dp tall — this is the single most stage-critical control in the app (matching volume between songs), so it gets the largest tier even though it's chrome rather than a preset action. <span class="pass">Pass.</span></li>
+    </ul>
+    <div class="flag"><b>Design call:</b> alias is shown as the row's primary text with the raw pedal name demoted to a caption underneath, rather than showing both at equal weight or hiding the raw name entirely — the raw name is read-only ground truth from the pedal, so it stays visible but subordinate. Presets without an alias just show the raw pedal name as primary text (rows 01–04, 06, 08–19 above).</div>
+    <div class="flag"><b>Master Volume, revised this pass:</b> pinned to the bottom of every screen (shown here and on the parameter editor, screen 2) using <code>surface.raised-1</code> — the exact token D1 assigns to "top app bar, bottom bar" (§2.1) — deliberately not <code>surface.raised-2</code>, the per-preset param-card token, so its global scope reads as chrome, not as "part of this preset." The primary numeral is the pedal's own 0–10 scale (matches what's printed on the hardware screen — no new mental model to learn); the true engineering range (&minus;40..+3 dB, confirmed in <code>ParameterSpec</code>'s doc comment) is shown small underneath for anyone cross-referencing firmware docs. Conversion assumed linear (dB = &minus;40 + value/10 × 43) for this mockup only — flagged in mockups.md as unconfirmed against the pedal's actual curve.</div>
+  </div>
+
+  <!-- ============================================================
+       SCREEN 2 — PARAMETER EDITOR
+       ============================================================ -->
+  <div class="screen-label">
+    <span class="num">2</span><h2>Parameter Editor — Quick Tier</h2>
+    <span class="sub">FR9 — slider + exact numeric entry. 6 parameters promoted out of 109; see mockups.md for why these six.</span>
+  </div>
+
+  <div class="screen">
+    <div class="sysbar"><div class="caption">— system status bar area —</div></div>
+    <div class="appbar">
+      <div class="icon-btn" aria-label="Back">←</div>
+      <div class="title">Set Opener</div>
+      <span class="status-chip status-connected"><span class="status-glyph"></span>Connected</span>
+    </div>
+
+    <div class="snapshot-pill">
+      <span class="dot"></span> Snapshot taken when this preset became active · 2 changes since
+    </div>
+
+    <div class="section-label">Quick tier</div>
+    <div class="section-hint">The six controls promoted for stage use. Everything else lives under “All parameters” below.</div>
+
+    <div class="param-card">
+      <div class="row1"><span class="pname">Gain</span><span class="param-value">6.4</span></div>
+      <div class="pedal-abbr">MDL GAIN · index 20</div>
+      <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:64%"></div><div class="slider-thumb" style="left:64%"></div></div></div>
+      <div class="slider-minmax"><span>0.0</span><span>10.0</span></div>
+    </div>
+    <div class="param-card">
+      <div class="row1"><span class="pname">Bass</span><span class="param-value">5.0</span></div>
+      <div class="pedal-abbr">EQ BASS · index 11</div>
+      <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:50%"></div><div class="slider-thumb" style="left:50%"></div></div></div>
+      <div class="slider-minmax"><span>0.0</span><span>10.0</span></div>
+    </div>
+    <div class="param-card">
+      <div class="row1"><span class="pname">Mid</span><span class="param-value">4.2</span></div>
+      <div class="pedal-abbr">EQ MID · index 13</div>
+      <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:42%"></div><div class="slider-thumb" style="left:42%"></div></div></div>
+      <div class="slider-minmax"><span>0.0</span><span>10.0</span></div>
+    </div>
+    <div class="param-card">
+      <div class="row1"><span class="pname">Treble</span><span class="param-value">6.8</span></div>
+      <div class="pedal-abbr">EQ TREBLE · index 16</div>
+      <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:68%"></div><div class="slider-thumb" style="left:68%"></div></div></div>
+      <div class="slider-minmax"><span>0.0</span><span>10.0</span></div>
+    </div>
+    <div class="param-card">
+      <div class="row1"><span class="pname">Reverb Mix</span><span class="param-value">28%</span></div>
+      <div class="resolves-to">→ resolves to <span class="pedal-abbr" style="color:inherit;">RVB PL M</span> · Plate model is active</div>
+      <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:28%"></div><div class="slider-thumb" style="left:28%"></div></div></div>
+      <div class="slider-minmax"><span>0%</span><span>100%</span></div>
+    </div>
+    <div class="param-card">
+      <div class="row1"><span class="pname">Delay Mix</span><span class="param-value">15%</span></div>
+      <div class="resolves-to">→ resolves to <span class="pedal-abbr" style="color:inherit;">DLY DT X</span> · Digital model is active</div>
+      <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:15%"></div><div class="slider-thumb" style="left:15%"></div></div></div>
+      <div class="slider-minmax"><span>0%</span><span>100%</span></div>
+    </div>
+
+    <div class="mv-dock">
+      <div class="mv-label"><span class="mv-tag">Global</span><span class="mv-name">Master Volume</span><span class="pedal-abbr" style="display:block;">MVOL</span></div>
+      <div class="mv-slider"><div class="slider-track"><div class="slider-fill" style="width:75%"></div><div class="slider-thumb" style="left:75%"></div></div></div>
+      <div class="mv-readout"><div class="mv-primary">7.5</div><div class="mv-secondary">≈ &minus;6.8 dB</div></div>
+    </div>
+  </div>
+
+  <div class="annotate">
+    <h3>Tokens in play</h3>
+    <ul>
+      <li>Colors: <code>surface.raised-2</code> (param card — matches D1's "parameter-edit panels" usage exactly), <code>surface.raised-3</code> (track + value chip fill), <code>accent.primary</code> (slider fill/thumb — D1 §2.2 names this exact usage — also used for the "resolves to" indirection caption, since it's informational/interactive, not a status reading), <code>surface.raised-1</code> (Master Volume dock — see screen 1's annotation for why this token specifically).</li>
+      <li>Type: <code>type.body-large</code> 18sp for parameter names (D1 names this exact usage too), <code>type.title</code> 22sp bold for the numeric readout, <code>type.caption</code> 13sp for the pedal-abbreviation line under every control.</li>
+    </ul>
+    <h3>Touch targets</h3>
+    <ul>
+      <li>Slider hit band: <code>touch.target.min</code> = <b>64dp</b> tall, centered on an 8dp visual track — the thumb graphic is small but the invisible tap/drag band around it is full 64dp, satisfying D1 §4.2's "any control used mid-performance" without an oversized visual track dominating the card. <span class="pass">Pass.</span></li>
+      <li>Numeric value chip (tap to open exact-entry, screen 2b): 48dp min — treated as <code>touch.target.secondary</code> since precise numeric entry is a between-songs action, not the mid-song slider drag. <span class="pass">Pass.</span></li>
+      <li>Master Volume dock: 64dp, same reasoning as screen 1.</li>
+    </ul>
+    <div class="flag"><b>Banked structure:</b> Reverb Mix and Delay Mix are not single wire parameters. The pedal has one reverb-mix value <em>per reverb model</em> (<code>RVB S1 M</code> … <code>RVB PL M</code>, six total, only one live) and one delay-mix value per delay model (<code>DLY DT X</code> for Digital, <code>DLY TA X</code> for Tape — real abbreviations from the S6 parameter registry). The quick-tier card always shows and edits whichever one is currently live — it does not let you pick a model (that's done in the full editor, screen 2c) and it does not show six sliders. The small "resolves to" line makes that indirection visible rather than silent, specifically so it can't get discovered and bolted on badly during implementation.</div>
+    <div class="flag"><b>Master Volume</b> is still deliberately not a quick-tier card — it's <em>global</em>, not per-preset (<code>ParameterId.kt</code>'s <code>ParameterScope.GLOBAL</code> comment), so it would misleadingly imply a per-preset reset if shown here. It now has its own persistent, always-reachable dock instead (bottom of this screen and screen 1) — see that annotation for the design.</div>
+  </div>
+
+  <!-- SCREEN 2b — numeric entry -->
+  <div class="screen-label">
+    <span class="num">2b</span><h2>Exact Numeric Entry</h2>
+    <span class="sub">FR9 — tapping any value chip opens this. Shown here for “Gain”, same pattern for buried parameters.</span>
+  </div>
+  <div class="screen">
+    <div class="dialog-scrim" style="align-items:flex-end;min-height:auto;padding:0;">
+      <div class="keypad-sheet" style="margin:0;width:100%;border-radius:16px 16px 0 0;">
+        <div class="grabber"></div>
+        <div class="section-label" style="padding:0 0 var(--space-1);">Gain</div>
+        <div class="field"><span class="n">6.4</span></div>
+        <div class="keypad-grid">
+          <div class="key">1</div><div class="key">2</div><div class="key">3</div>
+          <div class="key">4</div><div class="key">5</div><div class="key">6</div>
+          <div class="key">7</div><div class="key">8</div><div class="key">9</div>
+          <div class="key">.</div><div class="key">0</div><div class="key">⌫</div>
+        </div>
+        <div class="keypad-actions">
+          <div class="btn btn-outline">Cancel</div>
+          <div class="btn btn-primary">Set</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="annotate">
+    <ul>
+      <li>Colors: <code>surface.raised-2</code> sheet, <code>surface.raised-3</code> keys, <code>accent.primary</code> underline on the active field + primary action.</li>
+      <li>Every key is <code>touch.target.min</code> 64dp (this <em>is</em> a mid-performance-adjacent action — dialing in an exact value fast between songs — so it gets the larger target, not the 48dp floor). <span class="pass">Pass.</span></li>
+      <li><code>on-accent</code> #121212 is used for the "Set" button label on the accent fill — the only pair D1 clears for text-on-accent (white on accent fails at 2.17:1 per D1 §2.4).</li>
+    </ul>
+  </div>
+
+  <!-- SCREEN 2c — all parameters -->
+  <div class="screen-label">
+    <span class="num">2c</span><h2>Parameter Editor — All Parameters</h2>
+    <span class="sub">Every row below is a real parameter from the S6 registry (protocol/.../params/ParameterRegistry.kt, branch s6-parameter-registry — read only, not imported). Reverb, Modulation, Delay, and Cabinet's VIR mic block are mutually-exclusive banks; only the active model's block is ever shown.</span>
+  </div>
+  <div class="screen">
+    <div class="section-label">All parameters (109)</div>
+    <div class="section-hint">64 of these 109 belong to a model selector (Reverb, Modulation, Delay, Cabinet's VIR block) and only one model's block is live at a time — real live count is 51–61 depending on which models and cabinet mode this preset uses. Grouped to match the registry's own parameter layout; several groups expanded here to demonstrate the pattern, including one banked example per selector.</div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Noise Gate</span><span class="ccount">5</span><span class="chev">▾</span></div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">NG POST</span></span><span class="mval"></span></div>
+        <div class="mini-row switch on"><span class="mname">Enable<br><span class="pedal-abbr">NG POWER</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Threshold<br><span class="pedal-abbr">NG THRESH</span></span><span class="mval">-58 dB</span></div>
+        <div class="mini-row"><span class="mname">Release<br><span class="pedal-abbr">NG REL</span></span><span class="mval">120 ms</span></div>
+        <div class="mini-row"><span class="mname">Depth<br><span class="pedal-abbr">NG DEPTH</span></span><span class="mval">-60 dB</span></div>
+      </div>
+    </div>
+
+    <div class="accordion"><div class="accordion-head"><span class="cname">Compressor</span><span class="ccount">5</span><span class="chev">▾</span></div></div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">EQ</span><span class="ccount">8</span><span class="chev">▾</span></div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">EQ POST</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Bass <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ BASS · idx 11</span></span><span class="mval">5.0</span></div>
+        <div class="mini-row"><span class="mname">Bass Freq<br><span class="pedal-abbr">EQ BFREQ</span></span><span class="mval">300 Hz</span></div>
+        <div class="mini-row"><span class="mname">Mid <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ MID · idx 13</span></span><span class="mval">4.2</span></div>
+        <div class="mini-row"><span class="mname">Mid Q<br><span class="pedal-abbr">EQ MIDQ</span></span><span class="mval">0.7</span></div>
+        <div class="mini-row"><span class="mname">Mid Freq<br><span class="pedal-abbr">EQ MFREQ</span></span><span class="mval">750 Hz</span></div>
+        <div class="mini-row"><span class="mname">Treble <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ TREBLE · idx 16</span></span><span class="mval">6.8</span></div>
+        <div class="mini-row"><span class="mname">Treble Freq<br><span class="pedal-abbr">EQ TFREQ</span></span><span class="mval">1900 Hz</span></div>
+      </div>
+    </div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Tone Model / Amp</span><span class="ccount">8</span><span class="chev">▾</span></div>
+      <div class="accordion-body">
+        <div class="mini-row switch on"><span class="mname">Amp Enable<br><span class="pedal-abbr">MDL AMP</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Switch 1<br><span class="pedal-abbr">MDL SW1</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Gain <span class="promoted">Quick tier</span><br><span class="pedal-abbr">MDL GAIN · idx 20</span></span><span class="mval">6.4</span></div>
+        <div class="mini-row"><span class="mname">Volume<br><span class="pedal-abbr">MDL VOL</span></span><span class="mval">5.0</span></div>
+        <div class="mini-row"><span class="mname">Mix<br><span class="pedal-abbr">MDL MIX</span></span><span class="mval">100%</span></div>
+        <div class="mini-row switch on">
+          <span class="mname">Cabinet <span class="illustrative-tag">Known unknown</span><br><span class="pedal-abbr">MDL CABU</span></span>
+          <span class="mval"></span>
+        </div>
+        <div class="mini-row"><span class="mname">Presence<br><span class="pedal-abbr">MDL PRE</span></span><span class="mval">5.0</span></div>
+        <div class="mini-row"><span class="mname">Depth<br><span class="pedal-abbr">MDL DEP</span></span><span class="mval">5.0</span></div>
+      </div>
+      <div class="bank-note">"Cabinet" (<code>MDL CABU</code>) is shown, not dropped, because it's a real, live parameter a preset can toggle — its <em>function</em> is the unknown part. Upstream's own identifier for it is <code>CABINET_UNKNOWN</code>; see mockups.md's S20 hardware-probe list.</div>
+    </div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Cabinet</span><span class="ccount">10</span><span class="chev">▾</span></div>
+      <div class="bank-note">Mode selector (<code>MDL CAB</code>) — choosing a mode swaps the block below instantly; the other modes show nothing here, not a grayed-out block. The 9 VIR mic parameters exist only in VIR mode.</div>
+      <div class="model-selector">
+        <div class="model-chip">Tone Model</div>
+        <div class="model-chip active">VIR</div>
+        <div class="model-chip">Disabled</div>
+      </div>
+      <div class="accordion-body">
+        <div class="mini-row"><span class="mname">Cabinet Model<br><span class="pedal-abbr">VIR_CMDL</span></span><span class="mval">5</span></div>
+        <div class="mini-row"><span class="mname">Reso<br><span class="pedal-abbr">VIR_RESO</span></span><span class="mval">2.0</span></div>
+        <div class="mini-row"><span class="mname">Mic 1<br><span class="pedal-abbr">VIR M1</span></span><span class="mval">1</span></div>
+        <div class="mini-row"><span class="mname">Mic 1 X<br><span class="pedal-abbr">VIR M1X</span></span><span class="mval">3.0</span></div>
+        <div class="mini-row"><span class="mname">Mic 1 Z<br><span class="pedal-abbr">VIR M1Z</span></span><span class="mval">6.0</span></div>
+        <div class="mini-row"><span class="mname">Mic 2<br><span class="pedal-abbr">VIR M2</span></span><span class="mval">0</span></div>
+        <div class="mini-row">
+          <span class="mname">Mic 2 X <span class="illustrative-tag">S20: range may be wrong</span><br><span class="pedal-abbr">VIR M2X</span></span>
+          <span class="mval">1.0</span>
+        </div>
+        <div class="mini-row"><span class="mname">Mic 2 Z<br><span class="pedal-abbr">VIR M2Z</span></span><span class="mval">4.0</span></div>
+        <div class="mini-row"><span class="mname">Blend<br><span class="pedal-abbr">VIR BLEND</span></span><span class="mval">-20</span></div>
+      </div>
+      <div class="bank-note">SELECT-type rows above (Cabinet Model, Mic 1, Mic 2) show the raw wire index, not a named option — the registry doesn't carry option-label strings, so a fabricated model/mic name would not be real data. <span class="illustrative-tag" style="margin-left:0;">Numeric placeholder</span></div>
+    </div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Modulation</span><span class="ccount">31</span><span class="chev">▾</span></div>
+      <div class="bank-note">3 always-on controls (Post, Enable, Model select) + 28 banked params across 5 models (5–6 live at once, depending on model).</div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">MOD POST</span></span><span class="mval"></span></div>
+        <div class="mini-row switch on"><span class="mname">Enable<br><span class="pedal-abbr">MOD POWER</span></span><span class="mval"></span></div>
+      </div>
+      <div class="model-selector">
+        <div class="model-chip">Chorus</div>
+        <div class="model-chip">Tremolo</div>
+        <div class="model-chip">Phaser</div>
+        <div class="model-chip">Flanger</div>
+        <div class="model-chip active">Rotary</div>
+      </div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Sync<br><span class="pedal-abbr">MOD RO S · idx 88</span></span><span class="mval"></span></div>
+        <div class="mini-row">
+          <span class="mname">Sync Division <span class="illustrative-tag">Inferred</span><br><span class="pedal-abbr">MOD RO T · idx 89</span></span>
+          <span class="mval">4</span>
+        </div>
+        <div class="mini-row"><span class="mname">Speed<br><span class="pedal-abbr">MOD RO S · idx 90</span></span><span class="mval">120 RPM</span></div>
+        <div class="mini-row"><span class="mname">Radius<br><span class="pedal-abbr">MOD RO R</span></span><span class="mval">90</span></div>
+        <div class="mini-row"><span class="mname">Spread<br><span class="pedal-abbr">MOD RO D</span></span><span class="mval">60%</span></div>
+        <div class="mini-row"><span class="mname">Level<br><span class="pedal-abbr">MOD RO L</span></span><span class="mval">6.0</span></div>
+      </div>
+    </div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Delay</span><span class="ccount">15</span><span class="chev">▾</span></div>
+      <div class="bank-note">3 always-on controls (Post, Enable, Model select) + 12 banked params across 2 models (6 live at once).</div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">DLY POST</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Enable<br><span class="pedal-abbr">DLY POWER</span></span><span class="mval"></span></div>
+      </div>
+      <div class="model-selector">
+        <div class="model-chip active">Digital</div>
+        <div class="model-chip">Tape</div>
+      </div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Sync<br><span class="pedal-abbr">DLY DG S</span></span><span class="mval"></span></div>
+        <div class="mini-row">
+          <span class="mname">Sync Division <span class="illustrative-tag">Inferred</span><br><span class="pedal-abbr">DLY DG T</span></span>
+          <span class="mval">4</span>
+        </div>
+        <div class="mini-row"><span class="mname">Time<br><span class="pedal-abbr">DLY DT M</span></span><span class="mval">380 ms</span></div>
+        <div class="mini-row"><span class="mname">Feedback<br><span class="pedal-abbr">DLY DT F</span></span><span class="mval">32%</span></div>
+        <div class="mini-row switch"><span class="mname">Mode<br><span class="pedal-abbr">DLY DT O</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Mix <span class="promoted">Quick tier</span><br><span class="pedal-abbr">DLY DT X</span></span><span class="mval">15%</span></div>
+      </div>
+      <div class="bank-note">Tape's 6 parameters (<code>DLY TA *</code>) are hidden entirely while Digital is selected.</div>
+    </div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Reverb</span><span class="ccount">27</span><span class="chev">▾</span></div>
+      <div class="bank-note">3 always-on controls (Position, Enable, Model select) + 24 banked params across 6 models (4 live at once — every model has the same shape: Time / Predelay / Color / Mix).</div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Position<br><span class="pedal-abbr">RVB POS</span></span><span class="mval"></span></div>
+        <div class="mini-row switch on"><span class="mname">Enable<br><span class="pedal-abbr">RVB POWER</span></span><span class="mval"></span></div>
+      </div>
+      <div class="model-selector">
+        <div class="model-chip">Spring 1</div>
+        <div class="model-chip">Spring 2</div>
+        <div class="model-chip">Spring 3</div>
+        <div class="model-chip">Spring 4</div>
+        <div class="model-chip">Room</div>
+        <div class="model-chip active">Plate</div>
+      </div>
+      <div class="accordion-body">
+        <div class="mini-row"><span class="mname">Time<br><span class="pedal-abbr">RVB PL T</span></span><span class="mval">6.0</span></div>
+        <div class="mini-row"><span class="mname">Predelay<br><span class="pedal-abbr">RVB PL P</span></span><span class="mval">18 ms</span></div>
+        <div class="mini-row"><span class="mname">Color<br><span class="pedal-abbr">RVB PL C</span></span><span class="mval">3.0</span></div>
+        <div class="mini-row"><span class="mname">Mix <span class="promoted">Quick tier</span><br><span class="pedal-abbr">RVB PL M</span></span><span class="mval">28%</span></div>
+      </div>
+      <div class="bank-note">Spring 1–4 and Room's 20 combined parameters are hidden entirely while Plate is selected — switching models is instant (no motion beyond D1's ceiling) and swaps this whole block, it does not reveal/fade the others.</div>
+    </div>
+
+    <div class="section-label" style="margin-top:var(--space-3);">Global (7) — not saved to any preset</div>
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Device settings</span><span class="ccount">7</span><span class="chev">▾</span></div>
+      <div class="accordion-body">
+        <div class="mini-row"><span class="mname">Master Volume <span class="promoted">Persistent dock</span><br><span class="pedal-abbr">MVOL</span></span><span class="mval">7.5</span></div>
+        <div class="mini-row"><span class="mname">BPM<br><span class="pedal-abbr">BPM</span></span><span class="mval">120</span></div>
+        <div class="mini-row"><span class="mname">Input Trim<br><span class="pedal-abbr">TRIM</span></span><span class="mval">0.0 dB</span></div>
+        <div class="mini-row switch"><span class="mname">Cab Sim Bypass<br><span class="pedal-abbr">CABSIM</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Tempo Source<br><span class="pedal-abbr">TEMPOS</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Tuning Reference<br><span class="pedal-abbr">TUNEREF</span></span><span class="mval">440 Hz</span></div>
+        <div class="mini-row switch"><span class="mname">Global Bypass<br><span class="pedal-abbr">BYPASS</span></span><span class="mval"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotate">
+    <h3>Tokens in play</h3>
+    <ul>
+      <li>Colors: <code>surface.raised-1</code> (category header), <code>on-surface.tertiary</code> (counts, bank-notes), <code>accent.primary</code> (active model chip fill, "Quick tier"/"Persistent dock" pointer chips), <code>on-surface.disabled</code> (the "Known unknown" / "Inferred" / "S20" tags — deliberately the quietest token in the palette, not <code>status.error</code>, since these mark provenance, not a problem the player needs to react to).</li>
+      <li>Type: <code>type.body-large</code> category names, <code>type.body</code> parameter rows and model chips, <code>type.caption</code> pedal-abbreviation captions and bank-notes.</li>
+    </ul>
+    <h3>Touch targets</h3>
+    <ul>
+      <li>Category header rows, individual parameter rows, model-selector chips: <code>touch.target.secondary</code> = 48dp, not 64dp — D1 §4.2 reserves 64dp for mid-performance controls; both menu-diving <em>and</em> picking a reverb/mod/delay model are between-songs actions. <span class="pass">Pass (correctly the smaller tier).</span></li>
+    </ul>
+    <h3>Banked-parameter structure</h3>
+    <ul>
+      <li>Reverb, Modulation, and Delay each show their 3 always-on controls (a chain-position switch, an enable switch, and the model selector), then a <b>model-selector chip row</b>. Choosing a chip swaps which parameter block renders beneath it; non-active models are not rendered at all — no grayed-out rows.</li>
+      <li>Cabinet gets the same pattern for its VIR mic sub-block: the 9 VIR-specific parameters render only when mode = VIR; Tone Model and Disabled modes have no cabinet-specific parameters of their own in the registry.</li>
+      <li>Category counts reconcile exactly to 109 across 8 preset-scoped groups — Noise Gate 5, Compressor 5, EQ 8, Tone Model/Amp 8, Cabinet 10, Modulation 31, Delay 15, Reverb 27 — plus Global's 7, matching the registry's own "116 parameters (109 + 7)" doc comment. This is a smaller, real set of groups than the previous revision's 11 invented categories — the actual pedal's parameter layout is simpler than the earlier guess.</li>
+    </ul>
+    <div class="flag"><b>Human-label layer — the principle:</b> every row above pairs a readable label with the pedal's raw abbreviation in a <code>.pedal-abbr</code> caption underneath, and every label is derived directly from the row's <code>enumName</code> in the registry (e.g. <code>NOISE_GATE_THRESHOLD</code> → "Threshold," trimming the block name since the accordion heading already supplies it) — not invented. Two rows are marked <span class="illustrative-tag" style="margin-left:0;">Inferred</span> on screen because their meaning genuinely isn't given by the registry: the <code>*_TS</code> selectors ("Sync Division") are my best guess at what an 18-option selector next to a Sync switch does, not a confirmed label — flagged visibly, not silently presented as fact.</div>
+    <div class="flag"><b>Dropped from the previous revision, not carried forward:</b> "Power Amp," "FX Loop / Routing," and "Expression / Wah" categories, and Cabinet's invented "Low Cut / High Cut / Resonance / Air" core rows — none of these exist in the real registry. Removed rather than kept as illustrative, per instruction: anything not backed by a real row comes out of the rendered screens.</div>
+  </div>
+
+  <!-- ============================================================
+       SCREEN 3 — CONNECTION STATES
+       ============================================================ -->
+  <div class="screen-label">
+    <span class="num">3</span><h2>Connection States</h2>
+    <span class="sub">FR3/FR11 — connected / connecting / disconnected / error. Shape + color + text, never color alone.</span>
+  </div>
+
+  <div class="screen">
+    <div class="section-label">Peripheral app-bar chip (all screens carry one of these)</div>
+    <div style="padding:0 var(--space-3) var(--space-3);display:flex;flex-direction:column;gap:var(--space-2);">
+      <div class="appbar" style="border-radius:10px;">
+        <span class="status-chip status-connected"><span class="status-glyph"></span>Connected</span>
+        <span style="flex:1"></span>
+      </div>
+      <div class="appbar" style="border-radius:10px;">
+        <span class="status-chip status-connecting"><span class="status-glyph"></span>Connecting…</span>
+        <span style="flex:1"></span>
+      </div>
+      <div class="appbar" style="border-radius:10px;">
+        <span class="status-chip status-disconnected"><span class="status-glyph"></span>Not Connected</span>
+        <span style="flex:1"></span>
+      </div>
+      <div class="appbar" style="border-radius:10px;">
+        <span class="status-chip status-error"><span class="status-glyph"></span>Error</span>
+        <span style="flex:1"></span>
+      </div>
+    </div>
+
+    <div class="section-label">Escalated banners (disconnected / error — the "unhappy paths")</div>
+    <div class="banner">
+      <div class="banner-head">
+        <span class="status-glyph" style="width:22px;height:22px;border:2.5px solid var(--status-disconnected);border-radius:50%;"></span>
+        <span class="btitle" style="color:var(--status-disconnected);">Not Connected</span>
+      </div>
+      <p class="bbody">No pedal detected over USB. Plug in the ToneX One and it will connect automatically.</p>
+      <div class="bactions"><div class="btn btn-outline" style="flex:0 0 auto;padding:0 var(--space-3);">Retry</div></div>
+    </div>
+    <div class="banner">
+      <div class="banner-head">
+        <span class="status-glyph" style="width:22px;height:22px;background:var(--status-error);clip-path:polygon(50% 6%, 95% 92%, 5% 92%);"></span>
+        <span class="btitle" style="color:var(--status-error);">Error</span>
+      </div>
+      <p class="bbody"><strong>Transport failure:</strong> USB device disconnected. The pedal may have been unplugged mid-write — check the connection before making further changes.</p>
+      <div class="bactions"><div class="btn btn-outline" style="flex:0 0 auto;padding:0 var(--space-3);">Retry Connection</div></div>
+    </div>
+  </div>
+
+  <div class="annotate">
+    <h3>Tokens in play</h3>
+    <ul>
+      <li>Colors: <code>status.connected</code> #34D177 filled circle · <code>status.connecting</code> #52B8FF hollow ring · <code>status.disconnected</code> #9AA0A6 hollow ring · <code>status.error</code> #FF5252 filled triangle — exactly D1 §2.3's four states and silhouettes, no deviation.</li>
+      <li>Silhouettes double-encode meaning per D1's explicit requirement: filled circle = "good, live"; hollow ring = "nothing there" (both Connecting and Disconnected share this ring, distinguished only by color+text, per D1's own reasoning that Connecting "is still not yet connected"); filled triangle = "something is wrong." No spinner, no pulse — D1 §5 forbids animating the connecting glyph.</li>
+    </ul>
+    <h3>Contrast — verified, not eyeballed</h3>
+    <ul>
+      <li><code>status.connected</code> on <code>surface.base</code>: <b>9.40:1</b> (D1 §2.4, verified) — <span class="pass">pass</span> vs 3:1 graphical minimum.</li>
+      <li><code>status.disconnected</code> on <code>surface.base</code>: <b>7.09:1</b> (D1 §2.4) — <span class="pass">pass</span>.</li>
+      <li><code>status.error</code> on <code>surface.base</code>: <b>5.87:1</b> (D1 §2.4) — <span class="pass">pass</span> vs 4.5:1 text minimum (banner title is text-sized, held to the stricter bar).</li>
+      <li>Banner titles sit on <code>surface.raised-1</code>, not base — recomputed for this file (not in D1's own table): <code>status.error</code> on <code>raised-1</code> = <b>5.28:1</b> (D1 already lists this exact pair, §2.4) — <span class="pass">pass</span>. <code>status.disconnected</code> on <code>raised-1</code> = <b>6.38:1</b> (D1 §2.4) — <span class="pass">pass</span>.</li>
+    </ul>
+    <div class="flag"><b>Note:</b> the 5-value <code>ConnectionState</code> sealed interface in <code>protocol/</code> (<code>Idle</code> / <code>Connecting</code> / <code>Hello</code> / <code>GetState</code> / <code>Ready</code> / <code>Error</code>) collapses to these 4 UI states as: <code>Idle</code> → Not Connected, <code>Connecting</code>+<code>Hello</code>+<code>GetState</code> → Connecting…, <code>Ready</code> → Connected, <code>Error(cause)</code> → Error (with <code>cause.message</code> shown, as in the banner above, which uses a realistic <code>TransportFailure</code> message). This mapping is read from <code>protocol/</code> for accuracy only — not modified.</div>
+  </div>
+
+  <!-- ============================================================
+       SCREEN 4 — FIRST-DESTRUCTIVE-WRITE WARNING
+       ============================================================ -->
+  <div class="screen-label">
+    <span class="num">4</span><h2>First-Destructive-Write Warning</h2>
+    <span class="sub">Shown once per session, the moment the first parameter edit against a snapshotted preset is committed.</span>
+  </div>
+  <div class="screen">
+    <div class="dialog-scrim">
+      <div class="dialog">
+        <h4>Changes save instantly</h4>
+        <p>Tonex-OTG writes every change straight to the pedal as you make it. <strong>There's no undo on the pedal itself.</strong></p>
+        <p>A snapshot of <strong>Set Opener</strong> was taken the moment it became active. You can revert to it any time from Settings — until then, experiment freely.</p>
+        <p style="color:var(--on-surface-tertiary);font-size:var(--type-caption-size);margin-bottom:var(--space-3);">This message appears once per session.</p>
+        <div class="actions"><div class="btn btn-primary btn-tall">Got it</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="annotate">
+    <ul>
+      <li>Colors: <code>surface.raised-2</code> dialog surface (D1 names dialogs as raised-2's usage explicitly), <code>accent.primary</code> filled CTA, <code>on-accent</code> label.</li>
+      <li>Type: <code>type.headline</code> 24sp dialog title, <code>type.body</code> 16sp explanatory copy, <code>type.caption</code> 13sp "appears once" footnote.</li>
+      <li>Single button, no "Cancel" — dismissing <em>is</em> proceeding; this is a heads-up, not a fork. Button sized to <code>touch.target.min</code> 64dp (<code>.btn-tall</code>) even though it's chrome, not performance-critical, because it gates the user's understanding of an irreversible-write mode — cheap to make it impossible to fumble.</li>
+      <li><code>SnapshotStore.hasWarnedThisSession()</code> / <code>markWarned()</code> in <code>protocol/</code> already model exactly this "once per session" gate — this screen is that flag's UI.</li>
+    </ul>
+  </div>
+
+  <!-- SCREEN 4b — snapshot / revert -->
+  <div class="screen-label">
+    <span class="num">4b</span><h2>Snapshot &amp; Revert</h2>
+    <span class="sub">The "hard-to-hit-by-accident home" for reverting. Deliberately low-key entry point, high-friction confirm.</span>
+  </div>
+  <div class="screen">
+    <div class="sysbar"><div class="caption">— system status bar area —</div></div>
+    <div class="appbar"><div class="icon-btn">←</div><div class="title">Settings</div></div>
+
+    <div class="section-label">This session</div>
+    <div class="param-card" style="background:var(--surface-raised-1);">
+      <div class="row1" style="margin-bottom:0;">
+        <span class="pname" style="color:var(--on-surface-primary);">Snapshot — Set Opener</span>
+      </div>
+      <p style="font-size:var(--type-body-size);color:var(--on-surface-tertiary);line-height:var(--type-body-lh);margin:var(--space-1) 0 var(--space-2);">
+        Taken when this preset became active. 2 of 109 parameters changed since.
+        Reverting rewrites only this preset's parameters — global settings
+        (volume, tuning, tempo) are not affected.
+      </p>
+      <div class="mini-row" style="padding:0;min-height:var(--touch-secondary);">
+        <span class="mname" style="color:var(--on-surface-secondary);">Revert to Snapshot</span>
+        <div class="btn btn-outline" style="flex:0 0 auto;padding:0 var(--space-3);min-height:var(--touch-secondary);">Revert…</div>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-top:var(--space-2);">Confirm</div>
+    <div class="dialog-scrim" style="min-height:260px;padding-top:0;">
+      <div class="dialog">
+        <h4>Revert to snapshot?</h4>
+        <p>This immediately rewrites all 109 parameters of <strong>Set Opener</strong> back to their values from when it became active. The pedal auto-saves — <strong>this can't be undone either.</strong></p>
+        <div class="actions">
+          <div class="btn btn-primary">Cancel</div>
+          <div class="btn btn-outline">Revert Anyway</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="annotate">
+    <h3>Design reasoning for "hard to hit by accident"</h3>
+    <ul>
+      <li>The entry point lives in Settings, not on the parameter-editor screen a musician is actively touching mid-song — physical separation from the high-frequency flow is the first safety layer.</li>
+      <li>The entry-point button is <code>touch.target.secondary</code> 48dp and <code>btn-outline</code> styling (no accent fill), not sized or colored to invite a quick tap — it reads as an available option, not an inviting action.</li>
+      <li>The confirm dialog inverts the usual button hierarchy on purpose: <b>Cancel is the accent-filled, visually primary button</b>; <b>Revert Anyway is the plain outline button</b>. The safe path looks like the default path. This is the actual "hard to hit by accident" mechanism — not size, not color-coding the destructive option red.</li>
+      <li>Copy states the consequence in concrete terms (all 109 parameters, immediate, no undo of the undo) rather than a generic "Are you sure?".</li>
+    </ul>
+    <div class="flag"><b>Open question for the lead:</b> D1 has no generic "destructive action" color token — <code>status.error</code> is scoped explicitly to connection state in §2.3's own section title. I deliberately did <em>not</em> reuse <code>status.error</code> for the "Revert Anyway" button, to avoid it being misread as a connection problem. Safety here is carried entirely by placement, copy, and button-hierarchy inversion instead. If a future story wants a red "destructive" affordance elsewhere in the app, D1 will need a new token for it — I did not invent one.</div>
+  </div>
+
+  <!-- ============================================================
+       SCREEN 5 — ABOUT / CREDITS
+       ============================================================ -->
+  <div class="screen-label">
+    <span class="num">5</span><h2>About / Credits</h2>
+    <span class="sub">NFR4 — must credit both upstream projects. Text below is drawn from CREDITS.md's own attribution sentences, kept intact per that file's plain-text-reuse promise.</span>
+  </div>
+  <div class="screen">
+    <div class="sysbar"><div class="caption">— system status bar area —</div></div>
+    <div class="appbar"><div class="icon-btn">←</div><div class="title">About</div></div>
+
+    <div class="about-hero">
+      <div class="appname">Tonex-OTG</div>
+      <div class="ver">Version 0.1.0 · build 42</div>
+    </div>
+
+    <div class="credits-block">
+      <h5>Third-party attribution</h5>
+      <p class="txt">Tonex-OTG ports USB protocol logic from two upstream open-source projects into Kotlin for Android. This screen records where that logic came from and under what licence.</p>
+    </div>
+
+    <div class="credits-block">
+      <h5>TonexOneController</h5>
+      <p class="txt">Repository: https://github.com/Builty/TonexOneController
+Licence: Apache License 2.0 (SPDX: Apache-2.0)
+Copyright 2025 Greg Smith</p>
+      <p class="txt">Ported: the Tonex parameter table (parameter IDs, scaling, min/max); preset-details response handling; and state-blob field offsets (input trim, stomp mode, cab bypass, tuning mode/reference, BPM, tempo source, direct monitor, current slot, bypass mode, slot presets).</p>
+    </div>
+
+    <div class="credits-block">
+      <h5>tonex_controller</h5>
+      <p class="txt">Repository: https://github.com/vit3k/tonex_controller
+Licence: MIT License (SPDX: MIT)
+Copyright (c) 2024 vit3k</p>
+      <p class="txt">Ported: equivalent HDLC-style byte-stuffing / frame delimiting and CRC-16 checksum logic (reversed polynomial 0x8408), which appears independently in both upstream projects.</p>
+    </div>
+
+    <div class="credits-block">
+      <h5>HDLC framing &amp; CRC-16</h5>
+      <p class="txt">The same byte-stuffing and CRC-16 logic (reversed polynomial 0x8408) used to validate USB packets appears independently in both upstream projects above and is credited to both.</p>
+    </div>
+
+    <div class="credits-block">
+      <h5>Full licence texts</h5>
+      <p class="txt">Apache License 2.0 (Tonex-OTG's own code, and the licence covering TonexOneController-derived portions): see LICENSE in this app's repository.
+MIT License (covering tonex_controller-derived portions), Copyright (c) 2024 vit3k: see LICENSES/MIT-vit3k.txt in this app's repository.</p>
+    </div>
+  </div>
+  <div class="annotate">
+    <h3>Tokens in play</h3>
+    <ul>
+      <li>Colors: <code>surface.raised-1</code> per credit block, <code>on-surface.primary</code> app name, <code>on-surface.secondary</code> body copy, <code>on-surface.tertiary</code> version string.</li>
+      <li>Type: <code>type.headline</code> app name, <code>type.body-large</code> block headings, <code>type.body</code> attribution text, <code>type.caption</code> version — caption is used here purely for low-priority metadata (the version string), matching D1 §3's stated caption usage exactly ("firmware version string in an About screen" is D1's own example).</li>
+    </ul>
+    <h3>Touch targets</h3>
+    <ul>
+      <li>Back button: <code>touch.target.secondary</code> 48dp — correct, About is never touched mid-song.</li>
+    </ul>
+    <div class="flag"><b>Plain-text-reuse compliance:</b> the paragraphs above are the literal attribution sentences from CREDITS.md (repository, licence, copyright, and the "what was ported from where" rows), reformatted only by removing GitHub-flavored Markdown syntax (link brackets, table pipes) per that file's own stated intent — no wording was changed, paraphrased, or omitted. Full CREDITS.md is longer (it also documents the source-header convention for ported Kotlin files); that section is repo-internal process documentation, not attribution, so it's out of scope for an in-app screen.</div>
+  </div>
+
+  <div class="footer-note">
+    End of mockups. See <code>docs/design/mockups.md</code> for the quick-tier rationale, open questions, and assumptions flagged above, collected in one place for the lead.
+  </div>
+
+</div>
+</body>
+</html>
