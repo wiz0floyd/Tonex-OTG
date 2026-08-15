@@ -432,10 +432,6 @@ img,svg{max-width:100%;}
   line-height:var(--type-caption-lh);
   color:var(--on-surface-tertiary);
 }
-.dupe-abbr{
-  color:var(--status-error);
-  font-weight:600;
-}
 
 /* Master Volume — persistent, global, always reachable. Uses surface.raised-1,
    the same token D1 assigns to "top app bar, bottom bar" (§2.1) — deliberately
@@ -541,6 +537,19 @@ img,svg{max-width:100%;}
   font-size:11px;
   color:var(--accent-primary);
   border:1px solid var(--accent-primary);
+  border-radius:4px;
+  padding:1px 4px;
+  margin-left:var(--space-1);
+}
+/* Marks a label that is inferred, unconfirmed, or flagged for hardware
+   verification (S20) — deliberately the quietest token available
+   (on-surface.disabled), not status.error: this is a provenance note for
+   whoever built the mockup to read, not a problem for the player to react
+   to on stage. */
+.illustrative-tag{
+  font-size:11px;
+  color:var(--on-surface-disabled);
+  border:1px solid var(--on-surface-disabled);
   border-radius:4px;
   padding:1px 4px;
   margin-left:var(--space-1);
@@ -778,7 +787,7 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
     </div>
 
     <div class="mv-dock">
-      <div class="mv-label"><span class="mv-tag">Global</span><span class="mv-name">Master Volume</span></div>
+      <div class="mv-label"><span class="mv-tag">Global</span><span class="mv-name">Master Volume</span><span class="pedal-abbr" style="display:block;">MVOL</span></div>
       <div class="mv-slider"><div class="slider-track"><div class="slider-fill" style="width:75%"></div><div class="slider-thumb" style="left:75%"></div></div></div>
       <div class="mv-readout"><div class="mv-primary">7.5</div><div class="mv-secondary">≈ &minus;6.8 dB</div></div>
     </div>
@@ -857,13 +866,13 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
     </div>
     <div class="param-card">
       <div class="row1"><span class="pname">Delay Mix</span><span class="param-value">15%</span></div>
-      <div class="resolves-to">→ resolves to <span class="pedal-abbr" style="color:inherit;">DLY DIG M</span> · Digital model is active</div>
+      <div class="resolves-to">→ resolves to <span class="pedal-abbr" style="color:inherit;">DLY DT X</span> · Digital model is active</div>
       <div class="slider-wrap"><div class="slider-track"><div class="slider-fill" style="width:15%"></div><div class="slider-thumb" style="left:15%"></div></div></div>
       <div class="slider-minmax"><span>0%</span><span>100%</span></div>
     </div>
 
     <div class="mv-dock">
-      <div class="mv-label"><span class="mv-tag">Global</span><span class="mv-name">Master Volume</span></div>
+      <div class="mv-label"><span class="mv-tag">Global</span><span class="mv-name">Master Volume</span><span class="pedal-abbr" style="display:block;">MVOL</span></div>
       <div class="mv-slider"><div class="slider-track"><div class="slider-fill" style="width:75%"></div><div class="slider-thumb" style="left:75%"></div></div></div>
       <div class="mv-readout"><div class="mv-primary">7.5</div><div class="mv-secondary">≈ &minus;6.8 dB</div></div>
     </div>
@@ -881,7 +890,7 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
       <li>Numeric value chip (tap to open exact-entry, screen 2b): 48dp min — treated as <code>touch.target.secondary</code> since precise numeric entry is a between-songs action, not the mid-song slider drag. <span class="pass">Pass.</span></li>
       <li>Master Volume dock: 64dp, same reasoning as screen 1.</li>
     </ul>
-    <div class="flag"><b>Banked structure — revised this pass:</b> Reverb Mix and Delay Mix are not single wire parameters. The pedal has one reverb-mix value <em>per reverb model</em> (<code>RVB S1 M</code> … <code>RVB PL M</code>, six total, only one live) and one delay-mix value per delay model (<code>DLY DIG M</code>, <code>DLY TAPE M</code>). The quick-tier card always shows and edits whichever one is currently live — it does not let you pick a model (that's done in the full editor, screen 2c) and it does not show six sliders. The small "resolves to" line makes that indirection visible rather than silent, specifically so it can't get discovered and bolted on badly during implementation.</div>
+    <div class="flag"><b>Banked structure:</b> Reverb Mix and Delay Mix are not single wire parameters. The pedal has one reverb-mix value <em>per reverb model</em> (<code>RVB S1 M</code> … <code>RVB PL M</code>, six total, only one live) and one delay-mix value per delay model (<code>DLY DT X</code> for Digital, <code>DLY TA X</code> for Tape — real abbreviations from the S6 parameter registry). The quick-tier card always shows and edits whichever one is currently live — it does not let you pick a model (that's done in the full editor, screen 2c) and it does not show six sliders. The small "resolves to" line makes that indirection visible rather than silent, specifically so it can't get discovered and bolted on badly during implementation.</div>
     <div class="flag"><b>Master Volume</b> is still deliberately not a quick-tier card — it's <em>global</em>, not per-preset (<code>ParameterId.kt</code>'s <code>ParameterScope.GLOBAL</code> comment), so it would misleadingly imply a per-preset reset if shown here. It now has its own persistent, always-reachable dock instead (bottom of this screen and screen 1) — see that annotation for the design.</div>
   </div>
 
@@ -920,87 +929,89 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
   <!-- SCREEN 2c — all parameters -->
   <div class="screen-label">
     <span class="num">2c</span><h2>Parameter Editor — All Parameters</h2>
-    <span class="sub">The other 103 preset parameters + 7 global parameters. Reverb, Modulation, Delay, and the Cabinet mic block are mutually-exclusive banks — only the active model's block is ever shown.</span>
+    <span class="sub">Every row below is a real parameter from the S6 registry (protocol/.../params/ParameterRegistry.kt, branch s6-parameter-registry — read only, not imported). Reverb, Modulation, Delay, and Cabinet's VIR mic block are mutually-exclusive banks; only the active model's block is ever shown.</span>
   </div>
   <div class="screen">
     <div class="section-label">All parameters (109)</div>
-    <div class="section-hint">64 of these 109 belong to a model selector (Reverb, Modulation, Delay, Cabinet-VIR) and only one model's block is live at a time — real live count is roughly 52–61 depending on which models and cabinet mode this preset uses. Grouped by signal-chain block, collapsed by default; several expanded here to demonstrate the pattern, including one banked group per selector.</div>
+    <div class="section-hint">64 of these 109 belong to a model selector (Reverb, Modulation, Delay, Cabinet's VIR block) and only one model's block is live at a time — real live count is 51–61 depending on which models and cabinet mode this preset uses. Grouped to match the registry's own parameter layout; several groups expanded here to demonstrate the pattern, including one banked example per selector.</div>
 
     <div class="accordion">
-      <div class="accordion-head"><span class="cname">Noise Gate</span><span class="ccount">3</span><span class="chev">▾</span></div>
+      <div class="accordion-head"><span class="cname">Noise Gate</span><span class="ccount">5</span><span class="chev">▾</span></div>
       <div class="accordion-body">
-        <div class="mini-row switch on"><span class="mname">Gate Enable</span><span class="mval"></span></div>
-        <div class="mini-row">
-          <span class="mname">Threshold<br><span class="pedal-abbr">NG THRESH</span></span>
-          <span class="mval">-42 dB</span>
-        </div>
-        <div class="mini-row"><span class="mname">Release</span><span class="mval">120 ms</span></div>
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">NG POST</span></span><span class="mval"></span></div>
+        <div class="mini-row switch on"><span class="mname">Enable<br><span class="pedal-abbr">NG POWER</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Threshold<br><span class="pedal-abbr">NG THRESH</span></span><span class="mval">-58 dB</span></div>
+        <div class="mini-row"><span class="mname">Release<br><span class="pedal-abbr">NG REL</span></span><span class="mval">120 ms</span></div>
+        <div class="mini-row"><span class="mname">Depth<br><span class="pedal-abbr">NG DEPTH</span></span><span class="mval">-60 dB</span></div>
       </div>
     </div>
 
-    <div class="accordion"><div class="accordion-head"><span class="cname">Compressor</span><span class="ccount">4</span><span class="chev">▾</span></div></div>
+    <div class="accordion"><div class="accordion-head"><span class="cname">Compressor</span><span class="ccount">5</span><span class="chev">▾</span></div></div>
 
     <div class="accordion">
-      <div class="accordion-head"><span class="cname">Tone Model</span><span class="ccount">7</span><span class="chev">▾</span></div>
+      <div class="accordion-head"><span class="cname">EQ</span><span class="ccount">8</span><span class="chev">▾</span></div>
       <div class="accordion-body">
-        <div class="mini-row"><span class="mname">Character</span><span class="mval">3</span></div>
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">EQ POST</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Bass <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ BASS · idx 11</span></span><span class="mval">5.0</span></div>
+        <div class="mini-row"><span class="mname">Bass Freq<br><span class="pedal-abbr">EQ BFREQ</span></span><span class="mval">300 Hz</span></div>
+        <div class="mini-row"><span class="mname">Mid <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ MID · idx 13</span></span><span class="mval">4.2</span></div>
+        <div class="mini-row"><span class="mname">Mid Q<br><span class="pedal-abbr">EQ MIDQ</span></span><span class="mval">0.7</span></div>
+        <div class="mini-row"><span class="mname">Mid Freq<br><span class="pedal-abbr">EQ MFREQ</span></span><span class="mval">750 Hz</span></div>
+        <div class="mini-row"><span class="mname">Treble <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ TREBLE · idx 16</span></span><span class="mval">6.8</span></div>
+        <div class="mini-row"><span class="mname">Treble Freq<br><span class="pedal-abbr">EQ TFREQ</span></span><span class="mval">1900 Hz</span></div>
+      </div>
+    </div>
+
+    <div class="accordion">
+      <div class="accordion-head"><span class="cname">Tone Model / Amp</span><span class="ccount">8</span><span class="chev">▾</span></div>
+      <div class="accordion-body">
+        <div class="mini-row switch on"><span class="mname">Amp Enable<br><span class="pedal-abbr">MDL AMP</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Switch 1<br><span class="pedal-abbr">MDL SW1</span></span><span class="mval"></span></div>
         <div class="mini-row"><span class="mname">Gain <span class="promoted">Quick tier</span><br><span class="pedal-abbr">MDL GAIN · idx 20</span></span><span class="mval">6.4</span></div>
-        <div class="mini-row"><span class="mname">Enhance</span><span class="mval">2.0</span></div>
-        <div class="mini-row"><span class="mname">Low Trim</span><span class="mval">0.0 dB</span></div>
-        <div class="mini-row"><span class="mname">Presence Trim</span><span class="mval">0.0 dB</span></div>
-        <div class="mini-row"><span class="mname">Output Trim</span><span class="mval">0.0 dB</span></div>
-        <div class="mini-row">
-          <span class="mname" style="color:var(--on-surface-tertiary);">MDL CABU <span style="color:var(--on-surface-disabled);font-size:11px;">(label unconfirmed — see flag below)</span></span>
-          <span class="mval">—</span>
+        <div class="mini-row"><span class="mname">Volume<br><span class="pedal-abbr">MDL VOL</span></span><span class="mval">5.0</span></div>
+        <div class="mini-row"><span class="mname">Mix<br><span class="pedal-abbr">MDL MIX</span></span><span class="mval">100%</span></div>
+        <div class="mini-row switch on">
+          <span class="mname">Cabinet <span class="illustrative-tag">Known unknown</span><br><span class="pedal-abbr">MDL CABU</span></span>
+          <span class="mval"></span>
         </div>
+        <div class="mini-row"><span class="mname">Presence<br><span class="pedal-abbr">MDL PRE</span></span><span class="mval">5.0</span></div>
+        <div class="mini-row"><span class="mname">Depth<br><span class="pedal-abbr">MDL DEP</span></span><span class="mval">5.0</span></div>
       </div>
+      <div class="bank-note">"Cabinet" (<code>MDL CABU</code>) is shown, not dropped, because it's a real, live parameter a preset can toggle — its <em>function</em> is the unknown part. Upstream's own identifier for it is <code>CABINET_UNKNOWN</code>; see mockups.md's S20 hardware-probe list.</div>
     </div>
 
     <div class="accordion">
-      <div class="accordion-head"><span class="cname">Cabinet</span><span class="ccount">14</span><span class="chev">▾</span></div>
-      <div class="bank-note">Model selector — choosing a mode swaps the block below instantly; the other two modes show nothing here, not a grayed-out block.</div>
+      <div class="accordion-head"><span class="cname">Cabinet</span><span class="ccount">10</span><span class="chev">▾</span></div>
+      <div class="bank-note">Mode selector (<code>MDL CAB</code>) — choosing a mode swaps the block below instantly; the other modes show nothing here, not a grayed-out block. The 9 VIR mic parameters exist only in VIR mode.</div>
       <div class="model-selector">
         <div class="model-chip">Tone Model</div>
         <div class="model-chip active">VIR</div>
         <div class="model-chip">Disabled</div>
       </div>
       <div class="accordion-body">
-        <div class="mini-row"><span class="mname">Low Cut</span><span class="mval">80 Hz</span></div>
-        <div class="mini-row"><span class="mname">High Cut</span><span class="mval">8.2 kHz</span></div>
-        <div class="mini-row"><span class="mname">Resonance</span><span class="mval">4.0</span></div>
-        <div class="mini-row"><span class="mname">Air</span><span class="mval">3.5</span></div>
-      </div>
-      <div class="bank-note">VIR mic block — 9 parameters, live only while Cabinet mode is VIR:</div>
-      <div class="accordion-body">
-        <div class="mini-row"><span class="mname">Mic 1 Type</span><span class="mval">Dynamic 57</span></div>
+        <div class="mini-row"><span class="mname">Cabinet Model<br><span class="pedal-abbr">VIR_CMDL</span></span><span class="mval">5</span></div>
+        <div class="mini-row"><span class="mname">Reso<br><span class="pedal-abbr">VIR_RESO</span></span><span class="mval">2.0</span></div>
+        <div class="mini-row"><span class="mname">Mic 1<br><span class="pedal-abbr">VIR M1</span></span><span class="mval">1</span></div>
+        <div class="mini-row"><span class="mname">Mic 1 X<br><span class="pedal-abbr">VIR M1X</span></span><span class="mval">3.0</span></div>
+        <div class="mini-row"><span class="mname">Mic 1 Z<br><span class="pedal-abbr">VIR M1Z</span></span><span class="mval">6.0</span></div>
+        <div class="mini-row"><span class="mname">Mic 2<br><span class="pedal-abbr">VIR M2</span></span><span class="mval">0</span></div>
         <div class="mini-row">
-          <span class="mname">Mic 1 Position<br><span class="pedal-abbr">VIR M1Z</span></span>
-          <span class="mval">Cap edge</span>
+          <span class="mname">Mic 2 X <span class="illustrative-tag">S20: range may be wrong</span><br><span class="pedal-abbr">VIR M2X</span></span>
+          <span class="mval">1.0</span>
         </div>
-        <div class="mini-row"><span class="mname">Mic 1 Distance</span><span class="mval">2.0 cm</span></div>
-        <div class="mini-row"><span class="mname">Mic 1 Level</span><span class="mval">0.0 dB</span></div>
-        <div class="mini-row"><span class="mname">Mic 2 Type</span><span class="mval">Condenser 414</span></div>
-        <div class="mini-row"><span class="mname">Mic 2 Position</span><span class="mval">Off-axis</span></div>
-        <div class="mini-row"><span class="mname">Mic 2 Distance</span><span class="mval">30 cm</span></div>
-        <div class="mini-row"><span class="mname">Mic 2 Level</span><span class="mval">-6.0 dB</span></div>
-        <div class="mini-row"><span class="mname">Mic Blend</span><span class="mval">50 / 50</span></div>
+        <div class="mini-row"><span class="mname">Mic 2 Z<br><span class="pedal-abbr">VIR M2Z</span></span><span class="mval">4.0</span></div>
+        <div class="mini-row"><span class="mname">Blend<br><span class="pedal-abbr">VIR BLEND</span></span><span class="mval">-20</span></div>
       </div>
+      <div class="bank-note">SELECT-type rows above (Cabinet Model, Mic 1, Mic 2) show the raw wire index, not a named option — the registry doesn't carry option-label strings, so a fabricated model/mic name would not be real data. <span class="illustrative-tag" style="margin-left:0;">Numeric placeholder</span></div>
     </div>
 
     <div class="accordion">
-      <div class="accordion-head"><span class="cname">EQ</span><span class="ccount">3</span><span class="chev">▾</span></div>
+      <div class="accordion-head"><span class="cname">Modulation</span><span class="ccount">31</span><span class="chev">▾</span></div>
+      <div class="bank-note">3 always-on controls (Post, Enable, Model select) + 28 banked params across 5 models (5–6 live at once, depending on model).</div>
       <div class="accordion-body">
-        <div class="mini-row"><span class="mname">Bass <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ BASS · idx 11</span></span><span class="mval">5.0</span></div>
-        <div class="mini-row"><span class="mname">Mid <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ MID · idx 13</span></span><span class="mval">4.2</span></div>
-        <div class="mini-row"><span class="mname">Treble <span class="promoted">Quick tier</span><br><span class="pedal-abbr">EQ TREBLE · idx 16</span></span><span class="mval">6.8</span></div>
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">MOD POST</span></span><span class="mval"></span></div>
+        <div class="mini-row switch on"><span class="mname">Enable<br><span class="pedal-abbr">MOD POWER</span></span><span class="mval"></span></div>
       </div>
-    </div>
-
-    <div class="accordion"><div class="accordion-head"><span class="cname">Power Amp</span><span class="ccount">5</span><span class="chev">▾</span></div></div>
-
-    <div class="accordion">
-      <div class="accordion-head"><span class="cname">Modulation</span><span class="ccount">29</span><span class="chev">▾</span></div>
-      <div class="bank-note">1 model selector + 28 banked params across 5 models (5–6 live at once, depending on model).</div>
       <div class="model-selector">
         <div class="model-chip">Chorus</div>
         <div class="model-chip">Tremolo</div>
@@ -1009,43 +1020,50 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
         <div class="model-chip active">Rotary</div>
       </div>
       <div class="accordion-body">
-        <div class="mini-row switch on"><span class="mname">Rotary Enable</span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Sync<br><span class="pedal-abbr">MOD RO S · idx 88</span></span><span class="mval"></span></div>
         <div class="mini-row">
-          <span class="mname">Rotary Speed<br><span class="pedal-abbr dupe-abbr">MOD RO S · idx 90</span></span>
-          <span class="mval">4.0</span>
+          <span class="mname">Sync Division <span class="illustrative-tag">Inferred</span><br><span class="pedal-abbr">MOD RO T · idx 89</span></span>
+          <span class="mval">4</span>
         </div>
-        <div class="mini-row">
-          <span class="mname">Rotary Sync<br><span class="pedal-abbr dupe-abbr">MOD RO S · idx 88</span></span>
-          <span class="mval">Off</span>
-        </div>
-        <div class="mini-row"><span class="mname">Rotary Depth</span><span class="mval">6.0</span></div>
-        <div class="mini-row"><span class="mname">Rotary Drive</span><span class="mval">3.0</span></div>
-        <div class="mini-row"><span class="mname">Rotary Mix</span><span class="mval">80%</span></div>
+        <div class="mini-row"><span class="mname">Speed<br><span class="pedal-abbr">MOD RO S · idx 90</span></span><span class="mval">120 RPM</span></div>
+        <div class="mini-row"><span class="mname">Radius<br><span class="pedal-abbr">MOD RO R</span></span><span class="mval">90</span></div>
+        <div class="mini-row"><span class="mname">Spread<br><span class="pedal-abbr">MOD RO D</span></span><span class="mval">60%</span></div>
+        <div class="mini-row"><span class="mname">Level<br><span class="pedal-abbr">MOD RO L</span></span><span class="mval">6.0</span></div>
       </div>
-      <div class="bank-note"><span class="dupe-abbr">Indices 88 and 90 share the identical pedal abbreviation "MOD RO S"</span> — Rotary Sync and Rotary Speed. Confirmed upstream truth, not a typo. The pedal's own hardware screen cannot disambiguate these two by name alone; this app's human-label layer is what makes them distinguishable, and the layer must key off wire index, never off the abbreviation string.</div>
     </div>
 
     <div class="accordion">
-      <div class="accordion-head"><span class="cname">Delay</span><span class="ccount">13</span><span class="chev">▾</span></div>
-      <div class="bank-note">1 model selector + 12 banked params across 2 models (6 live at once).</div>
+      <div class="accordion-head"><span class="cname">Delay</span><span class="ccount">15</span><span class="chev">▾</span></div>
+      <div class="bank-note">3 always-on controls (Post, Enable, Model select) + 12 banked params across 2 models (6 live at once).</div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Post<br><span class="pedal-abbr">DLY POST</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Enable<br><span class="pedal-abbr">DLY POWER</span></span><span class="mval"></span></div>
+      </div>
       <div class="model-selector">
         <div class="model-chip active">Digital</div>
         <div class="model-chip">Tape</div>
       </div>
       <div class="accordion-body">
-        <div class="mini-row switch on"><span class="mname">Digital Enable</span><span class="mval"></span></div>
-        <div class="mini-row"><span class="mname">Time<br><span class="pedal-abbr">DLY DIG T</span></span><span class="mval">380 ms</span></div>
-        <div class="mini-row"><span class="mname">Feedback<br><span class="pedal-abbr">DLY DIG F</span></span><span class="mval">32%</span></div>
-        <div class="mini-row"><span class="mname">Mix <span class="promoted">Quick tier</span><br><span class="pedal-abbr">DLY DIG M</span></span><span class="mval">15%</span></div>
-        <div class="mini-row"><span class="mname">Tone<br><span class="pedal-abbr">DLY DIG C</span></span><span class="mval">5.0</span></div>
-        <div class="mini-row switch"><span class="mname">Sync to Tempo<br><span class="pedal-abbr">DLY DIG S</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Sync<br><span class="pedal-abbr">DLY DG S</span></span><span class="mval"></span></div>
+        <div class="mini-row">
+          <span class="mname">Sync Division <span class="illustrative-tag">Inferred</span><br><span class="pedal-abbr">DLY DG T</span></span>
+          <span class="mval">4</span>
+        </div>
+        <div class="mini-row"><span class="mname">Time<br><span class="pedal-abbr">DLY DT M</span></span><span class="mval">380 ms</span></div>
+        <div class="mini-row"><span class="mname">Feedback<br><span class="pedal-abbr">DLY DT F</span></span><span class="mval">32%</span></div>
+        <div class="mini-row switch"><span class="mname">Mode<br><span class="pedal-abbr">DLY DT O</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Mix <span class="promoted">Quick tier</span><br><span class="pedal-abbr">DLY DT X</span></span><span class="mval">15%</span></div>
       </div>
-      <div class="bank-note">Tape's 6 parameters are hidden entirely while Digital is selected.</div>
+      <div class="bank-note">Tape's 6 parameters (<code>DLY TA *</code>) are hidden entirely while Digital is selected.</div>
     </div>
 
     <div class="accordion">
-      <div class="accordion-head"><span class="cname">Reverb</span><span class="ccount">25</span><span class="chev">▾</span></div>
-      <div class="bank-note">1 model selector + 24 banked params across 6 models (4 live at once — every model has the same 4-parameter shape: Time / Pre-delay / Character / Mix).</div>
+      <div class="accordion-head"><span class="cname">Reverb</span><span class="ccount">27</span><span class="chev">▾</span></div>
+      <div class="bank-note">3 always-on controls (Position, Enable, Model select) + 24 banked params across 6 models (4 live at once — every model has the same shape: Time / Predelay / Color / Mix).</div>
+      <div class="accordion-body">
+        <div class="mini-row switch"><span class="mname">Position<br><span class="pedal-abbr">RVB POS</span></span><span class="mval"></span></div>
+        <div class="mini-row switch on"><span class="mname">Enable<br><span class="pedal-abbr">RVB POWER</span></span><span class="mval"></span></div>
+      </div>
       <div class="model-selector">
         <div class="model-chip">Spring 1</div>
         <div class="model-chip">Spring 2</div>
@@ -1055,28 +1073,25 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
         <div class="model-chip active">Plate</div>
       </div>
       <div class="accordion-body">
-        <div class="mini-row"><span class="mname">Time<br><span class="pedal-abbr">RVB PL T</span></span><span class="mval">2.4 s</span></div>
-        <div class="mini-row"><span class="mname">Pre-delay<br><span class="pedal-abbr">RVB PL P</span></span><span class="mval">18 ms</span></div>
-        <div class="mini-row"><span class="mname">Character<br><span class="pedal-abbr">RVB PL C</span></span><span class="mval">6.0</span></div>
+        <div class="mini-row"><span class="mname">Time<br><span class="pedal-abbr">RVB PL T</span></span><span class="mval">6.0</span></div>
+        <div class="mini-row"><span class="mname">Predelay<br><span class="pedal-abbr">RVB PL P</span></span><span class="mval">18 ms</span></div>
+        <div class="mini-row"><span class="mname">Color<br><span class="pedal-abbr">RVB PL C</span></span><span class="mval">3.0</span></div>
         <div class="mini-row"><span class="mname">Mix <span class="promoted">Quick tier</span><br><span class="pedal-abbr">RVB PL M</span></span><span class="mval">28%</span></div>
       </div>
       <div class="bank-note">Spring 1–4 and Room's 20 combined parameters are hidden entirely while Plate is selected — switching models is instant (no motion beyond D1's ceiling) and swaps this whole block, it does not reveal/fade the others.</div>
     </div>
 
-    <div class="accordion"><div class="accordion-head"><span class="cname">FX Loop / Routing</span><span class="ccount">3</span><span class="chev">▾</span></div></div>
-    <div class="accordion"><div class="accordion-head"><span class="cname">Expression / Wah</span><span class="ccount">3</span><span class="chev">▾</span></div></div>
-
     <div class="section-label" style="margin-top:var(--space-3);">Global (7) — not saved to any preset</div>
     <div class="accordion">
       <div class="accordion-head"><span class="cname">Device settings</span><span class="ccount">7</span><span class="chev">▾</span></div>
       <div class="accordion-body">
-        <div class="mini-row"><span class="mname">Master Volume <span class="promoted">Persistent dock</span></span><span class="mval">7.5</span></div>
-        <div class="mini-row"><span class="mname">BPM (Tap Tempo)</span><span class="mval">120</span></div>
-        <div class="mini-row"><span class="mname">Input Trim</span><span class="mval">0.0 dB</span></div>
-        <div class="mini-row switch on"><span class="mname">Cab Sim Bypass</span><span class="mval"></span></div>
-        <div class="mini-row"><span class="mname">Tempo Source</span><span class="mval">Internal</span></div>
-        <div class="mini-row"><span class="mname">Tuning Reference</span><span class="mval">440 Hz</span></div>
-        <div class="mini-row switch"><span class="mname">Global Bypass</span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Master Volume <span class="promoted">Persistent dock</span><br><span class="pedal-abbr">MVOL</span></span><span class="mval">7.5</span></div>
+        <div class="mini-row"><span class="mname">BPM<br><span class="pedal-abbr">BPM</span></span><span class="mval">120</span></div>
+        <div class="mini-row"><span class="mname">Input Trim<br><span class="pedal-abbr">TRIM</span></span><span class="mval">0.0 dB</span></div>
+        <div class="mini-row switch"><span class="mname">Cab Sim Bypass<br><span class="pedal-abbr">CABSIM</span></span><span class="mval"></span></div>
+        <div class="mini-row switch"><span class="mname">Tempo Source<br><span class="pedal-abbr">TEMPOS</span></span><span class="mval"></span></div>
+        <div class="mini-row"><span class="mname">Tuning Reference<br><span class="pedal-abbr">TUNEREF</span></span><span class="mval">440 Hz</span></div>
+        <div class="mini-row switch"><span class="mname">Global Bypass<br><span class="pedal-abbr">BYPASS</span></span><span class="mval"></span></div>
       </div>
     </div>
   </div>
@@ -1084,21 +1099,21 @@ hr.sep{border:none;border-top:1px solid var(--meta-border);margin:0;}
   <div class="annotate">
     <h3>Tokens in play</h3>
     <ul>
-      <li>Colors: <code>surface.raised-1</code> (category header), <code>on-surface.tertiary</code> (counts, bank-notes), <code>accent.primary</code> (active model chip fill, "Quick tier"/"Persistent dock" pointer chips), <code>status.error</code> (the <code>MOD RO S</code> duplicate-abbreviation callout — this is the one legitimate non-connection use of error red in the app: flagging a genuine data ambiguity the label layer must resolve, not a connection or destructive-action reading, so it doesn't collide with §2.3's reserved meaning).</li>
+      <li>Colors: <code>surface.raised-1</code> (category header), <code>on-surface.tertiary</code> (counts, bank-notes), <code>accent.primary</code> (active model chip fill, "Quick tier"/"Persistent dock" pointer chips), <code>on-surface.disabled</code> (the "Known unknown" / "Inferred" / "S20" tags — deliberately the quietest token in the palette, not <code>status.error</code>, since these mark provenance, not a problem the player needs to react to).</li>
       <li>Type: <code>type.body-large</code> category names, <code>type.body</code> parameter rows and model chips, <code>type.caption</code> pedal-abbreviation captions and bank-notes.</li>
     </ul>
     <h3>Touch targets</h3>
     <ul>
       <li>Category header rows, individual parameter rows, model-selector chips: <code>touch.target.secondary</code> = 48dp, not 64dp — D1 §4.2 reserves 64dp for mid-performance controls; both menu-diving <em>and</em> picking a reverb/mod/delay model are between-songs actions. <span class="pass">Pass (correctly the smaller tier).</span></li>
     </ul>
-    <h3>Banked-parameter structure — new this revision</h3>
+    <h3>Banked-parameter structure</h3>
     <ul>
-      <li>Reverb, Modulation, and Delay each get a <b>model selector</b> (segmented chip row) at the top of their accordion body. Choosing a chip swaps which parameter block renders beneath it. The non-active models are not rendered at all — no grayed-out rows, no "disabled" styling on 20+ irrelevant sliders. This was the structural gap in the previous revision: it showed all reverb-model parameters flat and simultaneously, which would have let a player edit a "Spring 2" parameter that does nothing while Plate is selected.</li>
-      <li>Cabinet gets the same pattern for its VIR mic sub-block: 4 core parameters are always shown, the 9 VIR-specific mic parameters only render when Cabinet mode = VIR.</li>
-      <li>Category counts now reconcile exactly to 109 across the 11 preset-scoped groups (Noise Gate 3, Compressor 4, Tone Model 7, Cabinet 14, EQ 3, Power Amp 5, Modulation 29, Delay 13, Reverb 25, FX Loop 3, Expression/Wah 3) plus Global's 7, matching <code>PresetSnapshot.PARAMETER_COUNT</code> and the <code>ParameterId</code> global-range comment.</li>
+      <li>Reverb, Modulation, and Delay each show their 3 always-on controls (a chain-position switch, an enable switch, and the model selector), then a <b>model-selector chip row</b>. Choosing a chip swaps which parameter block renders beneath it; non-active models are not rendered at all — no grayed-out rows.</li>
+      <li>Cabinet gets the same pattern for its VIR mic sub-block: the 9 VIR-specific parameters render only when mode = VIR; Tone Model and Disabled modes have no cabinet-specific parameters of their own in the registry.</li>
+      <li>Category counts reconcile exactly to 109 across 8 preset-scoped groups — Noise Gate 5, Compressor 5, EQ 8, Tone Model/Amp 8, Cabinet 10, Modulation 31, Delay 15, Reverb 27 — plus Global's 7, matching the registry's own "116 parameters (109 + 7)" doc comment. This is a smaller, real set of groups than the previous revision's 11 invented categories — the actual pedal's parameter layout is simpler than the earlier guess.</li>
     </ul>
-    <div class="flag"><b>Human-label layer — the principle:</b> every row above pairs a readable label with the pedal's raw abbreviation in a <code>.pedal-abbr</code> caption underneath (monospace, tertiary color, same treatment used for the "from pedal:" line on screen 1). This isn't decorative — <code>NG THRESH</code>, <code>MDL CABU</code>, and the <code>MOD RO S</code> collision above are real pedal-side names, and several are either unreadable out of context or, in the Rotary case, <em>literally not unique</em> (indices 88 and 90 both read <code>MOD RO S</code> — Sync and Speed). The label layer must be keyed by wire index, not by parsing the abbreviation string, or it will silently conflate the two. Full worked-through labels are shown for the parameters in this mockup (quick tier + every expanded block above); the remaining leaf-level names for collapsed categories are not individually labeled here — that's D3/S6's job once the real registry lands — but the pattern demonstrated is meant to extend directly.</div>
-    <div class="flag"><b>Flag for the lead:</b> beyond the four confirmed banked groups (Reverb/Modulation/Delay/Cabinet-VIR) and the 7 confirmed global names, the remaining category membership and specific leaf names (Noise Gate, Compressor, Tone Model, Power Amp, FX Loop, Expression/Wah, plus the non-VIR Cabinet core and the Reverb/Modulation/Delay per-model parameter names beyond what was given) are still illustrative, built to keep the 109 total consistent with the confirmed banked-group math rather than sourced from a real recovered table. <code>MDL CABU</code> specifically I could not confidently expand beyond "Model Cab [meaning uncertain]" — shown with a bare <code>—</code> value and no invented human label, on purpose: guessing wrong on a label is worse than admitting the abbreviation isn't understood yet. D3/S6 owns closing this out against the real registry.</div>
+    <div class="flag"><b>Human-label layer — the principle:</b> every row above pairs a readable label with the pedal's raw abbreviation in a <code>.pedal-abbr</code> caption underneath, and every label is derived directly from the row's <code>enumName</code> in the registry (e.g. <code>NOISE_GATE_THRESHOLD</code> → "Threshold," trimming the block name since the accordion heading already supplies it) — not invented. Two rows are marked <span class="illustrative-tag" style="margin-left:0;">Inferred</span> on screen because their meaning genuinely isn't given by the registry: the <code>*_TS</code> selectors ("Sync Division") are my best guess at what an 18-option selector next to a Sync switch does, not a confirmed label — flagged visibly, not silently presented as fact.</div>
+    <div class="flag"><b>Dropped from the previous revision, not carried forward:</b> "Power Amp," "FX Loop / Routing," and "Expression / Wah" categories, and Cabinet's invented "Low Cut / High Cut / Resonance / Air" core rows — none of these exist in the real registry. Removed rather than kept as illustrative, per instruction: anything not backed by a real row comes out of the rendered screens.</div>
   </div>
 
   <!-- ============================================================
