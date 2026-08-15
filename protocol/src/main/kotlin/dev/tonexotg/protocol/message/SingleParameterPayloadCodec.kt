@@ -45,27 +45,44 @@ data class SingleParameterPayload(val kind: Int, val index: Int, val value: Floa
  * Codec for the wire shape shared by every "one parameter, one value" Tonex One message: the *safe*
  * single-parameter write ([ParameterWriteMessage]), the master-volume write
  * ([MasterVolumeMessage]), and inbound `TYPE_PARAM_CHANGED` notifications
- * ([dev.tonexotg.protocol.codec.MessageType.ParameterChanged]) all share this exact payload shape,
- * differing only in the `kind` byte and (for writes) which command they arrive wrapped in.
+ * ([dev.tonexotg.protocol.codec.MessageType.ParameterChanged]) all share this exact 10-byte payload
+ * *shape* — `B9 04 <kind> <2 index-field bytes> 88 <value: float32, little-endian>` — but, as detailed
+ * below, [encode] (the write side) and [decode] (the read side) place the index within those 2 bytes
+ * **differently**, because they are ported from two independently-sourced upstream functions that
+ * are not, in fact, byte-for-byte consistent with each other. This is not a bug in this codec; it is
+ * this codec faithfully reproducing an asymmetry that exists in the upstream reference itself.
  *
- * ## Wire format
+ * ## Write side (used by [encode]) — `usb_tonex_one_send_single_parameter`/`_master_volume`
  *
- * ```
- * B9 04 <kind: 1 byte> <index: 2 bytes, little-endian> 88 <value: float32, little-endian>
- * ```
+ * Confirmed against `usb_tonex_one.c:265-295` (`usb_tonex_one_send_single_parameter`) and
+ * `usb_tonex_one.c:304-331` (`usb_tonex_one_send_master_volume`) — both build
+ * `{0xB9, 0x04, kind, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00}` and then execute exactly one
+ * assignment into the two index-field bytes: **`payload[4] = index;`**. `payload[3]` is never
+ * written and keeps its initial `0x00`. Every valid parameter index (0-116, see [ParameterId])
+ * fits in one byte, so this single assignment is upstream's complete index-write logic — there is
+ * no confirmed write-side behaviour for an index that would need the second byte.
  *
- * 10 bytes total. Confirmed against two independent upstream sites:
- * - the write side, `usb_tonex_one.c:265-295` (`usb_tonex_one_send_single_parameter`) and
- *   `usb_tonex_one.c:304-331` (`usb_tonex_one_send_master_volume`) — both build
- *   `{0xB9, 0x04, kind, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00}` and patch the index and value
- *   bytes in place. The write side always uses a single-byte index (`payload[4] = index`,
- *   `payload[3]` — the index's high byte in this codec's 2-byte reading — is left at its initial
- *   `0x00`), which round-trips correctly through this codec's 2-byte little-endian read/write
- *   since every valid parameter index (0-116) fits in the low byte.
- * - the read side, `usb_tonex_one.c:827-871` (`usb_tonex_one_parse_param_changed`) — reads a 3-byte
- *   marker (`0xB9, 0x04, 0x03`), then explicitly 2 index bytes (`param_index = *temp_ptr++;
- *   param_index |= (*temp_ptr << 8);`), confirming the index field's width independently of the
- *   write side's single-byte usage of it.
+ * ## Read side (used by [decode]) — `usb_tonex_one_parse_param_changed`
+ *
+ * Confirmed independently against `usb_tonex_one.c:827-871` — reads a 3-byte marker
+ * (`0xB9, 0x04, 0x03`; inbound notifications are confirmed to always carry `kind = 0x03`), then
+ * explicitly 2 index bytes: `param_index = *temp_ptr++; param_index |= (*temp_ptr << 8);`. The
+ * *first* byte encountered after the marker (i.e. the payload position immediately after `kind`)
+ * is the **low** byte; the *second* is the **high** byte — an ordinary little-endian 2-byte read.
+ *
+ * ## Why [encode] and [decode] are not inverses of each other for a nonzero index
+ *
+ * Lining the two up by wire position: the write side's sole assignment lands on what the read
+ * side would call the index's *high* byte, leaving what the read side would call the *low* byte
+ * at its untouched `0x00`. Decoding a payload this app just encoded with a nonzero index would
+ * therefore **not** recover that index — it would recover `index * 256`. That is a real property
+ * of the two independently-confirmed upstream sources, not a round-trip this codec claims to
+ * support: [encode] and [decode] exist to reproduce two different upstream message flows (an
+ * outbound command this app constructs vs. an inbound notification the pedal constructs), and
+ * nothing in the reverse-engineered protocol says those two flows must agree on this field's byte
+ * order. Do not "fix" this into a symmetric round trip without new upstream evidence that the two
+ * sides actually agree — see [ParameterWriteMessage] KDoc for the acceptance-fixture byte template
+ * this asymmetry was caught against.
  *
  * The `0x88`-prefixed `float32` form ([TonexVarint.encodeFloat] / [TonexVarint.decode]) is reused
  * for the value field rather than reimplemented here.
@@ -81,16 +98,24 @@ object SingleParameterPayloadCodec {
     private const val MARKER_0: Int = 0xB9
     private const val MARKER_1: Int = 0x04
 
-    /** Encodes [kind]/[index]/[value] into the 10-byte wire shape described in the class KDoc. */
+    /**
+     * Encodes [kind]/[index]/[value] into the 10-byte wire shape described in the class KDoc's
+     * "Write side" section: `B9 04 <kind> 00 <index> 88 <value: float32, little-endian>` — i.e.
+     * `payload[4] = index`, byte-exact against `payload[4] = index;` in both
+     * `usb_tonex_one_send_single_parameter` and `usb_tonex_one_send_master_volume`.
+     */
     fun encode(kind: Int, index: Int, value: Float): ByteArray {
         require(kind in 0..0xFF) { "SingleParameterPayloadCodec.encode: kind $kind is not a byte (0..0xFF)" }
-        require(index in 0..0xFFFF) { "SingleParameterPayloadCodec.encode: index $index is not representable (0..0xFFFF)" }
+        require(index in 0..0xFF) {
+            "SingleParameterPayloadCodec.encode: index $index does not fit the write side's confirmed " +
+                "single-byte `payload[4] = index` encoding (0..0xFF) - see class KDoc"
+        }
         return byteArrayOf(
             MARKER_0.toByte(),
             MARKER_1.toByte(),
             kind.toByte(),
-            (index and 0xFF).toByte(),
-            ((index shr 8) and 0xFF).toByte(),
+            0x00,
+            index.toByte(),
         ) + TonexVarint.encodeFloat(value)
     }
 
@@ -100,8 +125,10 @@ object SingleParameterPayloadCodec {
      * Scans for the `B9 04` marker rather than assuming it starts at offset 0 — mirroring
      * upstream's own `memmem`-based search (`usb_tonex_one.c:836`) rather than a fixed-offset read,
      * since nothing in the reverse-engineered protocol rules out leading bytes before this shape in
-     * some future context. For a payload this app itself just encoded via [encode], the marker is
-     * always at offset 0 and this is equivalent to a direct read.
+     * some future context. **This is the class KDoc's "Read side" byte layout, not the inverse of
+     * [encode]'s "Write side" layout** — decoding a payload this app just [encode]d does *not*
+     * recover the same index for a nonzero value; see the class KDoc's "Why encode and decode are
+     * not inverses" section.
      *
      * Never throws: a missing marker, or a marker with too few trailing bytes for the fixed shape,
      * is reported as a [TonexResult.Failure] rather than an `IndexOutOfBoundsException`.

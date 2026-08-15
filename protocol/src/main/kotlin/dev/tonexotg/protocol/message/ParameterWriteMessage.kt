@@ -12,6 +12,7 @@ package dev.tonexotg.protocol.message
 
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.ParameterScope
+import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.codec.MessageHeader
 import dev.tonexotg.protocol.codec.MessageHeaderCodec
 import dev.tonexotg.protocol.codec.MessageType
@@ -58,14 +59,21 @@ import dev.tonexotg.protocol.params.ParameterRegistry
  * Upstream comments this write path *"only supported in newer Pedal firmware that came with Editor
  * support!"* (`usb_tonex_one.c:269`). This module has no way to detect that at encode time — that is
  * a capability fact learned at runtime (a failed/ignored write, or an explicit probe), not something
- * [encode] can know in advance. Whether the pedal *did* support this call is the caller's concern:
- * surface [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware] once that is known, rather than
- * treating an ignored write as silent success. S20 probes for this on real hardware.
+ * [encode] can know in advance. That is why this is modelled as a [FirmwareCapabilities] the caller
+ * must supply, not an assumption this object bakes in: [encode] itself stays unconditional (it is a
+ * pure byte-builder, used directly by anything — including this file's own tests — that has already
+ * established support some other way), while [encodeIfSupported] is the entry point that actually
+ * checks the capability and surfaces [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware] rather
+ * than letting a caller send a write the pedal will silently ignore. S20 probes for this on real
+ * hardware.
  */
 object ParameterWriteMessage {
 
     /**
-     * Encodes a write of [value] to the preset-scoped parameter [id].
+     * Encodes a write of [value] to the preset-scoped parameter [id], unconditionally — this
+     * function has no way to know whether the connected pedal's firmware actually honours a
+     * single-parameter write (see class KDoc "Firmware dependency"). Prefer [encodeIfSupported]
+     * unless the caller has already established firmware support some other way.
      *
      * @throws IllegalArgumentException if [id] is not a [ParameterScope.PRESET] parameter (i.e. it
      *   is a global parameter, including master volume) — see the class KDoc for why this path is
@@ -96,4 +104,21 @@ object ParameterWriteMessage {
         )
         return MessageHeaderCodec.encode(header, payload)
     }
+
+    /**
+     * The capability-gated entry point: encodes a write of [value] to [id] only when
+     * [capabilities] confirms [FirmwareCapabilities.supportsSingleParameterWrite]; otherwise fails
+     * with [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware]`("single-parameter-write")`
+     * rather than producing bytes for a write the pedal may silently ignore.
+     *
+     * @throws IllegalArgumentException if [capabilities] confirms support but [id] is not a
+     *   [ParameterScope.PRESET] parameter — same condition, same rationale, as [encode]. The
+     *   capability check runs first: an out-of-scope [id] against unsupported firmware surfaces
+     *   [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware], not this exception, since [encode]
+     *   is never called to discover the scope problem in that case.
+     */
+    fun encodeIfSupported(id: ParameterId, value: Float, capabilities: FirmwareCapabilities): TonexResult<ByteArray> =
+        encodeGatedBySingleParameterWriteSupport(capabilities, operation = "single-parameter-write") {
+            encode(id, value)
+        }
 }

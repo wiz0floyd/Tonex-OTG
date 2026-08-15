@@ -10,6 +10,7 @@
  */
 package dev.tonexotg.protocol.message
 
+import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.codec.MessageHeader
 import dev.tonexotg.protocol.codec.MessageHeaderCodec
 import dev.tonexotg.protocol.codec.MessageType
@@ -125,7 +126,9 @@ object MasterVolumeMessage {
      * write.
      *
      * See [ParameterWriteMessage] KDoc's "Firmware dependency" section — the same
-     * newer-firmware-only caveat applies to this write, per the same upstream source comment.
+     * newer-firmware-only caveat applies to this write, per the same upstream source comment. As
+     * with [ParameterWriteMessage.encode], this function stays unconditional; prefer
+     * [encodeIfSupported] unless firmware support is already established.
      */
     fun encode(decibels: Float): ByteArray {
         val native = decibelsToNative(decibels)
@@ -142,4 +145,23 @@ object MasterVolumeMessage {
         )
         return MessageHeaderCodec.encode(header, payload)
     }
+
+    /**
+     * The capability-gated entry point: encodes a master-volume write for [decibels] only when
+     * [capabilities] confirms [FirmwareCapabilities.supportsSingleParameterWrite]; otherwise fails
+     * with [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware]`("master-volume-write")` rather
+     * than producing bytes for a write the pedal may silently ignore. See [ParameterWriteMessage.encodeIfSupported]
+     * for why this is a capability the caller must supply rather than an assumption this object makes.
+     *
+     * A distinct operation name (`"master-volume-write"`, not `"single-parameter-write"`) is used
+     * from [ParameterWriteMessage.encodeIfSupported]'s failure even though both gate on the same
+     * underlying [FirmwareCapabilities] flag — master volume is a structurally different wire
+     * command (its own `kind` byte, always index `0`; see class KDoc), so a caller inspecting a
+     * [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware.operation] string can tell which one
+     * was rejected.
+     */
+    fun encodeIfSupported(decibels: Float, capabilities: FirmwareCapabilities): TonexResult<ByteArray> =
+        encodeGatedBySingleParameterWriteSupport(capabilities, operation = "master-volume-write") {
+            encode(decibels)
+        }
 }

@@ -23,6 +23,11 @@
  *   engineering-units (dB) <-> native-units (0-10) conversion. **The conversion curve is assumed
  *   linear and is unverified against real hardware** — see that file's KDoc; this is an open S20
  *   question, not a confirmed fact.
+ * - [FirmwareCapabilities] — the single-parameter write (both [ParameterWriteMessage] and
+ *   [MasterVolumeMessage]) is only supported on newer pedal firmware. This type models that as an
+ *   explicit capability a caller must supply, never a default this package assumes; each write
+ *   object's `encodeIfSupported` entry point is what actually gates on it and surfaces
+ *   [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware] when unsupported.
  * - [SingleParameterPayloadCodec] — the shared wire shape (`B9 04 <kind> <index> 88 <f32>`) behind
  *   both [ParameterWriteMessage]/[MasterVolumeMessage]'s writes and inbound
  *   [dev.tonexotg.protocol.codec.MessageType.ParameterChanged] notifications.
