@@ -1,0 +1,209 @@
+package dev.tonexotg.protocol.framing
+
+import dev.tonexotg.protocol.TonexError
+import dev.tonexotg.protocol.TonexResult
+import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+
+/**
+ * Incrementally reassembles HDLC-style frames out of a live byte stream that arrives in
+ * arbitrarily-sized chunks — exactly the shape [dev.tonexotg.protocol.TonexTransport.incoming]
+ * promises: "a frame may be split across multiple emissions, and one emission may contain
+ * multiple frames back to back."
+ *
+ * Call [feed] with each chunk as it arrives, in order, on a single instance. Each call returns
+ * the [TonexResult]s for every frame *completed* by that chunk (zero, one, or many); bytes
+ * belonging to a still-incomplete frame are buffered internally and carried forward to the next
+ * [feed] call. An instance is not thread-safe — feed it from a single reader, matching the
+ * ordering guarantee [dev.tonexotg.protocol.TonexTransport.incoming] already provides.
+ *
+ * ### A raw `0x7E` is always a delimiter, unconditionally
+ *
+ * Byte stuffing exists precisely so that a `0x7E` (or `0x7D`) that occurs in content is never
+ * written to the wire in raw form: the encoder always replaces it with `0x7D` followed by
+ * `byte xor 0x20`, i.e. `0x5E` or `0x5D`. A correctly-encoded stream can therefore **never**
+ * contain the two-byte sequence `0x7D 0x7E` — if that sequence appears, it is unambiguously
+ * corruption (a dropped byte, a flipped bit, a desynced resume point), not a legitimate escaped
+ * flag. Consequently a raw `0x7E` is treated as a frame boundary the instant it is seen, with no
+ * exception for a preceding, still-pending `0x7D`: if [escapePending] is set when a `0x7E`
+ * arrives, that dangling escape makes the just-buffered content unrecoverable, so it is discarded
+ * and reported as [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame] —
+ * but the `0x7E` itself is still honored as a delimiter and the frame after it still starts
+ * cleanly. (Per RFC 1662's async-HDLC framing, the flag byte is a frame boundary unconditionally;
+ * escaping exists so a flag never has to appear literally in data, not so that it can be masked
+ * by one.) The earlier, narrower version of this reassembler let a pending escape swallow the
+ * next frame's opening flag as content instead — that swallow is the bug this note replaces.
+ *
+ * What escape state genuinely buys, and what is preserved: within an in-progress frame's content,
+ * `0x7D` followed by any *non-`0x7E`* byte correctly decodes `0x7D 0x5D` back to a literal `0x7D`
+ * and any other escaped byte back to its original value, and [escapePending] is carried across a
+ * [feed] call boundary so a chunk split between the `0x7D` and its escaped byte still decodes
+ * correctly.
+ *
+ * ### Resynchronization
+ *
+ * Two delimiters with no content between them (`0x7E 0x7E`, which is what you get whenever two
+ * frames are transmitted back to back and each carries both of its own delimiters) are treated
+ * as an idle/resync marker, not as a malformed zero-length frame — no [TonexResult] is emitted
+ * for them. Bytes seen before the very first `0x7E` this instance has ever observed are treated
+ * as pre-frame noise and discarded; once a frame has started, all bytes up to its closing
+ * delimiter are buffered as that frame's content.
+ *
+ * ### Runaway-stream protection
+ *
+ * A `TonexTransport` connection is held open for the length of a gig by a foreground service; a
+ * flaky OTG cable, a partially-seated connector, or a pedal power-cycle mid-stream can all produce
+ * a run of bytes with no valid closing delimiter. Per FR11, that must surface as a failure, not be
+ * silently absorbed — so buffered, not-yet-delimited frame content is capped at
+ * [MAX_FRAME_CONTENT_BYTES]. Exceeding the cap emits exactly one
+ * [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame], discards the
+ * runaway buffer, and resynchronizes: no further bytes are buffered (or further overflow errors
+ * emitted) until the next `0x7E` is seen, at which point that byte starts a fresh frame exactly as
+ * it would after a normal closing delimiter. A transient burst of noise degrades to a single
+ * dropped frame, not a permanently wedged stream.
+ */
+class FrameReassembler {
+
+    private var sawOpeningFlag = false
+    private var buffer = ByteArrayOutputStream()
+    private var escapePending = false
+    private var overflowed = false
+
+    /**
+     * Feeds the next chunk of bytes read off the wire into the reassembler.
+     *
+     * @param chunk raw bytes as delivered by the transport. May be empty, may split a frame at
+     *   any byte offset (including mid-escape-sequence), and may contain several frames.
+     * @return the decoded result for each frame this chunk completed, in the order their closing
+     *   delimiters appeared, plus one [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame]
+     *   per runaway-content episode this chunk triggered (see "Runaway-stream protection" above).
+     *   Empty if [chunk] did not complete any frame and did not trigger an overflow.
+     */
+    fun feed(chunk: ByteArray): List<TonexResult<ByteArray>> {
+        if (chunk.isEmpty()) return emptyList()
+
+        val results = mutableListOf<TonexResult<ByteArray>>()
+        for (b in chunk) {
+            if (!sawOpeningFlag) {
+                if (b == FRAME_FLAG) {
+                    sawOpeningFlag = true
+                }
+                continue
+            }
+
+            when {
+                // A raw flag is always a delimiter, unconditionally -- checked first, ahead of
+                // escapePending, so a dangling escape can never swallow the next frame's opening
+                // flag as content. See the class KDoc for why this is safe (and required).
+                b == FRAME_FLAG -> {
+                    if (escapePending) {
+                        escapePending = false
+                        results.add(
+                            TonexResult.Failure(
+                                TonexError.MalformedFrame(
+                                    "dangling escape byte (0x7D) immediately before a delimiter " +
+                                        "-- a correctly-stuffed frame can never end this way"
+                                )
+                            )
+                        )
+                    } else {
+                        val content = buffer.toByteArray()
+                        if (content.isNotEmpty()) {
+                            results.add(finishDecoding(content))
+                        }
+                        // If we were overflowed, content is guaranteed empty here (appendContentByte
+                        // never writes while overflowed), so this falls through as a silent resync.
+                    }
+                    overflowed = false
+                    buffer = ByteArrayOutputStream()
+                    // This same flag also serves as the opening delimiter of whatever follows,
+                    // so we stay "in frame" (sawOpeningFlag remains true) rather than going idle.
+                }
+                escapePending -> {
+                    escapePending = false
+                    if (!overflowed) {
+                        appendContentByte((b.toInt() xor FRAME_ESCAPE_XOR.toInt()) and 0xFF, results)
+                    }
+                }
+                b == FRAME_ESCAPE -> {
+                    escapePending = true
+                }
+                else -> {
+                    if (!overflowed) {
+                        appendContentByte(b.toInt() and 0xFF, results)
+                    }
+                }
+            }
+        }
+        return results
+    }
+
+    /**
+     * Appends [byteValue] to the in-progress frame's content buffer, or — if that would push the
+     * buffer past [MAX_FRAME_CONTENT_BYTES] — discards the buffer, enters overflow/resync mode,
+     * and records exactly one [TonexError.MalformedFrame][dev.tonexotg.protocol.TonexError.MalformedFrame]
+     * in [results] for this episode. Must only be called while not already [overflowed].
+     */
+    private fun appendContentByte(byteValue: Int, results: MutableList<TonexResult<ByteArray>>) {
+        if (buffer.size() >= MAX_FRAME_CONTENT_BYTES) {
+            val bufferedBytes = buffer.size()
+            overflowed = true
+            buffer = ByteArrayOutputStream()
+            results.add(
+                TonexResult.Failure(
+                    TonexError.MalformedFrame(
+                        "frame content exceeded $MAX_FRAME_CONTENT_BYTES bytes without a closing " +
+                            "delimiter (buffered $bufferedBytes byte(s) before giving up); " +
+                            "discarding and resynchronizing on the next 0x7E"
+                    )
+                )
+            )
+            return
+        }
+        buffer.write(byteValue)
+    }
+
+    companion object {
+        /**
+         * Maximum size, in bytes, of a single frame's *unstuffed* content (payload plus the
+         * trailing 2-byte CRC) this reassembler will buffer while waiting for a closing
+         * delimiter.
+         *
+         * Derived from the largest legitimate frame this protocol is known to produce:
+         * - [dev.tonexotg.protocol.PedalState.MAX_STATE_BYTES] caps the state blob at 512 bytes.
+         * - The largest other legitimate response, the preset-details summary, is roughly 2 KB.
+         * - Byte stuffing can double the *on-wire* length in the worst case (every content byte
+         *   needing escaping) — but that inflates the wire representation, not the unstuffed
+         *   content counted here, so it is not itself a reason to raise this cap.
+         *
+         * `8 * 1024` (8 KB) is roughly 4x the largest known legitimate frame (~2 KB): comfortable
+         * headroom for anything this protocol actually sends, while still catching a desynced or
+         * flag-less stream (a flaky OTG cable, a half-seated connector, a pedal power-cycle
+         * mid-stream) quickly rather than growing this buffer unboundedly inside the long-lived
+         * foreground service that owns the USB connection for the length of a gig.
+         */
+        const val MAX_FRAME_CONTENT_BYTES: Int = 8 * 1024
+    }
+}
+
+/**
+ * Adapts a [FrameReassembler] to the `Flow<ByteArray>` shape of
+ * [dev.tonexotg.protocol.TonexTransport.incoming]: collects the upstream flow of raw chunks and
+ * emits one [TonexResult] per complete frame found, in order.
+ *
+ * A dangling partial frame at the end of the underlying flow (e.g. the transport disconnects
+ * mid-frame) is silently dropped rather than emitted as an error — there is no further data
+ * coming that could complete it, and [dev.tonexotg.protocol.TonexError.TransportFailure] /
+ * disconnect handling above this layer is the more meaningful signal for that situation.
+ */
+fun Flow<ByteArray>.decodeFrames(): Flow<TonexResult<ByteArray>> {
+    val reassembler = FrameReassembler()
+    return flow {
+        collect { chunk ->
+            for (result in reassembler.feed(chunk)) {
+                emit(result)
+            }
+        }
+    }
+}
