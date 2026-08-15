@@ -66,6 +66,9 @@ come from the two upstream projects our USB protocol logic was ported from.
 | Tonex parameter table (parameter IDs, scaling, min/max) | TonexOneController only | `source/main/tonex_params.c` / `.h` |
 | Preset-details response handling (`TYPE_STATE_PRESET_DETAILS`, `TYPE_STATE_PRESET_DETAILS_FULL`, preset name parsing) | TonexOneController only | `source/main/usb_tonex_one.c` / `.h` |
 | State-blob field offsets (e.g. input trim, stomp mode, cab bypass, tuning mode/reference, BPM, tempo source, direct monitor, current slot, bypass mode, slot presets) | TonexOneController only | `source/main/usb_tonex_one.h` (`TONEX_STATE_OFFSET_*` definitions) |
+| Variable-length integer encoding (`0x80`/`0x81`/`0x82`/`0x88` lead-byte forms) | tonex_controller only | `protocol.md` (a documentation file, not C++ source — see [S5's issue #9](https://github.com/wiz0floyd/tonex-otg/issues/9) for the "single-sourced, not confirmed in code" caveat on the parts beyond the core `0x80`/`0x81`/`0x82` int forms and the `0x88` float form) |
+| The `B9 03 <type> <size> <unknownA> <unknownB>` four-varint message-header envelope | TonexOneController only | `source/main/usb_tonex_one.c` (confirmed by matching this exact four-field model against every complete message literal at lines 204, 224, 246, 347 — see issue #9's corrected writeup; an earlier three-varint reading of this envelope was wrong and has been superseded) |
+| Message-type wire IDs (`TYPE_HELLO` / hello response `0x02`, `TYPE_STATE_PRESET_DETAILS_FULL` `0x0303`, `TYPE_STATE_PRESET_DETAILS` `0x0304`, `TYPE_STATE_UPDATE` `0x0306`, param-changed `0x0309`) | TonexOneController only | `source/main/usb_tonex_one.h` (same `TYPE_*` constants the preset-details row above already attributes to this file) |
 
 The first two rows describe the same logic, once per upstream source file —
 that logic derives from both projects independently, it is not a single
