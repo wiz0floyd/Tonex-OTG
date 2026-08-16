@@ -1,0 +1,140 @@
+package dev.tonexotg.app.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import dev.tonexotg.app.ui.theme.TonexTheme
+import dev.tonexotg.app.ui.theme.minTouchTarget
+
+/**
+ * A single row in the preset list (S16). Built for the mockup's active/inactive states: an
+ * accent-highlighted active row with a checkmark, or a plain row for everything else — see D2
+ * screen 1.
+ *
+ * [index] and [name] are plain strings, not protocol types — this component never imports from
+ * `dev.tonexotg.protocol.*`; the view model that builds S16's actual list is what translates a
+ * protocol preset slot into these parameters.
+ *
+ * The whole row meets [dev.tonexotg.app.ui.theme.TonexTouchTargets.min] (64dp) per D1 §4.2 — a
+ * preset switch is the single most performance-critical action in the app.
+ */
+@Composable
+fun PresetRow(
+    index: String,
+    name: String,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    subtitle: String? = null,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val borderColor = if (isActive) MaterialTheme.colorScheme.primary else Color.Transparent
+    val background = if (isActive) {
+        MaterialTheme.colorScheme.surfaceContainerHighest
+    } else {
+        MaterialTheme.colorScheme.surfaceContainer
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .minTouchTarget()
+            .clip(shape)
+            .background(background, shape)
+            .border(2.dp, borderColor, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = TonexTheme.spacing.space2, vertical = TonexTheme.spacing.space1),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space2),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(
+                    if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    RoundedCornerShape(8.dp),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = index,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isActive) MaterialTheme.colorScheme.onPrimary else TonexTheme.extendedColors.onSurfaceTertiary,
+            )
+        }
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TonexTheme.extendedColors.onSurfaceTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        if (isActive) {
+            Text(
+                text = "✓",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+@Preview(name = "Preset row — active, with subtitle", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun PresetRowActivePreview() {
+    TonexTheme {
+        PresetRow(
+            index = "07",
+            name = "Set Opener",
+            isActive = true,
+            onClick = {},
+            subtitle = "from pedal: PRESET 07",
+            modifier = Modifier.padding(16.dp),
+        )
+    }
+}
+
+@Preview(name = "Preset row — inactive, no subtitle", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun PresetRowInactivePreview() {
+    TonexTheme {
+        PresetRow(
+            index = "12",
+            name = "DJENT TIGHT",
+            isActive = false,
+            onClick = {},
+            modifier = Modifier.padding(16.dp),
+        )
+    }
+}
