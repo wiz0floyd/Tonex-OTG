@@ -63,9 +63,13 @@ object StateBlobPatcher {
      * only reassigns which preset [slot] points at.
      *
      * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
-     *   freshness contract, the *most recent* such read this session has produced. Never
-     *   synthesize one, and never hold one across other work — see [PedalState]'s KDoc for why
-     *   S9 must re-read immediately before calling this.
+     *   freshness contract, the *most recent* such read this session has produced, not already
+     *   spent on an earlier successful patch. Never synthesize one, and never hold one across
+     *   other work: S9 must re-read immediately before calling this, and — since issue #12's
+     *   round-3 review — that is no longer merely a caller convention: a successful patch
+     *   consumes [state]'s generation as part of its own success, so reusing the same [state] for
+     *   a second call (even with zero other work in between) is rejected with
+     *   [TonexError.StaleSessionState], not silently accepted. See [PedalState]'s KDoc.
      * @param currentSession the session the caller believes is live right now; compared against
      *   [PedalState.sessionId] by reference. See [TonexError.StaleSessionState].
      * @return the patched bytes, or a [TonexResult.Failure] — never throws for an out-of-range,
@@ -92,9 +96,13 @@ object StateBlobPatcher {
      * untouched.
      *
      * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
-     *   freshness contract, the *most recent* such read this session has produced. Never
-     *   synthesize one, and never hold one across other work — see [PedalState]'s KDoc for why
-     *   S9 must re-read immediately before calling this.
+     *   freshness contract, the *most recent* such read this session has produced, not already
+     *   spent on an earlier successful patch. Never synthesize one, and never hold one across
+     *   other work: S9 must re-read immediately before calling this, and — since issue #12's
+     *   round-3 review — that is no longer merely a caller convention: a successful patch
+     *   consumes [state]'s generation as part of its own success, so reusing the same [state] for
+     *   a second call (even with zero other work in between) is rejected with
+     *   [TonexError.StaleSessionState], not silently accepted. See [PedalState]'s KDoc.
      * @param currentSession the session the caller believes is live right now; compared against
      *   [PedalState.sessionId] by reference. See [TonexError.StaleSessionState].
      * @return the patched bytes, or a [TonexResult.Failure]; see [patchSlotAssignment].
@@ -125,9 +133,13 @@ object StateBlobPatcher {
      * into one; see the "no synthesis" contract on [StateBlobPatcher].
      *
      * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
-     *   freshness contract, the *most recent* such read this session has produced. Never
-     *   synthesize one, and never hold one across other work — see [PedalState]'s KDoc for why
-     *   S9 must re-read immediately before calling this.
+     *   freshness contract, the *most recent* such read this session has produced, not already
+     *   spent on an earlier successful patch. Never synthesize one, and never hold one across
+     *   other work: S9 must re-read immediately before calling this, and — since issue #12's
+     *   round-3 review — that is no longer merely a caller convention: a successful patch
+     *   consumes [state]'s generation as part of its own success, so reusing the same [state] for
+     *   a second call (even with zero other work in between) is rejected with
+     *   [TonexError.StaleSessionState], not silently accepted. See [PedalState]'s KDoc.
      * @return the patched bytes, or a [TonexResult.Failure]; see [patchSlotAssignment].
      */
     fun selectPreset(
@@ -153,23 +165,31 @@ object StateBlobPatcher {
      *    matching [SessionId]'s deliberate lack of a public constructor or structural equality.
      *    This alone only proves [state] was read *during this connection* — see the next check
      *    for why that is not enough on its own.
-     * 2. **Read freshness** — [state] must be [currentSession]'s *most recently observed* read,
-     *    not merely one from sometime during this session. A session can run for a long time, and
-     *    the pedal has no host UI — the user can change global state directly at the footswitch
-     *    (FR6) at any point, at which point every [PedalState] read before that moment is stale
-     *    even though its [PedalState.sessionId] still matches. Checked as
-     *    `state.readGeneration != currentSession.latestReadGeneration()`, refused with
-     *    [TonexError.StaleSessionState] on mismatch — see [PedalState]'s freshness contract,
-     *    which is what makes this check meaningful (it depends on S9 minting a new generation for
-     *    every fresh observation of state, explicit or pushed).
-     * 3. **Length vs. handshake** — [state]'s length must match the length pinned when
-     *    [currentSession] saw its first successful read (typically the handshake), or the write is
-     *    refused with [TonexError.BlobSizeChangedSinceHandshake]. A layout shift almost always
-     *    changes the blob's overall length, so this is the primary shape-drift signal.
-     * 4. **Minimum plausible length** — [state] must be at least
+     * 2. **Read freshness** — [state] must be [currentSession]'s *current* generation: not
+     *    superseded by a later read, and not already spent on an earlier successful patch (see
+     *    step 7). A session can run for a long time, and the pedal has no host UI — the user can
+     *    change global state directly at the footswitch (FR6) at any point, at which point every
+     *    [PedalState] read before that moment is stale even though its [PedalState.sessionId]
+     *    still matches. Checked as `state.readGeneration != currentSession.latestReadGeneration()`,
+     *    refused with [TonexError.StaleSessionState] on mismatch — see [PedalState]'s freshness
+     *    contract, which is what makes this check meaningful (it depends on S9 minting a new
+     *    generation for every fresh observation of state, explicit or pushed, and on step 7 below
+     *    consuming the generation on every successful write).
+     * 3. **Minimum plausible length** — [state] must be at least
      *    [StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE] bytes — a floor derived from the pedal's known
      *    field layout, not merely "long enough to index safely" — or the write is refused with
-     *    [TonexError.BlobTooShortToPatch].
+     *    [TonexError.BlobTooShortToPatch]. Checked *before* step 4 so a too-short blob is always
+     *    diagnosed as "too short," even if it also happens to differ from an already-pinned size
+     *    (issue #12 round-3 review — the reverse order let the less useful
+     *    [TonexError.BlobSizeChangedSinceHandshake] mask this more useful diagnosis, and also let
+     *    a too-short *first* read for a session pin the session to an implausible size at all; see
+     *    [SessionId.pinBlobSizeIfAbsent]).
+     * 4. **Length vs. pinned size** — [state]'s length must match the length pinned at
+     *    [currentSession]'s first *plausible-sized* read (see [SessionId.pinBlobSizeIfAbsent] and
+     *    [TonexError.BlobSizeChangedSinceHandshake]'s KDoc for why that is not literally "the
+     *    handshake blob" despite the error's name), or the write is refused with
+     *    [TonexError.BlobSizeChangedSinceHandshake]. A layout shift almost always changes the
+     *    blob's overall length, so this is the primary shape-drift signal.
      * 5. **Shape sanity** — the bytes currently sitting at the slot-preset and active-slot
      *    offsets must look like what those fields are documented to hold (plausible preset
      *    indices, a plausible slot number). A firmware whose state layout has moved again since
@@ -186,6 +206,16 @@ object StateBlobPatcher {
      *    for this entry point specifically; it is not a blanket guarantee about every other
      *    consumer of a `PresetIndex` in this codebase — see [TonexError.InvalidPresetIndex]'s
      *    KDoc.
+     * 7. **Single-use consumption** — once steps 1-6 all pass, [state]'s generation is *consumed*:
+     *    [SessionId.consumeReadGeneration] atomically advances [currentSession]'s
+     *    latest-read-generation counter past [PedalState.readGeneration]. This is what makes a
+     *    [PedalState] single-use as a write authorization, not merely "was this the freshest read
+     *    at some point": a second patch call reusing the exact same [state] — even with zero other
+     *    work between the two calls — fails step 2 above, because [state]'s generation is no
+     *    longer [currentSession]'s current one. Refused with [TonexError.StaleSessionState] on the
+     *    (rare, race-only) chance the atomic advance itself fails. Closes the blocker where two
+     *    back-to-back calls to a patch function against the same read let the second silently
+     *    revert the first (issue #12 round-3 review).
      *
      * Returns a *fresh, defensive copy* of the blob's bytes on success — callers patch that copy
      * directly; [state] itself is never mutated (it has no mutable surface to mutate).
@@ -198,7 +228,8 @@ object StateBlobPatcher {
         if (state.sessionId !== currentSession) {
             return TonexResult.Failure(
                 TonexError.StaleSessionState(
-                    "state blob's SessionId is not the same instance as the session presented for this write",
+                    details = "state blob's SessionId is not the same instance as the session presented for this write",
+                    sameSession = false,
                 ),
             )
         }
@@ -206,22 +237,21 @@ object StateBlobPatcher {
         if (state.readGeneration != currentSession.latestReadGeneration()) {
             return TonexResult.Failure(
                 TonexError.StaleSessionState(
-                    "state blob is not this session's most recently observed read - it may have been " +
+                    details = "state blob is not this session's most recently observed read - it may have been " +
                         "superseded by a later read or by the pedal pushing an update (e.g. an " +
                         "external/footswitch change); re-read state immediately before patching",
+                    sameSession = true,
                 ),
             )
         }
 
         val bytes = state.copyOfBytes()
 
-        val pinnedSize = currentSession.pinnedBlobSize()
-        if (pinnedSize != null && bytes.size != pinnedSize) {
-            return TonexResult.Failure(
-                TonexError.BlobSizeChangedSinceHandshake(pinnedSize = pinnedSize, actualSize = bytes.size),
-            )
-        }
-
+        // Minimum-length checked BEFORE the pin comparison: a too-short blob must be diagnosed as
+        // "too short" (BlobTooShortToPatch), not misreported as "size changed since the pin"
+        // (BlobSizeChangedSinceHandshake) just because it also happens to differ from an
+        // already-established pin (issue #12 round-3 review - the more useful diagnosis was being
+        // masked by the less useful one under the old ordering).
         if (bytes.size < StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE) {
             return TonexResult.Failure(
                 TonexError.BlobTooShortToPatch(
@@ -231,12 +261,34 @@ object StateBlobPatcher {
             )
         }
 
+        val pinnedSize = currentSession.pinnedBlobSize()
+        if (pinnedSize != null && bytes.size != pinnedSize) {
+            return TonexResult.Failure(
+                TonexError.BlobSizeChangedSinceHandshake(pinnedSize = pinnedSize, actualSize = bytes.size),
+            )
+        }
+
         if (!looksLikeSlotRegion(bytes)) {
             return TonexResult.Failure(TonexError.ImplausibleStateBlobShape(actualSize = bytes.size))
         }
 
         if (preset != null && preset.value !in PresetIndex.VALID_RANGE) {
             return TonexResult.Failure(TonexError.InvalidPresetIndex(preset.value))
+        }
+
+        // Consume state's read-generation as the final step of authorization: this is what makes
+        // a PedalState single-use for a write, not merely "was the freshest read at some point."
+        // A concurrent or repeated call reusing the same `state` will fail here (or fail the
+        // freshness check above, on a second sequential call) rather than silently succeeding a
+        // second time (issue #12 round-3 review - the blocker finding).
+        if (!currentSession.consumeReadGeneration(state.readGeneration)) {
+            return TonexResult.Failure(
+                TonexError.StaleSessionState(
+                    details = "state blob has already been used to authorize a write - a PedalState is " +
+                        "single-use for a write; re-read state and retry",
+                    sameSession = true,
+                ),
+            )
         }
 
         return TonexResult.Success(bytes)

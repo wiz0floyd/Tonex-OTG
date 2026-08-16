@@ -102,18 +102,38 @@ sealed class TonexError {
     }
 
     /**
-     * A write was attempted against a [PedalState] that does not carry proof of having been
-     * read from the pedal during the *current* session.
+     * A write was attempted against a [PedalState] that is not currently authorized to write —
+     * either because it was never read during the *current* session, or because it was read
+     * during the current session but is no longer usable (superseded by a later read, or already
+     * spent on an earlier successful patch).
      *
      * This is the runtime backstop behind [PedalState]'s structural provenance guarantee: the
      * type system already makes it impossible for code outside `:protocol` to construct a
-     * [PedalState] at all, and [SessionId] equality further catches a *stale* blob retained
-     * from a previous, since-ended session of this same module. This error is what a caller
-     * sees if that second check trips.
+     * [PedalState] at all; [SessionId] equality catches a *stale* blob retained from a previous,
+     * since-ended session of this same module; and [SessionId]'s read-generation tracking catches
+     * a blob that is genuinely from *this* session but is no longer the authorized one to write —
+     * either because a later read has superseded it, or because it has already been used for one
+     * successful write (a [PedalState] is single-use as a write authorization; see
+     * [dev.tonexotg.protocol.state.StateBlobPatcher]'s `prepareForPatch`, issue #12 round-3
+     * review).
+     *
+     * @property details a specific, human-readable explanation of which of the above actually
+     *   happened — not meant to be parsed, but always accurate for the case it describes.
+     * @property sameSession `true` when [details] describes a same-session-but-no-longer-current
+     *   rejection (superseded-by-a-later-read, or already-spent), `false` when it describes a
+     *   genuinely cross-session rejection. Exists so [message] never claims a blob "is not from
+     *   the current session" when it demonstrably is — an inaccuracy the round-2 fix left in
+     *   place for the generation-stale case (issue #12 round-3 review) and this property closes.
      */
-    data class StaleSessionState(val details: String) : TonexError() {
+    data class StaleSessionState(val details: String, val sameSession: Boolean) : TonexError() {
         override val message: String
-            get() = "Refused write: state blob is not from the current session ($details)"
+            get() = if (sameSession) {
+                "Refused write: state blob IS from the current session, but is not currently " +
+                    "authorized to write with — it may have been superseded by a later read, or " +
+                    "already used for an earlier write ($details)"
+            } else {
+                "Refused write: state blob is not from the current session ($details)"
+            }
     }
 
     /**
@@ -163,20 +183,33 @@ sealed class TonexError {
     }
 
     /**
-     * A [PedalState] blob's length differs from the length observed at this session's first
-     * successful state read (the handshake `GetState` step; see [SessionId]). A firmware layout
-     * shift almost always changes the blob's overall length, so a length change partway through
-     * a session is this module's strongest available signal that the pinned offsets in
+     * A [PedalState] blob's length differs from the length pinned at this session's first
+     * *plausible-sized* read (see [SessionId.pinBlobSizeIfAbsent]).
+     *
+     * That pin is **not** literally "the blob seen when this session connected" or "the
+     * handshake blob" — despite this error's name, kept for continuity with earlier rounds of
+     * issue #12's review. A [SessionId] does not exist until [ConnectionState.Ready] is reached,
+     * and `Ready` is only reached *after* the handshake's `GetState` blob has already been read
+     * (see [SessionId]'s KDoc) — so no [PedalState], and therefore no pin, can ever be anchored
+     * to that specific read. The pin is actually established by this session's first
+     * plausible-sized [PedalState], which is necessarily some read observed strictly after
+     * [ConnectionState.Ready], not the handshake read itself (issue #12 round-3 review corrected
+     * this KDoc and [message] to say so precisely, rather than changing the pinning mechanism
+     * itself). A firmware layout shift almost always changes the blob's overall length regardless
+     * of exactly which read established the pin, so a length change partway through a session
+     * remains this module's strongest available signal that the pinned offsets in
      * `StateBlobOffsets` are no longer trustworthy for this pedal at all — a much more specific
      * diagnosis than "the shape looks a bit odd" ([ImplausibleStateBlobShape]).
      *
-     * @property pinnedSize the blob length observed at this session's first state read.
+     * @property pinnedSize the blob length pinned at this session's first plausible-sized read.
      * @property actualSize the blob's actual length now.
      */
     data class BlobSizeChangedSinceHandshake(val pinnedSize: Int, val actualSize: Int) : TonexError() {
         override val message: String
-            get() = "State blob size changed from $pinnedSize bytes (seen when this session connected) " +
-                "to $actualSize bytes now — refusing to patch a blob whose layout may have moved"
+            get() = "State blob size changed from $pinnedSize bytes (this session's first " +
+                "plausible-sized read, observed after the connection reached Ready — not " +
+                "necessarily the handshake blob itself) to $actualSize bytes now — refusing to " +
+                "patch a blob whose layout may have moved"
     }
 
     /**

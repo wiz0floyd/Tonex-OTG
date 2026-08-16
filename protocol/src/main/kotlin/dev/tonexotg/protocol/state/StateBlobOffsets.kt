@@ -37,7 +37,8 @@ import dev.tonexotg.protocol.PresetSlot
  *
  * There is no way to detect a *silent* further layout shift from the blob alone — the sanity
  * checks in [StateBlobPatcher] catch an *implausible* value at these offsets, and a length
- * mismatch against the size pinned at this session's handshake read
+ * mismatch against the size pinned at this session's first plausible-sized read (not literally
+ * the handshake blob — see [TonexError.BlobSizeChangedSinceHandshake]'s KDoc)
  * ([StateBlobPatcher] / [TonexError.BlobSizeChangedSinceHandshake]) catches most real shifts
  * (a layout shift almost always changes the blob's overall length) — but a shift that happens to
  * preserve the blob's total length *and* leave plausible-looking values behind at these four
