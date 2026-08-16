@@ -217,11 +217,120 @@ class StateBlobPatcherTest {
         val error = StateBlobPatcher.patchActiveSlot(stale, session, PresetSlot.A).assertFailure()
 
         assertTrue(error is TonexError.StaleSessionState)
+        assertTrue((error as TonexError.StaleSessionState).sameSession, "the stale blob IS from the current session")
+    }
+
+    // ---- generation-aware message accuracy (issue #12 round-3 review, LOW finding #1) ---------
+    //
+    // The round-2 message was hardcoded to "state blob is not from the current session" even in
+    // the stale-generation case, where the blob demonstrably IS from the current session - it is
+    // just no longer the current one. A test that only asserted the message contains the word
+    // "current" was too weak to catch that (both the accurate and the inaccurate wording contain
+    // "current"). These assert the actual accuracy for both cases.
+
+    @Test
+    fun `cross-session rejection message accurately says the blob is not from the current session`() {
+        val readSession = SessionId.create()
+        val currentSession = SessionId.create()
+        val state = stateFor(readSession, plausibleBlob())
+
+        val error = StateBlobPatcher.patchSlotAssignment(state, currentSession, PresetSlot.A, PresetIndex(3)).assertFailure()
+
+        assertTrue(error is TonexError.StaleSessionState)
+        error as TonexError.StaleSessionState
+        assertFalse(error.sameSession, "this IS a genuinely cross-session rejection")
         assertTrue(
-            (error as TonexError.StaleSessionState).message.contains("current session", ignoreCase = false) ||
-                error.message.contains("current", ignoreCase = true),
-            "message should be usable as a direct, honest explanation: ${error.message}",
+            error.message.contains("is not from the current session"),
+            "cross-session message must say the blob isn't from the current session: ${error.message}",
         )
+    }
+
+    @Test
+    fun `stale-generation rejection message does NOT falsely claim the blob is from a different session`() {
+        val session = SessionId.create()
+        val stale = stateFor(session, plausibleBlob())
+        stateFor(session, plausibleBlob()) // supersedes `stale` within the same session
+
+        val error = StateBlobPatcher.patchActiveSlot(stale, session, PresetSlot.A).assertFailure()
+
+        assertTrue(error is TonexError.StaleSessionState)
+        error as TonexError.StaleSessionState
+        assertTrue(error.sameSession, "the blob IS from the current session, just not the current read")
+        assertFalse(
+            error.message.contains("is not from the current session"),
+            "the blob genuinely IS from the current session - the message must not claim otherwise: ${error.message}",
+        )
+        assertTrue(
+            error.message.contains("IS from the current session", ignoreCase = false) ||
+                error.message.contains("current session", ignoreCase = true),
+            "message should still name the session, accurately: ${error.message}",
+        )
+    }
+
+    // ---- single-use write authorization (BLOCKER fix, issue #12 round-3 review) ----------------
+    //
+    // Live reproduction from the round-2 review, reproduced exactly: a PedalState previously
+    // authorized an UNBOUNDED number of writes once obtained, because the generation check only
+    // verified "is this the newest PedalState this module ever built" - not "has this specific
+    // PedalState already been spent on a write." Both the session check and the (pre-fix)
+    // generation check passed on a SECOND call reusing the same read, letting the second write
+    // silently revert whatever the first write had just changed - the exact failure class (a
+    // stale whole-device blob echoed back over an intervening change) this entire story exists to
+    // prevent, just relocated from "across a footswitch press" to "across the module's own second
+    // call."
+
+    @Test
+    fun `a PedalState is single-use for a write - reusing it for a second patch is rejected, not silently accepted`() {
+        val session = SessionId.create()
+        // read1 = create(session, blob): A=2 B=5 C=9, active=A, generation 1.
+        val read1 = stateFor(session, plausibleBlob(slotA = 2, slotB = 5, slotC = 9, currentSlot = 0))
+
+        // selectPreset(read1, session, A, 7) -> ACCEPTED, pedal now holds A=7.
+        val firstWrite = StateBlobPatcher.selectPreset(read1, session, PresetSlot.A, PresetIndex(7))
+        val firstBytes = firstWrite.assertSuccess()
+        assertEquals(7.toByte(), firstBytes[firstBytes.size - StateBlobOffsets.END_SLOT_A_PRESET], "first write must actually set A=7")
+
+        // selectPreset(read1, session, B, 11) -> reusing the SAME read1, no re-read in between.
+        // Pre-fix this was ACCEPTED and echoed A=2 back (reverting the write above). Post-fix it
+        // must be REJECTED outright.
+        val secondWrite = StateBlobPatcher.selectPreset(read1, session, PresetSlot.B, PresetIndex(11))
+
+        val error = secondWrite.assertFailure()
+        assertTrue(error is TonexError.StaleSessionState, "expected StaleSessionState (spent PedalState), got $error")
+        assertTrue((error as TonexError.StaleSessionState).sameSession, "read1 IS from the current session - it's just already spent")
+    }
+
+    @Test
+    fun `single-use enforcement applies uniformly across patchSlotAssignment, patchActiveSlot, and selectPreset`() {
+        // The blocker is about the shared prepareForPatch gate, not about selectPreset
+        // specifically - prove all three public entry points are single-use.
+        for (secondCall in listOf<(PedalState, SessionId) -> TonexResult<ByteArray>>(
+            { state, session -> StateBlobPatcher.patchSlotAssignment(state, session, PresetSlot.B, PresetIndex(1)) },
+            { state, session -> StateBlobPatcher.patchActiveSlot(state, session, PresetSlot.B) },
+            { state, session -> StateBlobPatcher.selectPreset(state, session, PresetSlot.B, PresetIndex(1)) },
+        )) {
+            val session = SessionId.create()
+            val read1 = stateFor(session, plausibleBlob())
+
+            StateBlobPatcher.patchSlotAssignment(read1, session, PresetSlot.A, PresetIndex(3)).assertSuccess()
+
+            val second = secondCall(read1, session)
+            assertTrue(second.assertFailure() is TonexError.StaleSessionState, "second call against the spent read1 must be rejected")
+        }
+    }
+
+    @Test
+    fun `after a PedalState is spent by one successful patch, a fresh re-read authorizes the next write`() {
+        // The fix must fail closed on reuse, not brick the session - a genuine re-read (what S9
+        // is required to do before every patch) must still work normally afterwards.
+        val session = SessionId.create()
+        val read1 = stateFor(session, plausibleBlob())
+        StateBlobPatcher.selectPreset(read1, session, PresetSlot.A, PresetIndex(7)).assertSuccess()
+
+        val read2 = stateFor(session, plausibleBlob(slotA = 7)) // S9 re-reads before the next write
+        val result = StateBlobPatcher.selectPreset(read2, session, PresetSlot.B, PresetIndex(11))
+
+        result.assertSuccess()
     }
 
     // ---- length validation -------------------------------------------------------------------
@@ -328,6 +437,69 @@ class StateBlobPatcherTest {
         val result = StateBlobPatcher.patchSlotAssignment(samSizeLater, session, PresetSlot.B, PresetIndex(1))
 
         result.assertSuccess()
+    }
+
+    // ---- truncated first read must not permanently brick the session (HIGH fix, round-3) ------
+    //
+    // pinBlobSizeIfAbsent ran on every create() call with no minimum-size check and the pin was
+    // one-way with no reset: create(session, ByteArray(0)) pinned the session's expected blob size
+    // at 0, and every subsequent legitimate read - for the rest of the connection's life - was
+    // then rejected as "size changed from 0 to N", recoverable only by a reconnect. Fix: only a
+    // plausible-sized (>= MIN_PLAUSIBLE_BLOB_SIZE) read may pin the size at all.
+
+    @Test
+    fun `a truncated corrupt first read does not permanently brick every subsequent legitimate patch`() {
+        val session = SessionId.create()
+        // Simulates a truncated/corrupt first frame - e.g. a malformed read that reassembled down
+        // to zero usable bytes.
+        PedalState.create(session, ByteArray(0)).assertSuccess()
+
+        // A subsequent, legitimate 120-byte read.
+        val good = plausibleBlob(size = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE + 20)
+        val state = stateFor(session, good)
+
+        val result = StateBlobPatcher.patchActiveSlot(state, session, PresetSlot.C)
+
+        // Pre-fix this was rejected forever with BlobSizeChangedSinceHandshake(pinnedSize = 0, ...).
+        result.assertSuccess()
+    }
+
+    @Test
+    fun `a too-short first read does not pin the session's blob size at all - a later legitimate size gets pinned instead`() {
+        val session = SessionId.create()
+
+        PedalState.create(session, ByteArray(0)).assertSuccess()
+        assertEquals(null, session.pinnedBlobSize(), "a too-short blob must not establish the size pin")
+
+        val goodState = stateFor(session, plausibleBlob())
+        assertEquals(
+            StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE,
+            session.pinnedBlobSize(),
+            "the first plausible-sized read must establish the pin",
+        )
+
+        // And a third read at that same pinned size continues to work normally.
+        val thirdState = stateFor(session, plausibleBlob(slotB = 11))
+        StateBlobPatcher.patchSlotAssignment(thirdState, session, PresetSlot.B, PresetIndex(2)).assertSuccess()
+    }
+
+    @Test
+    fun `a too-short blob is diagnosed as too-short, not as a pin mismatch, even when a pin already exists`() {
+        // Reproduces the check-ordering bug: with a valid pin already established by an earlier
+        // legitimate read, a later corrupt/truncated read is both "too short" AND "differs from
+        // the pin" - the more useful diagnosis (too short) must win because it is checked first.
+        val session = SessionId.create()
+        stateFor(session, plausibleBlob()) // legitimate first read - pins the session
+
+        val tooShort = PedalState.create(session, ByteArray(10)).assertSuccess()
+
+        val result = StateBlobPatcher.patchActiveSlot(tooShort, session, PresetSlot.A)
+
+        val error = result.assertFailure()
+        assertTrue(
+            error is TonexError.BlobTooShortToPatch,
+            "expected BlobTooShortToPatch (min-length checked before the pin comparison), got $error",
+        )
     }
 
     // ---- shape sanity check -------------------------------------------------------------------
@@ -573,12 +745,21 @@ class StateBlobPatcherTest {
         // exact methodology (compile a plain Java caller against this module's real compiled
         // output) as a regression test, instead of only asserting about bytecode shape.
         val compiler = java.util.spi.ToolProvider.findFirst("javac")
-        if (compiler.isEmpty) {
-            // No system Java compiler on the test JVM (i.e. running on a JRE, not a JDK) - the
-            // reflection-based constructor-privacy tests above still cover the guarantee; skip
-            // rather than fail the whole suite over environment shape.
-            return
-        }
+        // Fail loud-and-visible, per this project's own philosophy (CLAUDE.md), rather than a
+        // silent `return` that lets this flagship test disappear with zero signal on a JRE-only
+        // environment (issue #12 round-3 review, LOW finding #2) - a silently-passing green test
+        // is exactly what "fail fast and loud" exists to rule out. Assumptions.assumeTrue reports
+        // as a visible SKIPPED result (this module's testLogging is configured to show
+        // "skipped" events, see protocol/build.gradle.kts) with an explicit reason, not a normal
+        // pass.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+            compiler.isPresent,
+            "No system Java compiler (javac) available on this test JVM - probably running on a " +
+                "JRE, not a JDK. This is the strongest version of the no-forgery guarantee test; " +
+                "the reflection-based constructor-privacy tests above still cover the same " +
+                "guarantee in this environment, but this specific test is being SKIPPED, not " +
+                "silently passed.",
+        )
 
         val classesDir = java.io.File(PedalState::class.java.protectionDomain.codeSource.location.toURI())
         val stdlibJar =
@@ -684,11 +865,21 @@ class StateBlobPatcherTest {
 
         val result = StateBlobPatcher.patchActiveSlot(state, forgedSession, PresetSlot.A)
 
-        // This succeeds - and that is fine: it is not a bypass of anything, because nothing
-        // outside :protocol can reach `SessionId.create()` or `PedalState.create()` in the first
-        // place (see the constructor-privacy tests above), and TonexController's public surface
-        // never hands either type out. Asserted here so the "what would forging look like"
-        // question has one concrete, honest answer instead of an unverified claim.
+        // This succeeds - and that is fine, but the reason is narrower than an earlier version of
+        // this comment claimed. `SessionId.create()` and `PedalState.create()` are NOT unreachable
+        // from outside :protocol in an absolute sense: `internal` compiles to a public,
+        // name-mangled JVM method (e.g. `create$protocol`), Kotlin's mangling uses `$` (a legal
+        // Java identifier character), and a caller who goes looking for that exact mangled name
+        // can spell `SessionId.Companion.create$protocol()` /
+        // `PedalState.Companion.create$protocol(...)` directly from plain `javac`-compiled Java
+        // source with ZERO reflection - re-demonstrated in issue #12's round-3 review, correcting
+        // this same overclaim for the second time (see [PedalState]'s KDoc for the matching
+        // correction there). What actually makes this safe is narrower: unreachable from ordinary
+        // Kotlin callers, and unreachable from Java without independently knowing the mangled
+        // name; and `TonexController`'s public surface never hands a [SessionId] or [PedalState]
+        // out to begin with, so there is no legitimate caller with a payload to build one from.
+        // Not exploitable today - but that is a "nothing to reach it with" argument, not a
+        // "cannot be reached" one, and this test should not overclaim the latter a third time.
         result.assertSuccess()
     }
 }
