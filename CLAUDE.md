@@ -57,6 +57,79 @@ accordingly:
   project, re-running the suite after two agents died turned out to
   contradict what one of them believed about its own test failures.)
 
+## Agent model selection
+
+Match model cost to task risk and reasoning load, not uniformly:
+
+- **Haiku** — mechanical, low-judgment work: posting/closing GitHub issues,
+  filing routine comments, text edits with an exact spec to follow. Fast
+  and cheap; don't spend a bigger model on rote GitHub hygiene.
+- **Sonnet** — the default workhorse: implementing stories, writing tests,
+  applying fixes from a review, general research and exploration.
+- **Opus** — adversarial code review, and only that. Reserve it for stories
+  where a wrong answer has real cost: anything that writes to the pedal,
+  anything touching state that could corrupt a user's only hardware device,
+  or adjudicating a disputed finding a Sonnet pass couldn't resolve on its
+  own. Opus reviews on this project have twice found a genuine blocker that
+  a Sonnet implementation pass reported as "criteria met, tests green" —
+  that gap is what justifies the cost, so don't skip the review to save it.
+
+## Review rigor, scaled to blast radius
+
+Not every change needs the same scrutiny. Scale it to what's at stake:
+
+- **High-stakes code** (anything that writes to the pedal, parses its
+  responses, or touches state that could be echoed back corrupted) gets an
+  adversarial Opus review before merge — not just a green test run. Brief
+  the reviewer to assume the implementation is wrong until proven otherwise,
+  to verify claims independently rather than trusting the diff's own tests,
+  and to hand-check protocol literals against the actual upstream source
+  rather than trusting a citation in the code or issue text. A prior
+  session's citation of an upstream detail (an offset table's supposed
+  version history) turned out to be fabricated; the reviewer only caught it
+  by fetching the real upstream repo and checking.
+- **If a fix round changes architecture** (not just patches a specific bug),
+  re-review before merging — a green test suite after the fix proves the
+  fix compiles and passes its own tests, not that it actually closes the
+  gap the original review found. Don't treat "tests pass now" as
+  equivalent to "reviewed."
+- **Findings that can't be resolved without hardware** (this project has no
+  physical pedal in the cloud environment) should not be silently pinned as
+  correct or silently dropped. Un-pin the code (a skipped/pending test with
+  a clear reason), and file the exact resolving observation as a GitHub
+  issue comment — usually on the hardware-probe story (#25 / S20) — so the
+  next session with hardware access knows precisely what to check.
+- **Byte-exact / literal-exact acceptance criteria are gold.** Writing
+  tests against real captured or upstream literals (not just internal
+  round-trip self-consistency) is what caught a real wire-format bug in S7
+  that 100%-passing self-consistent tests had been hiding. Prefer literal
+  assertions over "encode then decode and compare" whenever a real
+  reference literal exists.
+- **Review findings are a durable artifact, not chat output.** File them on
+  the relevant GitHub issue (new issue, or a comment on an existing one) so
+  they survive past the session that found them, whether or not they're
+  fixed immediately.
+
+## Standing merge authority
+
+The product owner (@wiz0floyd) has granted standing permission to act
+autonomously on pull requests, merges, and codebase decisions for this
+project — no need to ask before merging reviewed, green, tested work.
+Scope of that grant, and its one deliberate exception:
+
+- **In scope:** opening PRs, merging PRs, routine engineering decisions
+  (architecture, dependency choices, refactors, error-handling design) that
+  a competent engineer would make without needing a stakeholder's input.
+- **Still escalate:** non-obvious decisions with a real product-facing
+  tradeoff — something a reasonable engineer could resolve two different
+  ways and where the choice actually matters to the person using the app.
+  When in doubt, escalate; the cost of asking is low.
+- **The one standing exception, by explicit design:** D2's mockup sign-off
+  (#6) and any future design-review gate that requires looking at the UI on
+  the actual target device. Those are subjective visual/UX judgment calls
+  that genuinely require the product owner's own eyes on their own phone —
+  autonomy over "the codebase" does not extend to substituting for that.
+
 ## Branch discipline
 
 - Every task or agent works on its own dedicated branch. Never commit to
