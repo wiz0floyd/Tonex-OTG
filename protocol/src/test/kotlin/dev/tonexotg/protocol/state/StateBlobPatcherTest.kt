@@ -333,6 +333,117 @@ class StateBlobPatcherTest {
         result.assertSuccess()
     }
 
+    // ---- a FAILED create() attempt must also invalidate the caller's previous state (MEDIUM, round-4) --
+    //
+    // PedalState.create() previously only minted a fresh generation on the SUCCESS path. A failed
+    // re-read (e.g. S9's mandatory pre-patch re-read hitting an oversized frame, a timeout, or a
+    // CRC failure) left the caller's previously-held, still-valid PedalState fully authorized to
+    // write with - so a caller that proceeded to patch anyway after a failed re-read would echo
+    // the STALE state back over any intervening pedal change, exactly the failure class this story
+    // exists to prevent, just reached via a failed observation instead of a stale one.
+
+    @Test
+    fun `a failed create() attempt invalidates a previously-held valid PedalState for patching`() {
+        val session = SessionId.create()
+        // A valid, successful read - normally fully authorized to write with.
+        val valid = stateFor(session, plausibleBlob())
+
+        // A failed create() attempt on the SAME session - e.g. S9's mandatory pre-patch re-read
+        // came back oversized. Must fail, per PedalState.create's existing size cap.
+        val failedReread = PedalState.create(session, ByteArray(PedalState.MAX_STATE_BYTES + 1))
+        assertTrue(failedReread.assertFailure() is TonexError.OversizedStateBlob)
+
+        // Proceeding to patch using the ORIGINAL valid PedalState must now be REJECTED - the
+        // failed observation attempt must have advanced the generation and invalidated it, not
+        // left it usable.
+        val result = StateBlobPatcher.patchActiveSlot(valid, session, PresetSlot.A)
+
+        val error = result.assertFailure()
+        assertTrue(error is TonexError.StaleSessionState, "expected StaleSessionState, got $error")
+        assertTrue((error as TonexError.StaleSessionState).sameSession, "the blob IS from the current session - it's just been invalidated by the failed re-read")
+    }
+
+    @Test
+    fun `after a failed create() attempt, a genuine successful re-read still authorizes the next write normally`() {
+        // The fix must fail closed on the pre-failure state, not brick the session - a real
+        // successful re-read after the failure must still work.
+        val session = SessionId.create()
+        stateFor(session, plausibleBlob())
+
+        PedalState.create(session, ByteArray(PedalState.MAX_STATE_BYTES + 1)) // failed re-read attempt
+
+        val freshRead = stateFor(session, plausibleBlob(slotA = 3)) // a genuine successful re-read
+        val result = StateBlobPatcher.patchActiveSlot(freshRead, session, PresetSlot.B)
+
+        result.assertSuccess()
+    }
+
+    // ---- accurate spent-vs-superseded message (LOW finding #1, round-4) -----------------------
+    //
+    // Sequential reuse of a just-spent PedalState was previously caught by the same generic
+    // "may have been superseded by a later read..." message used for every stale-generation
+    // rejection - even though the actual cause here is that the CALLER'S OWN prior patch consumed
+    // it, not an external/footswitch change. A dedicated "already used for a write" message
+    // existed but was unreachable in this exact, common sequential-reuse case. These assert the
+    // message reaching the caller is now accurate for each distinct cause.
+
+    @Test
+    fun `reusing a PedalState immediately after it was spent by this caller's own patch reports the spent-by-write message`() {
+        val session = SessionId.create()
+        val read1 = stateFor(session, plausibleBlob())
+        StateBlobPatcher.selectPreset(read1, session, PresetSlot.A, PresetIndex(7)).assertSuccess()
+
+        // Immediate reuse of the exact PedalState just spent - no intervening read.
+        val error = StateBlobPatcher.selectPreset(read1, session, PresetSlot.B, PresetIndex(11)).assertFailure()
+
+        assertTrue(error is TonexError.StaleSessionState)
+        error as TonexError.StaleSessionState
+        assertTrue(error.sameSession)
+        assertTrue(
+            error.message.contains("already used for a write") || error.message.contains("already been used"),
+            "reusing a just-spent PedalState should report it was already used for a write, not a generic " +
+                "superseded message: ${error.message}",
+        )
+    }
+
+    @Test
+    fun `a state superseded by a later read (not by this caller's own write) still reports the generic superseded message`() {
+        val session = SessionId.create()
+        val stale = stateFor(session, plausibleBlob())
+        stateFor(session, plausibleBlob()) // a later read supersedes `stale` - `stale` was never spent by a write
+
+        val error = StateBlobPatcher.patchActiveSlot(stale, session, PresetSlot.A).assertFailure()
+
+        assertTrue(error is TonexError.StaleSessionState)
+        error as TonexError.StaleSessionState
+        assertTrue(error.sameSession)
+        assertFalse(
+            error.message.contains("already used for a write") || error.message.contains("already been used"),
+            "a state that was never spent by a write must not be reported as already-used: ${error.message}",
+        )
+        assertTrue(
+            error.message.contains("superseded"),
+            "a genuinely superseded-by-a-later-read state should keep the generic superseded wording: ${error.message}",
+        )
+    }
+
+    @Test
+    fun `a state invalidated by a failed create() attempt (not spent by a write) reports the generic superseded message, not spent-by-write`() {
+        val session = SessionId.create()
+        val valid = stateFor(session, plausibleBlob())
+
+        PedalState.create(session, ByteArray(PedalState.MAX_STATE_BYTES + 1)) // failed re-read, never spent by a write
+
+        val error = StateBlobPatcher.patchActiveSlot(valid, session, PresetSlot.A).assertFailure()
+
+        assertTrue(error is TonexError.StaleSessionState)
+        error as TonexError.StaleSessionState
+        assertFalse(
+            error.message.contains("already used for a write") || error.message.contains("already been used"),
+            "a state invalidated by a FAILED create() was never spent by a write - must not claim it was: ${error.message}",
+        )
+    }
+
     // ---- length validation -------------------------------------------------------------------
 
     @Test
@@ -481,6 +592,83 @@ class StateBlobPatcherTest {
         // And a third read at that same pinned size continues to work normally.
         val thirdState = stateFor(session, plausibleBlob(slotB = 11))
         StateBlobPatcher.patchSlotAssignment(thirdState, session, PresetSlot.B, PresetIndex(2)).assertSuccess()
+    }
+
+    // ---- self-correcting pin: growth widens, only a genuine shrink is rejected (HIGH, round-4) --
+    //
+    // The round-3 fix only stopped a too-SHORT (< MIN_PLAUSIBLE_BLOB_SIZE) first read from
+    // pinning at all - it did not stop a corrupt/partial read landing ANYWHERE in
+    // [MIN_PLAUSIBLE_BLOB_SIZE, MAX_STATE_BYTES) from pinning and then permanently rejecting every
+    // subsequent LEGITIMATE (larger) read for the rest of the connection, recoverable only by a
+    // reconnect. Fix: the pin tracks the largest plausible size observed so far, not the first -
+    // growth widens the pin (evidence the smaller pin was itself corrupt/truncated), and only a
+    // shrink below the established pin is still treated as the "layout changed" signal.
+
+    @Test
+    fun `a corrupt short read that pins first does not permanently reject a legitimate larger read that follows - exact repro`() {
+        val session = SessionId.create()
+
+        // create(session, <corrupt 120-byte read>) -> pins at 120. 120 is >= MIN_PLAUSIBLE_BLOB_SIZE
+        // (100) so it is "plausible enough" to pin under the round-3 fix, despite being corrupt.
+        val corruptSize = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE + 20
+        PedalState.create(session, ByteArray(corruptSize)).assertSuccess()
+        assertEquals(corruptSize, session.pinnedBlobSize(), "the corrupt-but-plausible read pins first")
+
+        // create(session, <legit 512-byte read>) -> pre-fix this was Failure(BlobSizeChangedSinceHandshake)
+        // forever after. Post-fix the larger read must widen the pin and be accepted for patching.
+        val legit = plausibleBlob(size = PedalState.MAX_STATE_BYTES)
+        val legitState = stateFor(session, legit)
+        assertEquals(
+            PedalState.MAX_STATE_BYTES,
+            session.pinnedBlobSize(),
+            "a larger legitimate read must widen the pin, not be rejected against the smaller corrupt one",
+        )
+
+        val firstPatch = StateBlobPatcher.patchActiveSlot(legitState, session, PresetSlot.B)
+        firstPatch.assertSuccess()
+
+        // And legit reads keep succeeding after the widen - not reject-forever, and not a one-shot
+        // fluke either.
+        val again = stateFor(session, plausibleBlob(size = PedalState.MAX_STATE_BYTES, slotB = 11))
+        StateBlobPatcher.patchSlotAssignment(again, session, PresetSlot.B, PresetIndex(3)).assertSuccess()
+    }
+
+    @Test
+    fun `once the pin has widened to a larger size, a genuinely implausible later shrink is still caught`() {
+        val session = SessionId.create()
+        // Pin at the full 512-byte size via a legitimate read.
+        stateFor(session, plausibleBlob(size = PedalState.MAX_STATE_BYTES))
+        assertEquals(PedalState.MAX_STATE_BYTES, session.pinnedBlobSize())
+
+        // A later read that is genuinely much shorter than the established pin - the real
+        // "layout changed" signal this check exists to catch - must still be rejected, not
+        // silently treated as a new, smaller pin.
+        val shrunkSize = 150
+        val shrunk = stateFor(session, plausibleBlob(size = shrunkSize))
+
+        val result = StateBlobPatcher.patchActiveSlot(shrunk, session, PresetSlot.A)
+
+        val error = result.assertFailure()
+        assertTrue(error is TonexError.BlobSizeChangedSinceHandshake, "expected BlobSizeChangedSinceHandshake, got $error")
+        assertEquals(PedalState.MAX_STATE_BYTES, (error as TonexError.BlobSizeChangedSinceHandshake).pinnedSize)
+        assertEquals(shrunkSize, error.actualSize)
+        assertEquals(
+            PedalState.MAX_STATE_BYTES,
+            session.pinnedBlobSize(),
+            "a rejected shrink must not move the pin down",
+        )
+    }
+
+    @Test
+    fun `pinnedBlobSize only ever widens across repeated create() calls, never narrows`() {
+        val session = SessionId.create()
+        val sizes = listOf(150, 300, 200, 512, 250, 512)
+
+        for (size in sizes) {
+            PedalState.create(session, plausibleBlob(size = size)).assertSuccess()
+        }
+
+        assertEquals(512, session.pinnedBlobSize(), "the pin must land on the largest size ever observed")
     }
 
     @Test

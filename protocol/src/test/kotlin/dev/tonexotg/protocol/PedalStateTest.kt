@@ -150,6 +150,38 @@ class PedalStateTest {
         assertEquals(1L, firstForB.readGeneration.value)
     }
 
+    // ---- generation advances on failed create() too (MEDIUM, round-4) -------------------------
+    //
+    // Previously mintReadGeneration() was only called on the success path, so a failed create()
+    // (oversized blob, or any other rejection) left the session's generation counter untouched -
+    // a caller holding a previously-successful PedalState could still use it to authorize a write
+    // after a failed re-read, reopening the stale-whole-device-echo bug this story exists to
+    // prevent. See StateBlobPatcherTest for the end-to-end repro through StateBlobPatcher.
+
+    @Test
+    fun `a failed create() attempt (oversized blob) still advances the session's generation`() {
+        val session = SessionId.create()
+        val before = session.latestReadGeneration()
+
+        val result = PedalState.create(session, ByteArray(PedalState.MAX_STATE_BYTES + 1))
+
+        assertTrue(result is TonexResult.Failure)
+        assertNotEquals(before, session.latestReadGeneration(), "even a failed create() attempt must advance the generation")
+    }
+
+    @Test
+    fun `the generation minted by a failed create() attempt is strictly later than the previous successful read`() {
+        val session = SessionId.create()
+        val valid = PedalState.create(session, ByteArray(10)).assertSuccess()
+
+        PedalState.create(session, ByteArray(PedalState.MAX_STATE_BYTES + 1)) // fails
+
+        assertTrue(
+            session.latestReadGeneration().value > valid.readGeneration.value,
+            "the failed attempt must mint a generation past the previously-valid read's own generation",
+        )
+    }
+
     // ---- sessionId -----------------------------------------------------------------------------
 
     @Test
