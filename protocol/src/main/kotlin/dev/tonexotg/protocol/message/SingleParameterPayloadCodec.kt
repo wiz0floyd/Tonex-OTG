@@ -33,7 +33,9 @@ import dev.tonexotg.protocol.codec.VarintValue
  *   parameter, whose `index` here is not independently confirmed by the upstream source examined
  *   for this story to line up with [dev.tonexotg.protocol.ParameterId]'s own 0-108/110-116
  *   numbering beyond that one master-volume case. Treat that wider correspondence as plausible but
- *   unconfirmed, not as fact.
+ *   unconfirmed, not as fact. **For a nonzero value specifically, this field is decoded by a
+ *   read path upstream's own control flow never actually exercises** — see
+ *   [SingleParameterPayloadCodec]'s "Read side" and "S20 hardware probe" KDoc sections.
  * @property value the parameter's new value, in whatever units the wire uses for this `kind`/`index`
  *   pair — for master volume specifically, this is the pedal's **native** `0..10` range, not the
  *   engineering `-40..3` dB range [dev.tonexotg.protocol.params.ParameterRegistry] stores; see
@@ -64,25 +66,54 @@ data class SingleParameterPayload(val kind: Int, val index: Int, val value: Floa
  *
  * ## Read side (used by [decode]) — `usb_tonex_one_parse_param_changed`
  *
- * Confirmed independently against `usb_tonex_one.c:827-871` — reads a 3-byte marker
- * (`0xB9, 0x04, 0x03`; inbound notifications are confirmed to always carry `kind = 0x03`), then
- * explicitly 2 index bytes: `param_index = *temp_ptr++; param_index |= (*temp_ptr << 8);`. The
- * *first* byte encountered after the marker (i.e. the payload position immediately after `kind`)
- * is the **low** byte; the *second* is the **high** byte — an ordinary little-endian 2-byte read.
+ * Sourced from `usb_tonex_one.c:827-877` — reads a 3-byte marker (`0xB9, 0x04, 0x03`; inbound
+ * notifications are confirmed to always carry `kind = 0x03`), then explicitly 2 index bytes:
+ * `param_index = *temp_ptr++; param_index |= (*temp_ptr << 8);`. The *first* byte encountered
+ * after the marker (i.e. the payload position immediately after `kind`) is read as the **low**
+ * byte; the *second* as the **high** byte — an ordinary little-endian 2-byte read, *as written*.
+ *
+ * **This 2-byte read is never exercised for a nonzero index on real hardware, as far as upstream's
+ * own source shows.** `param_index`'s only use in that function is `if (param_index == 0x00) { ...
+ * } ` (`:856`) — there is no `else` branch. Every nonzero `param_index` is computed and then
+ * discarded; the value is correct-by-accident for index `0` (which decodes identically regardless
+ * of which byte is "low"), but nothing in upstream's own control flow has ever depended on the
+ * 2-byte read's behaviour for a nonzero index. Upstream's own literal-table comment for this
+ * message (`:274-275`) also labels the byte at `payload[3]` alone as `unknown`, with `param index`
+ * against `payload[4]` alone — i.e. its own author's column-aligned annotation disagrees with the
+ * 2-byte read this function performs. And `0x0309` is one message ID used in *both* directions
+ * (this app's own outbound writes and the pedal's inbound notifications), not two message IDs with
+ * independently-confirmed, structurally-distinct layouts — so "read side" and "write side" here
+ * describes which upstream function was ported, not a confirmed protocol-level distinction.
  *
  * ## Why [encode] and [decode] are not inverses of each other for a nonzero index
  *
  * Lining the two up by wire position: the write side's sole assignment lands on what the read
- * side would call the index's *high* byte, leaving what the read side would call the *low* byte
- * at its untouched `0x00`. Decoding a payload this app just encoded with a nonzero index would
- * therefore **not** recover that index — it would recover `index * 256`. That is a real property
- * of the two independently-confirmed upstream sources, not a round-trip this codec claims to
- * support: [encode] and [decode] exist to reproduce two different upstream message flows (an
- * outbound command this app constructs vs. an inbound notification the pedal constructs), and
- * nothing in the reverse-engineered protocol says those two flows must agree on this field's byte
- * order. Do not "fix" this into a symmetric round trip without new upstream evidence that the two
- * sides actually agree — see [ParameterWriteMessage] KDoc for the acceptance-fixture byte template
- * this asymmetry was caught against.
+ * side's code would call the index's *high* byte, leaving what the read side's code would call the
+ * *low* byte at its untouched `0x00`. Decoding a payload this app just encoded with a nonzero index
+ * would therefore **not** recover that index under [decode] as currently written — it would recover
+ * `index * 256`. [decode] is deliberately left matching upstream's `usb_tonex_one_parse_param_changed`
+ * source text as-written, rather than "corrected" into a symmetric round trip, because the two
+ * candidate fixes (trust the 2-byte read, or conclude `payload[3]` is unrelated padding and the
+ * real index is `payload[4]` alone, matching the write side) are indistinguishable from the source
+ * alone and this is not resolvable without a hardware capture — see "S20 hardware probe" below for
+ * the exact steps that would settle it and the exact fix each outcome implies.
+ *
+ * ## S20 hardware probe — the fix this is waiting on
+ *
+ * Trigger a change to a **non**-master-volume parameter from the pedal's own front panel or the IK
+ * editor (not from this app), capture the resulting inbound `0x0309` frame, and read `payload[2]`
+ * (`kind`) first — upstream's own marker search is for the 3 bytes `B9 04 03`, so a notification
+ * whose `kind` is `0x02` (this codec's [KIND_PARAMETER]) rather than `0x03` would not even match
+ * upstream's marker; establish first whether the pedal emits nonzero-index notifications carrying
+ * `kind = 0x03` at all. Then read `payload[3]` and `payload[4]`:
+ * - If `payload[4] == index` and `payload[3] == 0x00` → [decode] is wrong; move the index read to
+ *   `payload[4]` alone, matching the write side, and delete the 2-byte read.
+ * - If `payload[3] == index` and `payload[4] == 0x00` → the asymmetry against [encode] is real and
+ *   confirmed; [decode] is already correct as written, and this KDoc's uncertainty language should
+ *   be upgraded to a confirmed fact.
+ * - If no nonzero-index notification is ever observed on real hardware → `index` is unreachable
+ *   dead code for the nonzero case (matching upstream's own dead `param_index` branch) and the
+ *   field should be deleted from [SingleParameterPayload] entirely.
  *
  * The `0x88`-prefixed `float32` form ([TonexVarint.encodeFloat] / [TonexVarint.decode]) is reused
  * for the value field rather than reimplemented here.
@@ -130,52 +161,87 @@ object SingleParameterPayloadCodec {
      * recover the same index for a nonzero value; see the class KDoc's "Why encode and decode are
      * not inverses" section.
      *
-     * Never throws: a missing marker, or a marker with too few trailing bytes for the fixed shape,
-     * is reported as a [TonexResult.Failure] rather than an `IndexOutOfBoundsException`.
+     * ## Marker matching: 2 bytes, with retry — not upstream's 3-byte marker
+     *
+     * Upstream's own search is for the **3**-byte marker `B9 04 03` (`kind` fixed to `0x03`) —
+     * every inbound notification it decodes carries that `kind`. This codec's [decode] is shared
+     * more broadly, including by this file's own tests decoding a `kind = 0x02` payload this app
+     * just built with [encode] (see the class KDoc), so matching only `B9 04 03` would make [decode]
+     * unable to read back its own writes at all. It therefore matches the shorter 2-byte `B9 04` and
+     * reads `kind` as data rather than as part of the marker — but a *plain* first-match, no-retry
+     * 2-byte scan has a real false-positive hazard: [PresetNameExtractor]'s own 6-byte
+     * `ToneOnePresetByteMarker` (`B9 04 B9 02 BC 21`) itself begins with `B9 04`, and any other
+     * incidental `B9 04` byte pair earlier in a buffer would wrongly claim to be *this* marker,
+     * producing a spurious [TonexError.MalformedFrame] (or worse, a bogus decode) even though a
+     * genuine, later occurrence of the real shape is present. To guard against that, [decode] does
+     * not commit to the *first* `B9 04` it finds: it validates each candidate by checking for the
+     * `0x88` float32 marker at the position this shape's fixed layout predicts, and if that
+     * validation fails, retries at the *next* `B9 04` occurrence rather than failing outright. Only
+     * once every candidate has been tried and none validates does [decode] report a failure — the
+     * failure from the *last* candidate tried, so the reported reason reflects the most
+     * marker-shaped near-miss rather than an arbitrary earlier one.
+     *
+     * Never throws: a missing marker, every candidate marker having too few trailing bytes, or no
+     * candidate marker's trailing bytes validating as this shape, is reported as a
+     * [TonexResult.Failure] rather than an `IndexOutOfBoundsException`.
      */
     fun decode(payload: ByteArray): TonexResult<SingleParameterPayload> {
-        val markerIndex = indexOfMarker(payload)
-            ?: return TonexResult.Failure(
+        val candidates = markerCandidateIndices(payload)
+        if (candidates.isEmpty()) {
+            return TonexResult.Failure(
                 TonexError.MalformedFrame("single-parameter payload: B9 04 marker not found"),
             )
-
-        val kindPos = markerIndex + 2
-        val floatMarkerPos = kindPos + 3
-        if (floatMarkerPos >= payload.size) {
-            return TonexResult.Failure(
-                TonexError.UnexpectedBlobShape(
-                    expectedSize = floatMarkerPos + 1,
-                    actualSize = payload.size,
-                ),
-            )
         }
 
-        val kind = payload[kindPos].toInt() and 0xFF
-        val indexLo = payload[kindPos + 1].toInt() and 0xFF
-        val indexHi = payload[kindPos + 2].toInt() and 0xFF
-        val index = indexLo or (indexHi shl 8)
+        var lastFailure: TonexResult.Failure = TonexResult.Failure(
+            TonexError.MalformedFrame("single-parameter payload: B9 04 marker not found"),
+        )
 
-        return when (val result = TonexVarint.decode(payload, floatMarkerPos)) {
-            is TonexResult.Failure -> result
-            is TonexResult.Success -> when (val decoded = result.value.value) {
-                is VarintValue.FloatValue -> TonexResult.Success(SingleParameterPayload(kind, index, decoded.value))
-                is VarintValue.IntValue -> TonexResult.Failure(
-                    TonexError.MalformedFrame(
-                        "single-parameter payload: expected a float32 (0x88) marker at offset $floatMarkerPos, " +
-                            "decoded an integer instead",
+        for (markerIndex in candidates) {
+            val kindPos = markerIndex + 2
+            val floatMarkerPos = kindPos + 3
+            if (floatMarkerPos >= payload.size) {
+                lastFailure = TonexResult.Failure(
+                    TonexError.UnexpectedBlobShape(
+                        expectedSize = floatMarkerPos + 1,
+                        actualSize = payload.size,
                     ),
                 )
+                continue
+            }
+
+            val kind = payload[kindPos].toInt() and 0xFF
+            val indexLo = payload[kindPos + 1].toInt() and 0xFF
+            val indexHi = payload[kindPos + 2].toInt() and 0xFF
+            val index = indexLo or (indexHi shl 8)
+
+            when (val result = TonexVarint.decode(payload, floatMarkerPos)) {
+                is TonexResult.Failure -> lastFailure = result
+                is TonexResult.Success -> when (val decoded = result.value.value) {
+                    is VarintValue.FloatValue ->
+                        return TonexResult.Success(SingleParameterPayload(kind, index, decoded.value))
+                    is VarintValue.IntValue -> lastFailure = TonexResult.Failure(
+                        TonexError.MalformedFrame(
+                            "single-parameter payload: expected a float32 (0x88) marker at offset " +
+                                "$floatMarkerPos, decoded an integer instead",
+                        ),
+                    )
+                }
             }
         }
+
+        return lastFailure
     }
 
-    private fun indexOfMarker(bytes: ByteArray): Int? {
-        if (bytes.size < 2) return null
+    /** Every offset in [bytes] where the 2-byte `B9 04` marker occurs, in ascending order. */
+    private fun markerCandidateIndices(bytes: ByteArray): List<Int> {
+        if (bytes.size < 2) return emptyList()
+        val indices = mutableListOf<Int>()
         for (i in 0..bytes.size - 2) {
             if ((bytes[i].toInt() and 0xFF) == MARKER_0 && (bytes[i + 1].toInt() and 0xFF) == MARKER_1) {
-                return i
+                indices.add(i)
             }
         }
-        return null
+        return indices
     }
 }

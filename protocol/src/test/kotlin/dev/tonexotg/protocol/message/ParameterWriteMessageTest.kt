@@ -85,31 +85,84 @@ class ParameterWriteMessageTest {
         }
     }
 
+    // ---- value range clamping -----------------------------------------------------------------------
+    // ParameterId(2) = NOISE_GATE_THRESHOLD, registry range -100..0 (see ParameterRegistryTest
+    // "spot check noise gate threshold parameter").
+
+    /** Decodes the value this app itself just [ParameterWriteMessage.encode]d, via the shared codec. */
+    private fun decodedValue(encoded: ByteArray): Float {
+        val payload = encoded.copyOfRange(EXPECTED_HEADER.size, encoded.size)
+        val decoded = SingleParameterPayloadCodec.decode(payload)
+        assertIs<TonexResult.Success<SingleParameterPayload>>(decoded)
+        return decoded.value.value
+    }
+
+    @Test
+    fun `clamps a value above the registered maximum down to that maximum`() {
+        // 50.0 dB is 2x NOISE_GATE_THRESHOLD's 0 dB max - must not reach the wire unclamped.
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), 50.0f)
+        assertEquals(0.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `clamps a value below the registered minimum up to that minimum`() {
+        // -1000.0 dB is far below NOISE_GATE_THRESHOLD's -100 dB min.
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), -1000.0f)
+        assertEquals(-100.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `clamps an extreme out-of-range value rather than writing it through unmodified`() {
+        // Regression fixture for the specific value the adversarial review measured reaching the
+        // wire unclamped: ParameterWriteMessage.encode(ParameterId(2), 1e30f) previously wrote an
+        // arbitrary float to a parameter whose registry range is -100..0.
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), 1e30f)
+        assertEquals(0.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `does not clamp a value already within range`() {
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), -50.0f)
+        assertEquals(-50.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `does not clamp the exact minimum boundary value`() {
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), -100.0f)
+        assertEquals(-100.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `does not clamp the exact maximum boundary value`() {
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), 0.0f)
+        assertEquals(0.0f, decodedValue(encoded))
+    }
+
     // ---- firmware capability gating -----------------------------------------------------------------
 
     @Test
-    fun `encodeIfSupported succeeds and matches encode when the capability is confirmed`() {
+    fun `encode (capability-gated) succeeds and matches encode when the capability is confirmed`() {
         val capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true)
-        val result = ParameterWriteMessage.encodeIfSupported(ParameterId(2), -50.0f, capabilities)
+        val result = ParameterWriteMessage.encode(ParameterId(2), -50.0f, capabilities)
         assertIs<TonexResult.Success<ByteArray>>(result)
         assertTrue(result.value.contentEquals(ParameterWriteMessage.encode(ParameterId(2), -50.0f)))
     }
 
     @Test
-    fun `encodeIfSupported fails with UnsupportedByFirmware when the capability is not confirmed`() {
+    fun `encode (capability-gated) fails with UnsupportedByFirmware when the capability is not confirmed`() {
         val capabilities = FirmwareCapabilities(supportsSingleParameterWrite = false)
-        val result = ParameterWriteMessage.encodeIfSupported(ParameterId(2), -50.0f, capabilities)
+        val result = ParameterWriteMessage.encode(ParameterId(2), -50.0f, capabilities)
         assertIs<TonexResult.Failure>(result)
         val error = assertIs<TonexError.UnsupportedByFirmware>(result.error)
         assertEquals("single-parameter-write", error.operation)
     }
 
     @Test
-    fun `encodeIfSupported never falls back to encoding anyway when unsupported`() {
+    fun `encode (capability-gated) never falls back to encoding anyway when unsupported`() {
         // A regression here would be a silent, dangerous fallback: producing bytes for a write the
         // pedal is known not to honour, rather than surfacing the typed error.
         val capabilities = FirmwareCapabilities.NONE_CONFIRMED
-        val result = ParameterWriteMessage.encodeIfSupported(ParameterId(2), -50.0f, capabilities)
+        val result = ParameterWriteMessage.encode(ParameterId(2), -50.0f, capabilities)
         assertIs<TonexResult.Failure>(result)
     }
 

@@ -12,7 +12,7 @@ private fun hex(spec: String): ByteArray =
 
 class PresetNameExtractorTest {
 
-    private val marker = PresetNameExtractor.MARKER
+    private val marker = PresetNameExtractor.marker()
 
     /** Builds a payload: [prefix] bytes + [marker] + [nameField] (must be exactly 32 bytes). */
     private fun payload(nameField: ByteArray, prefix: ByteArray = ByteArray(0)): ByteArray {
@@ -135,8 +135,25 @@ class PresetNameExtractorTest {
     // ---- constants ------------------------------------------------------------------------------------
 
     @Test
-    fun `MARKER is the 6-byte ToneOnePresetByteMarker literal`() {
+    fun `marker() is the 6-byte ToneOnePresetByteMarker literal`() {
         assertTrue(marker.contentEquals(hex("b9 04 b9 02 bc 21")))
+    }
+
+    @Test
+    fun `marker() returns a defensive copy - mutating one call's result does not affect another's`() {
+        val first = PresetNameExtractor.marker()
+        first[0] = 0x00
+        val second = PresetNameExtractor.marker()
+        assertTrue(second.contentEquals(hex("b9 04 b9 02 bc 21")), "mutating a caller's copy must not leak")
+    }
+
+    @Test
+    fun `marker() returns a defensive copy - mutating the result does not break subsequent extraction`() {
+        val mutable = PresetNameExtractor.marker()
+        mutable[0] = 0x00
+        val nameField = ByteArray(32) { 'Q'.code.toByte() }
+        val result = PresetNameExtractor.extract(marker + nameField)
+        assertEquals("Q".repeat(32), assertSuccessValue(result))
     }
 
     @Test

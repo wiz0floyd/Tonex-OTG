@@ -129,20 +129,74 @@ class MasterVolumeMessageTest {
         }
     }
 
+    // ---- value range clamping -----------------------------------------------------------------------
+    // MasterVolumeMessage.encode clamps the *dB* argument to ParameterRegistry's MASTER_VOLUME range
+    // (-40..3) before converting to native units, so a clamped write's native payload value is
+    // decibelsToNative applied to the clamped dB value, not to the raw argument.
+
+    /** Decodes the native value this app itself just [MasterVolumeMessage.encode]d. */
+    private fun decodedNativeValue(encoded: ByteArray): Float {
+        val payload = encoded.copyOfRange(EXPECTED_HEADER.size, encoded.size)
+        val decoded = SingleParameterPayloadCodec.decode(payload)
+        assertIs<TonexResult.Success<SingleParameterPayload>>(decoded)
+        return decoded.value.value
+    }
+
+    @Test
+    fun `clamps a dB value above the engineering maximum down to that maximum before converting`() {
+        // 50.0 dB is well above MASTER_VOLUME's 3 dB max - measured by the adversarial review to
+        // reach the wire as native 20.930233 (2x the pedal's 0..10 max) before this fix.
+        val encoded = MasterVolumeMessage.encode(50.0f)
+        val native = decodedNativeValue(encoded)
+        assertTrue(abs(native - MasterVolumeMessage.decibelsToNative(3.0f)) < TOLERANCE, "got native $native")
+        assertTrue(native <= 10.0f, "clamped native value must not exceed the pedal's 0..10 range")
+    }
+
+    @Test
+    fun `clamps a dB value below the engineering minimum up to that minimum before converting`() {
+        // -100.0 dB is well below MASTER_VOLUME's -40 dB min - measured by the adversarial review
+        // to reach the wire as a negative native volume before this fix.
+        val encoded = MasterVolumeMessage.encode(-100.0f)
+        val native = decodedNativeValue(encoded)
+        assertTrue(abs(native - MasterVolumeMessage.decibelsToNative(-40.0f)) < TOLERANCE, "got native $native")
+        assertTrue(native >= 0.0f, "clamped native value must not be negative")
+    }
+
+    @Test
+    fun `clamps an extreme out-of-range dB value rather than writing it through unmodified`() {
+        // Regression fixture for the review's most extreme measured case: 1e30 dB previously
+        // produced a native value around 2.3e29.
+        val encoded = MasterVolumeMessage.encode(1e30f)
+        val native = decodedNativeValue(encoded)
+        assertTrue(native in 0.0f..10.0f, "clamped native value must stay within the pedal's 0..10 range, got $native")
+    }
+
+    @Test
+    fun `does not clamp the exact engineering minimum boundary value`() {
+        val encoded = MasterVolumeMessage.encode(-40.0f)
+        assertTrue(abs(decodedNativeValue(encoded) - 0.0f) < TOLERANCE)
+    }
+
+    @Test
+    fun `does not clamp the exact engineering maximum boundary value`() {
+        val encoded = MasterVolumeMessage.encode(3.0f)
+        assertTrue(abs(decodedNativeValue(encoded) - 10.0f) < TOLERANCE)
+    }
+
     // ---- firmware capability gating -----------------------------------------------------------------
 
     @Test
-    fun `encodeIfSupported succeeds and matches encode when the capability is confirmed`() {
+    fun `encode (capability-gated) succeeds and matches encode when the capability is confirmed`() {
         val capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true)
-        val result = MasterVolumeMessage.encodeIfSupported(0f, capabilities)
+        val result = MasterVolumeMessage.encode(0f, capabilities)
         assertIs<TonexResult.Success<ByteArray>>(result)
         assertTrue(result.value.contentEquals(MasterVolumeMessage.encode(0f)))
     }
 
     @Test
-    fun `encodeIfSupported fails with UnsupportedByFirmware when the capability is not confirmed`() {
+    fun `encode (capability-gated) fails with UnsupportedByFirmware when the capability is not confirmed`() {
         val capabilities = FirmwareCapabilities(supportsSingleParameterWrite = false)
-        val result = MasterVolumeMessage.encodeIfSupported(0f, capabilities)
+        val result = MasterVolumeMessage.encode(0f, capabilities)
         assertIs<TonexResult.Failure>(result)
         val error = assertIs<TonexError.UnsupportedByFirmware>(result.error)
         assertEquals("master-volume-write", error.operation)
@@ -152,11 +206,11 @@ class MasterVolumeMessageTest {
     fun `master volume and single-parameter-write use distinct UnsupportedByFirmware operation names`() {
         val notSupported = FirmwareCapabilities(supportsSingleParameterWrite = false)
         val masterVolumeError =
-            (MasterVolumeMessage.encodeIfSupported(0f, notSupported) as TonexResult.Failure).error
+            (MasterVolumeMessage.encode(0f, notSupported) as TonexResult.Failure).error
                 as TonexError.UnsupportedByFirmware
         val parameterError =
             (
-                ParameterWriteMessage.encodeIfSupported(
+                ParameterWriteMessage.encode(
                     dev.tonexotg.protocol.ParameterId(2),
                     0f,
                     notSupported,

@@ -25,12 +25,21 @@
  *   question, not a confirmed fact.
  * - [FirmwareCapabilities] — the single-parameter write (both [ParameterWriteMessage] and
  *   [MasterVolumeMessage]) is only supported on newer pedal firmware. This type models that as an
- *   explicit capability a caller must supply, never a default this package assumes; each write
- *   object's `encodeIfSupported` entry point is what actually gates on it and surfaces
- *   [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware] when unsupported.
- * - [SingleParameterPayloadCodec] — the shared wire shape (`B9 04 <kind> <index> 88 <f32>`) behind
- *   both [ParameterWriteMessage]/[MasterVolumeMessage]'s writes and inbound
- *   [dev.tonexotg.protocol.codec.MessageType.ParameterChanged] notifications.
+ *   explicit capability a caller must supply, never a default this package assumes, and it is
+ *   enforced structurally, not just by convention: each write object's raw byte-builder is
+ *   `internal`, so the public `encode(..., capabilities: FirmwareCapabilities)` overload — the one
+ *   that actually gates on the capability and surfaces
+ *   [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware] when unsupported — is the *only* way to
+ *   reach either write from outside `:protocol`.
+ * - [SingleParameterPayloadCodec] — the shared wire shape (`B9 04 <kind> <index-field bytes> 88
+ *   <f32>`) behind both [ParameterWriteMessage]/[MasterVolumeMessage]'s writes and inbound
+ *   [dev.tonexotg.protocol.codec.MessageType.ParameterChanged] notifications — **but
+ *   [SingleParameterPayloadCodec.encode] and [SingleParameterPayloadCodec.decode] place the index
+ *   within those bytes differently** (`encode`
+ *   writes it to `payload[4]` alone; `decode` reads it as a little-endian 2-byte field starting at
+ *   `payload[3]`), an asymmetry ported faithfully from two independently-sourced upstream code
+ *   paths rather than resolved into a symmetric round trip — see that file's KDoc, including its
+ *   "S20 hardware probe" section, for why and what would settle it.
  * - [PresetNameExtractor] — locates and extracts a preset's 32-byte fixed-length name field from a
  *   preset-details response. Read-only: the ToneX One has no name-*write* command, so this package
  *   deliberately does not offer one.

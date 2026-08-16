@@ -106,9 +106,20 @@ object MasterVolumeMessage {
 
     /**
      * Encodes a master-volume write for [decibels] (in [ParameterRegistry]'s `-40..3` dB range).
-     * Internally converts to the pedal's native `0..10` range via [decibelsToNative] before placing
-     * it on the wire — callers pass engineering units in, this function handles the wire's native
-     * units entirely internally.
+     * [decibels] is clamped to that `-40..3` range *before* conversion (see class KDoc "Value range
+     * clamping" below) — callers pass engineering units in, this function handles both the clamp and
+     * the wire's native units entirely internally.
+     *
+     * ## Value range clamping
+     *
+     * Same rationale and same choice as [ParameterWriteMessage]'s "Value range" KDoc section:
+     * clamping, not a typed-error rejection, because an out-of-range dB value has one unambiguous
+     * safe interpretation (the nearest in-range bound) and upstream itself performs no clamp here
+     * either — this project's premise is being safer than upstream, not just byte-compatible with
+     * it. Clamping runs on the *dB* value, before [decibelsToNative] — clamping the already-converted
+     * native value instead would be equivalent in effect (the conversion is monotonic) but the dB
+     * domain is what [ParameterRegistry]'s `MASTER_VOLUME` bounds are actually expressed in, so
+     * clamping there keeps the bound and the value it is applied to in the same units.
      *
      * ## Wire format
      *
@@ -127,11 +138,13 @@ object MasterVolumeMessage {
      *
      * See [ParameterWriteMessage] KDoc's "Firmware dependency" section — the same
      * newer-firmware-only caveat applies to this write, per the same upstream source comment. As
-     * with [ParameterWriteMessage.encode], this function stays unconditional; prefer
-     * [encodeIfSupported] unless firmware support is already established.
+     * with [ParameterWriteMessage]'s internal byte-builder, this function is `internal`: the only
+     * way to reach it from outside `:protocol` is the public, capability-gated [encode] overload
+     * below that takes a [FirmwareCapabilities].
      */
-    fun encode(decibels: Float): ByteArray {
-        val native = decibelsToNative(decibels)
+    internal fun encode(decibels: Float): ByteArray {
+        val clampedDecibels = ParameterRegistry.clamp(spec.id, decibels)
+        val native = decibelsToNative(clampedDecibels)
         val payload = SingleParameterPayloadCodec.encode(
             kind = SingleParameterPayloadCodec.KIND_MASTER_VOLUME,
             index = 0,
@@ -147,20 +160,23 @@ object MasterVolumeMessage {
     }
 
     /**
-     * The capability-gated entry point: encodes a master-volume write for [decibels] only when
-     * [capabilities] confirms [FirmwareCapabilities.supportsSingleParameterWrite]; otherwise fails
-     * with [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware]`("master-volume-write")` rather
-     * than producing bytes for a write the pedal may silently ignore. See [ParameterWriteMessage.encodeIfSupported]
-     * for why this is a capability the caller must supply rather than an assumption this object makes.
+     * The capability-gated entry point, and the only public way to encode a master-volume write
+     * from outside `:protocol`: encodes a write for [decibels] only when [capabilities] confirms
+     * [FirmwareCapabilities.supportsSingleParameterWrite]; otherwise fails with
+     * [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware]`("master-volume-write")` rather than
+     * producing bytes for a write the pedal may silently ignore. [capabilities] is a required
+     * parameter with no default — there is deliberately no shorter, capability-free way to reach
+     * this from outside this module. See [ParameterWriteMessage]'s public `encode` overload for why
+     * this is a capability the caller must supply rather than an assumption this object makes.
      *
      * A distinct operation name (`"master-volume-write"`, not `"single-parameter-write"`) is used
-     * from [ParameterWriteMessage.encodeIfSupported]'s failure even though both gate on the same
+     * from [ParameterWriteMessage]'s equivalent failure even though both gate on the same
      * underlying [FirmwareCapabilities] flag — master volume is a structurally different wire
      * command (its own `kind` byte, always index `0`; see class KDoc), so a caller inspecting a
      * [dev.tonexotg.protocol.TonexError.UnsupportedByFirmware.operation] string can tell which one
      * was rejected.
      */
-    fun encodeIfSupported(decibels: Float, capabilities: FirmwareCapabilities): TonexResult<ByteArray> =
+    fun encode(decibels: Float, capabilities: FirmwareCapabilities): TonexResult<ByteArray> =
         encodeGatedBySingleParameterWriteSupport(capabilities, operation = "master-volume-write") {
             encode(decibels)
         }

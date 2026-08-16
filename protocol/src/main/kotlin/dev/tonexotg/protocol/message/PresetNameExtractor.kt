@@ -47,11 +47,21 @@ import dev.tonexotg.protocol.TonexResult
  */
 object PresetNameExtractor {
 
-    /** `ToneOnePresetByteMarker` — see class KDoc. */
-    val MARKER: ByteArray = byteArrayOf(0xB9.toByte(), 0x04, 0xB9.toByte(), 0x02, 0xBC.toByte(), 0x21)
+    /**
+     * `ToneOnePresetByteMarker` — see class KDoc. `private`: a `ByteArray` is mutable, and a public
+     * `val` of one is a shared, writable array every caller aliases — any caller that mutated it
+     * (even accidentally, e.g. `MARKER[0] = 0`) would silently corrupt name extraction for every
+     * other caller in the process, forever, since [ByteArray] has no immutable variant to fall back
+     * on. [marker] is the public accessor, and it hands out a fresh defensive copy every call so a
+     * caller can freely mutate what it gets back without affecting [extract] or any other caller.
+     */
+    private val MARKER: ByteArray = byteArrayOf(0xB9.toByte(), 0x04, 0xB9.toByte(), 0x02, 0xBC.toByte(), 0x21)
 
     /** `TONEX_ONE_RESP_OFFSET_PRESET_NAME_LEN` — see class KDoc. */
     const val NAME_FIELD_LENGTH: Int = 32
+
+    /** A fresh defensive copy of `ToneOnePresetByteMarker` — see [MARKER]'s KDoc for why. */
+    fun marker(): ByteArray = MARKER.copyOf()
 
     /**
      * Locates [MARKER] in [payload] and extracts the 32-byte name field that follows it.

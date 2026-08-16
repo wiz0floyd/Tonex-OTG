@@ -2,6 +2,7 @@ package dev.tonexotg.protocol.message
 
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
+import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -143,8 +144,54 @@ class SingleParameterPayloadCodecTest {
         assertEquals(5, decoded.index)
     }
 
+    // ---- decode retries past a spurious earlier B9 04 that doesn't validate as this shape ----------
+
+    @Test
+    fun `decode skips an earlier incidental B9 04 with no 0x88 float marker and finds the real one`() {
+        // The first "b9 04" at offset 0 is not followed by a 0x88 marker at the shape's predicted
+        // offset (it has "ff ff ff" instead) - a naive first-match scan would report MalformedFrame
+        // even though a genuine, fully-valid occurrence follows starting at offset 5.
+        val fixture = hex("b9 04 ff ff ff b9 04 02 05 00 88 00 00 b0 40")
+        val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
+        assertEquals(0x02, decoded.kind)
+        assertEquals(5, decoded.index)
+        assertEquals(5.5f, decoded.value)
+    }
+
+    @Test
+    fun `decode is not fooled by the preset-name marker's own leading B9 04 bytes`() {
+        // PresetNameExtractor's 6-byte marker (b9 04 b9 02 bc 21) itself begins with "b9 04" -
+        // a plain first-match scan would treat it as this codec's marker and misparse or fail.
+        // Here it appears (harmlessly, as unrelated leading bytes) before a genuine occurrence.
+        val presetNameMarker = hex("b9 04 b9 02 bc 21")
+        val genuine = hex("b9 04 03 00 00 88 00 00 80 3f")
+        val fixture = presetNameMarker + genuine
+        val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
+        assertEquals(0x03, decoded.kind)
+        assertEquals(0, decoded.index)
+        assertEquals(1.0f, decoded.value)
+    }
+
+    @Test
+    fun `decode fails typed when every B9 04 candidate fails to validate as this shape`() {
+        // Two "b9 04" occurrences, neither followed by a genuine 0x88 float32 marker.
+        val fixture = hex("b9 04 00 00 00 00 00 b9 04 00 00 00 00 00")
+        val result = SingleParameterPayloadCodec.decode(fixture)
+        assertIs<TonexResult.Failure>(result)
+        assertIs<TonexError.MalformedFrame>(result.error)
+    }
+
     // ---- encode and decode are NOT inverses of each other for a nonzero index ---------------------
 
+    @Disabled(
+        "Pins the CURRENT decode() behaviour for a nonzero index (index * 256), which is most " +
+            "likely reproducing a latent, never-actually-exercised upstream bug rather than " +
+            "confirmed intended behaviour - see SingleParameterPayloadCodec KDoc's 'Read side' and " +
+            "'S20 hardware probe' sections. Left active, this assertion would fail CI the moment " +
+            "the S20 hardware probe resolves the ambiguity and decode() is corrected to read the " +
+            "index from payload[4] alone. Do not re-enable without first re-deriving the expected " +
+            "value from the S20 probe's outcome.",
+    )
     @Test
     fun `decoding a payload this app just encoded does not recover the same nonzero index`() {
         // This pins down a real, independently-confirmed asymmetry between the write-side

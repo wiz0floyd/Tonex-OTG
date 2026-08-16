@@ -14,15 +14,20 @@ import dev.tonexotg.protocol.TonexResult
  * fact learned elsewhere (a successful/failed probe write, or an explicit version check) and
  * handed in here, not derived. This type exists so that fact is a **capability that must be
  * supplied**, never a default this package assumes on a caller's behalf: there is deliberately no
- * "assume supported" constructor or default value — see [encodeIfSupported] on
- * [ParameterWriteMessage] / [MasterVolumeMessage], which require an explicit
- * [FirmwareCapabilities] argument rather than defaulting to `true`.
+ * "assume supported" constructor or default value — see the public, capability-gated `encode`
+ * overload on [ParameterWriteMessage] / [MasterVolumeMessage] (the only `encode` either object
+ * exposes outside `:protocol`), which require an explicit [FirmwareCapabilities] argument rather
+ * than defaulting to `true`.
  *
  * @property supportsSingleParameterWrite whether the connected pedal's firmware is currently known
  *   to accept the single-parameter write path. `false` is the only safe default for a caller that
  *   has not yet established this some other way (e.g. before [dev.tonexotg.protocol.ConnectionState.Ready],
  *   or before a capability probe has run) — treating "unknown" as "supported" risks exactly the
- *   silently-ignored write this type exists to prevent (see [TonexError.UnsupportedByFirmware]).
+ *   silently-ignored write this type exists to prevent (see [TonexError.UnsupportedByFirmware]). This
+ *   is required at every call site that reaches this from outside `:protocol`: the raw,
+ *   capability-free byte-builders on [ParameterWriteMessage] / [MasterVolumeMessage] are `internal`,
+ *   so the public `encode(..., capabilities: FirmwareCapabilities)` overload on each is the only way
+ *   in, and it takes no default value for this property.
  */
 data class FirmwareCapabilities(
     val supportsSingleParameterWrite: Boolean,
@@ -43,10 +48,10 @@ data class FirmwareCapabilities(
  * [FirmwareCapabilities.supportsSingleParameterWrite] is `false`; otherwise succeeds with the
  * result of [encode].
  *
- * Shared by [ParameterWriteMessage.encodeIfSupported] and [MasterVolumeMessage.encodeIfSupported]
- * so both gate on the exact same capability flag and produce the exact same shape of failure —
- * see [FirmwareCapabilities] for why this is a capability a caller must supply, not an assumption
- * this package makes.
+ * Shared by [ParameterWriteMessage]'s and [MasterVolumeMessage]'s public, capability-gated `encode`
+ * overloads so both gate on the exact same capability flag and produce the exact same shape of
+ * failure — see [FirmwareCapabilities] for why this is a capability a caller must supply, not an
+ * assumption this package makes.
  */
 internal fun encodeGatedBySingleParameterWriteSupport(
     capabilities: FirmwareCapabilities,
