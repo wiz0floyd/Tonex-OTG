@@ -21,14 +21,27 @@ import dev.tonexotg.protocol.PresetSlot
  *
  * The pedal's whole-device state blob has no self-describing layout; every field lives at a
  * fixed byte offset that only upstream reverse-engineering (via Wireshark capture) has ever
- * documented. Those offsets **moved once already** between upstream releases: V1.0.1.2 used
- * end-relative offsets `-12/-10/-8/-5` for slot A/B/C/current-slot; a later firmware revision
- * changed the state layout and IK's own `main` branch (pinned below) uses `-18/-16/-14/-11`
- * for the same four fields. There is no way to detect a *silent* third layout shift from the
- * blob alone — the sanity checks in [StateBlobPatcher] catch an *implausible* value at these
- * offsets, but a shift that happens to leave plausible-looking values behind would not be
- * caught. See the "Uncertainty" note in this module's PR/report for why that residual risk is
- * accepted rather than solved here.
+ * documented. Offsets in this region **have moved at least once already**, and there is direct
+ * evidence of it: `DIRECT_MONITOR` was a *start-relative* offset (`StateData[14]`) in upstream
+ * `V1.0.6.1` and `V1.0.7.2`, and is an *end-relative* offset (`StateDataLength - 7`) in IK's
+ * current `main` branch (pinned below) — the same field moved from one end of the blob's
+ * addressing scheme to the other between those revisions. That field is not modelled in this
+ * file (see "Fields intentionally NOT modelled here" below) precisely because this module never
+ * writes it, but its drift is the concrete, citable precedent for why the four offsets that
+ * *are* named here cannot be assumed stable across firmware revisions either. (An earlier
+ * version of this note claimed a `V1.0.1.2` release used offsets `-12/-10/-8/-5` for these four
+ * fields; that tag does not exist upstream and no available upstream revision — `V1.0.6.1`,
+ * `V1.0.7.2`, `V1.0.82`, `V1.0.9.2`, `V1.0.10.2`, `V2.0.x` — ever uses those values. That claim
+ * was uncorroborated and has been removed; the earliest tag actually available already uses
+ * `-18/-16/-14/-11`, the values pinned below.)
+ *
+ * There is no way to detect a *silent* further layout shift from the blob alone — the sanity
+ * checks in [StateBlobPatcher] catch an *implausible* value at these offsets, and a length
+ * mismatch against the size pinned at this session's handshake read
+ * ([StateBlobPatcher] / [TonexError.BlobSizeChangedSinceHandshake]) catches most real shifts
+ * (a layout shift almost always changes the blob's overall length) — but a shift that happens to
+ * preserve the blob's total length *and* leave plausible-looking values behind at these four
+ * offsets would still not be caught. That residual risk is accepted rather than solved here.
  *
  * ### Pin
  * Read from **`TonexOneController`**, upstream repository
@@ -71,11 +84,38 @@ internal object StateBlobOffsets {
 
     /**
      * The largest end-relative offset this module ever indexes. A blob whose length is smaller
-     * than this cannot safely be indexed at any of the offsets above without risking either an
-     * out-of-bounds read or (worse) silently patching a byte that belongs to a different,
-     * unrelated field — so [StateBlobPatcher] treats `size < MAX_END_OFFSET` as a hard rejection.
+     * than this cannot safely be indexed at any of the offsets above at all — indexing it would
+     * throw `ArrayIndexOutOfBoundsException` rather than land on a wrong-but-in-bounds byte. This
+     * is purely an indexing-safety floor, not a plausibility floor — see [MIN_PLAUSIBLE_BLOB_SIZE]
+     * for the latter, which [StateBlobPatcher] actually enforces as its length rejection.
      */
     const val MAX_END_OFFSET: Int = END_SLOT_A_PRESET
+
+    /** Start-relative offset where the 20-entry preset colour table begins. */
+    const val START_COLOUR_TABLE: Int = 22
+
+    /** Number of colour-table entries — one per onboard preset (20 presets; see [dev.tonexotg.protocol.PresetIndex]). */
+    private const val COLOUR_TABLE_ENTRY_COUNT: Int = 20
+
+    /** Bytes per colour-table entry (an R/G/B triple, each a `TonexVarint` — minimum 1 byte apiece when small). */
+    private const val COLOUR_TABLE_MIN_BYTES_PER_ENTRY: Int = 3
+
+    /**
+     * The smallest a *real* state blob can plausibly be, derived from the pedal's known field
+     * layout rather than merely "long enough to index without a crash" ([MAX_END_OFFSET], the
+     * previous — and far too permissive — floor: an 18-byte blob satisfied it and was accepted
+     * for patching, per issue #12's review).
+     *
+     * Composed of: everything before the preset colour table ([START_COLOUR_TABLE] bytes), the
+     * colour table itself at its smallest possible varint encoding
+     * ([COLOUR_TABLE_ENTRY_COUNT] × [COLOUR_TABLE_MIN_BYTES_PER_ENTRY]), and the
+     * [MAX_END_OFFSET]-byte tail this module actually indexes into. A blob shorter than this is
+     * rejected with [dev.tonexotg.protocol.TonexError.BlobTooShortToPatch] before any indexing is
+     * attempted, regardless of whether every individual offset would technically still be
+     * in-bounds.
+     */
+    const val MIN_PLAUSIBLE_BLOB_SIZE: Int =
+        START_COLOUR_TABLE + (COLOUR_TABLE_ENTRY_COUNT * COLOUR_TABLE_MIN_BYTES_PER_ENTRY) + MAX_END_OFFSET
 
     /**
      * The end-relative offset of [slot]'s assigned-preset byte.

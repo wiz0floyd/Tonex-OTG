@@ -1,5 +1,8 @@
 package dev.tonexotg.protocol
 
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
 /**
  * An unforgeable token identifying one connected pedal session.
  *
@@ -8,14 +11,123 @@ package dev.tonexotg.protocol
  * connection — even to the exact same physical pedal moments later — gets a new, distinct
  * `SessionId`.
  *
- * The constructor is `internal`: nothing outside the `:protocol` module can create a
- * `SessionId`. That is what turns [PedalState]'s session provenance from a convention into a
- * structural guarantee — see [PedalState] for why this matters. Deliberately not a `data class`:
- * identity equality (two instances are equal only if they are the same instance) means a
+ * The constructor is `private`, with [SessionId.create] as the only way to obtain an instance
+ * from inside `:protocol`. This is what turns [PedalState]'s session provenance from a
+ * convention into a structural guarantee — see [PedalState] for why this matters. **Do not
+ * "helpfully" add a public constructor, a public factory, or make this a `data class`** — see
+ * the ⚠️ below for exactly why each of those would quietly defeat the guarantee this type exists
+ * for.
+ *
+ * ## ⚠️ Why `private constructor` + an `internal` factory, not just `internal constructor`
+ * An earlier version of this type used `internal constructor()`. That looked sufficient — and
+ * *is* sufficient to stop other Kotlin modules at compile time — but Kotlin does not mangle
+ * constructors, only `internal` **functions**. `javap` on the compiled class showed a plain
+ * `public SessionId()`, callable directly from ordinary `javac`-compiled Java code outside this
+ * module with no reflection at all (issue #12 review). `private constructor` compiles to a
+ * genuinely `private` JVM constructor — not merely a Kotlin-compiler-enforced one — and
+ * [SessionId.create] is an `internal` **function**, which *is* name-mangled, so no plain Java
+ * caller outside `:protocol` can spell a call to it either.
+ *
+ * ## Deliberately not a `data class`
+ * Identity equality (two instances are equal only if they are the same instance) means a
  * `SessionId` cannot be forged by constructing another one with "the same" contents, because it
- * has no contents to copy.
+ * has no contents to copy. A `data class` would gain a generated `copy()` and structural
+ * `equals`/`hashCode`, either of which would silently defeat the `!==` identity comparison
+ * [dev.tonexotg.protocol.state.StateBlobPatcher] relies on for provenance.
  */
-class SessionId internal constructor()
+class SessionId private constructor() {
+
+    private val generationCounter = AtomicLong(0L)
+
+    /**
+     * Mints and returns the next [ReadGeneration] for this session.
+     *
+     * Called automatically by [PedalState.create] every time `:protocol` obtains a fresh copy of
+     * the pedal's state blob for this session — see the generation contract on [PedalState] for
+     * the full explanation of what "fresh" must include.
+     */
+    internal fun mintReadGeneration(): ReadGeneration = ReadGeneration(generationCounter.incrementAndGet())
+
+    /**
+     * The most recently minted [ReadGeneration] for this session — i.e. how fresh the freshest
+     * [PedalState] this connection has actually observed is. [dev.tonexotg.protocol.state.StateBlobPatcher]
+     * compares an inbound state's [PedalState.readGeneration] against this value and refuses the
+     * write on any mismatch; see [PedalState]'s generation contract.
+     */
+    internal fun latestReadGeneration(): ReadGeneration = ReadGeneration(generationCounter.get())
+
+    private val pinnedBlobSizeRef = AtomicInteger(UNPINNED)
+
+    /**
+     * Pins this session's expected state-blob length to [size], if it has not already been
+     * pinned for this session. A no-op on every call after the first (regardless of [size]) —
+     * called automatically by [PedalState.create] on every construction, so in practice this
+     * establishes the pin from the very first [PedalState] ever built for this session. Since a
+     * `SessionId` is minted only once the handshake's `GetState` read has already succeeded (see
+     * this class's KDoc), that first `PedalState` is the one wrapping the bytes from that very
+     * read — i.e. the pin ends up anchored to the blob shape observed at connect time, which is
+     * the point of pinning it at all.
+     */
+    internal fun pinBlobSizeIfAbsent(size: Int) {
+        pinnedBlobSizeRef.compareAndSet(UNPINNED, size)
+    }
+
+    /** The blob length pinned by [pinBlobSizeIfAbsent], or `null` if no [PedalState] has been built for this session yet. */
+    internal fun pinnedBlobSize(): Int? = pinnedBlobSizeRef.get().takeIf { it != UNPINNED }
+
+    companion object {
+        /** Sentinel meaning "no size pinned yet" — a real blob length is never negative. */
+        private const val UNPINNED: Int = -1
+
+        /**
+         * The only way to obtain a [SessionId]. Intended caller: the connection state machine
+         * (S9), exactly once per successful handshake.
+         *
+         * Honest scope of what `internal` buys here: this is a name-mangled JVM method (its
+         * compiled name has a module-derived suffix, e.g. `create$protocol`), which stops
+         * ordinary/accidental use from Java and from other Gradle modules at compile time — but
+         * unlike a `private` constructor, the mangled name is still a legal, guessable-if-you-
+         * know-the-module-name Java identifier, so it is not a hard runtime barrier the way
+         * [SessionId]'s constructor being genuinely `private` is. The property that actually
+         * matters is unaffected either way: [TonexController] never hands a caller outside
+         * `:protocol` a [SessionId] or [PedalState] to begin with, so there is nothing for even a
+         * caller who found this method to do anything useful with.
+         */
+        internal fun create(): SessionId = SessionId()
+    }
+}
+
+/**
+ * An opaque, monotonically increasing marker of *which read* of the pedal's state a [PedalState]
+ * came from, scoped to one [SessionId].
+ *
+ * ## Why this exists — the bug a [SessionId] check alone does not catch
+ * [SessionId] proves a [PedalState] was read during *this connection* at all; it says nothing
+ * about *when* during that (possibly hours-long) connection. A connection's `SessionId` is
+ * minted once and held for the connection's entire life, so comparing only `state.sessionId` to
+ * the current session lets a [PedalState] read at, say, 20:00 pass a provenance check performed
+ * at 20:31 just as happily as one read a second ago — even though the pedal's actual global
+ * state may have changed in between (e.g. the user tapped tempo at the footswitch at 20:30,
+ * changing BPM). Patching that stale blob and echoing it back would silently revert every byte
+ * this module doesn't touch, including the BPM the user just set — the same failure class as the
+ * bug this project exists to not repeat (see [PedalState]'s "why this type exists"), just with a
+ * 31-minute-old capture instead of a shipped one. Session is the wrong granularity for
+ * freshness; `ReadGeneration` is the per-read granularity that closes that gap.
+ *
+ * `internal constructor` (not `private` + factory like [SessionId]/[PedalState]): a
+ * `ReadGeneration`'s value carries no security-relevant secret and is not itself a forgeable
+ * write authorization — [PedalState.readGeneration] is only ever compared for equality against
+ * [SessionId.latestReadGeneration], which only [SessionId] itself can advance, so a forged
+ * `ReadGeneration` value is merely wrong, never a way to smuggle a stale write past the check
+ * without also forging a matching [PedalState] and [SessionId] (already ruled out — see those
+ * types).
+ *
+ * @property value the raw generation counter value. Exposed for logging/debugging only — never
+ *   compare this directly; compare whole [ReadGeneration] instances (or go through
+ *   [dev.tonexotg.protocol.state.StateBlobPatcher], which does this for you).
+ */
+@JvmInline
+value class ReadGeneration internal constructor(val value: Long)
 
 /**
  * A wrapper around one read of the pedal's opaque, whole-device state blob, carrying proof of
@@ -38,27 +150,51 @@ class SessionId internal constructor()
  * read bytes off the wire for the [sessionId] it stamps them with — there is no public
  * constructor, no builder, and no way to synthesize one from scratch or from a value hardcoded
  * elsewhere (e.g. a Wireshark capture pasted into source, or a blob replayed from a different
- * pedal or an earlier session). That structurally rules out the upstream bug at the type level:
- * code outside this module cannot produce a `PedalState` to write no matter what it does.
+ * pedal or an earlier session). The constructor is `private`; [PedalState.create] — an
+ * `internal`, name-mangled function — is the only way in, even from other code in this module.
+ * That structurally rules out the upstream bug at the type level: code outside this module
+ * cannot produce a `PedalState` to write no matter what it does *without* going through plain
+ * Java reflection to defeat a genuinely `private` JVM constructor — which `private` (unlike the
+ * `internal constructor` this type used to have) actually requires; see [SessionId]'s KDoc for
+ * the exact bypass this closes.
  *
- * Within `:protocol`, a second layer catches a *stale* blob — one that was genuinely read from
- * the wire, but during a session that has since ended: any write path must compare
- * [sessionId] against the connection's *current* [SessionId] and refuse with
- * [TonexError.StaleSessionState] on mismatch. Because [SessionId] has identity equality and no
- * public constructor anywhere, that comparison cannot be spoofed by constructing a
- * matching-looking id.
+ * Within `:protocol`, two further layers catch a blob that *was* genuinely read from the wire
+ * but is no longer trustworthy to write back:
+ *
+ * 1. **Stale session** — [sessionId] is from a session that has since ended. Any write path must
+ *    compare [sessionId] against the connection's *current* [SessionId] and refuse with
+ *    [TonexError.StaleSessionState] on mismatch. Because [SessionId] has identity equality and no
+ *    public constructor anywhere, that comparison cannot be spoofed by constructing a
+ *    matching-looking id.
+ * 2. **Stale within the same session** — [sessionId] matches, but this is not the *most recent*
+ *    read of that session. See [readGeneration]; this is a distinct, finer-grained check from
+ *    (1) and both must pass.
+ *
+ * ## ⚠️ [readGeneration] — a contract S9 (issue #13) MUST honour
+ * [readGeneration] is stamped automatically by [create] from [SessionId.mintReadGeneration], so
+ * every `PedalState` this module ever builds is self-numbering — **but only if every fresh
+ * observation of pedal state goes through [create] at all.** Concretely, S9 must call [create]
+ * (and therefore mint a new generation):
+ * - on every explicit read of pedal state, including a deliberate re-read immediately before a
+ *   patch (S9's write path **must** re-read state immediately before every call into
+ *   [dev.tonexotg.protocol.state.StateBlobPatcher] — do not reuse a [PedalState] retained from
+ *   an earlier point in the connection);
+ * - on **every** unsolicited state push from the pedal — this pedal has no host UI, and changes
+ *   made directly at the footswitch (FR6) arrive as the pedal pushing its own updated state
+ *   blob. If S9's push-handling path does anything other than build a fresh `PedalState` (via
+ *   [create]) from that pushed blob, this whole freshness mechanism silently stops tracking
+ *   reality the moment the user touches the pedal by hand, and the exact bug this story exists
+ *   to prevent reappears at footswitch granularity instead of session granularity.
  *
  * @property sessionId the session this blob was read during. See [SessionId].
+ * @property readGeneration this read's position in [sessionId]'s monotonic read sequence. See
+ *   the freshness contract above and [ReadGeneration].
  */
-class PedalState internal constructor(
+class PedalState private constructor(
     val sessionId: SessionId,
+    val readGeneration: ReadGeneration,
     bytes: ByteArray,
 ) {
-    init {
-        require(bytes.size <= MAX_STATE_BYTES) {
-            "PedalState blob is ${bytes.size} bytes, exceeds MAX_STATE_BYTES ($MAX_STATE_BYTES)"
-        }
-    }
 
     private val bytes: ByteArray = bytes.copyOf()
 
@@ -78,5 +214,32 @@ class PedalState internal constructor(
     companion object {
         /** The pedal's maximum state blob size (`MAX_STATE_DATA` upstream), in bytes. */
         const val MAX_STATE_BYTES: Int = 512
+
+        /**
+         * The only way to obtain a [PedalState]. Takes a defensive copy of [bytes] so a caller
+         * mutating its own array afterwards cannot retroactively corrupt the retained state. See
+         * [SessionId.create]'s KDoc for the honest scope of what `internal` mangling does and
+         * does not guarantee here — the hard guarantee is [PedalState]'s constructor being
+         * genuinely `private`, not this factory's name being merely inconvenient to spell.
+         *
+         * Mints a fresh [ReadGeneration] for [sessionId] on every call — see the freshness
+         * contract in this class's KDoc, which S9 (issue #13) MUST honour for every fresh
+         * observation of pedal state, not only explicit reads.
+         *
+         * @return [TonexResult.Success] with the new [PedalState], or
+         *   [TonexResult.Failure]([TonexError.OversizedStateBlob]) if [bytes] is longer than
+         *   [MAX_STATE_BYTES] — never throws (this module's contract: every fallible operation
+         *   returns a [TonexResult], see [TonexError]'s top-level KDoc).
+         */
+        internal fun create(sessionId: SessionId, bytes: ByteArray): TonexResult<PedalState> {
+            if (bytes.size > MAX_STATE_BYTES) {
+                return TonexResult.Failure(
+                    TonexError.OversizedStateBlob(maxSize = MAX_STATE_BYTES, actualSize = bytes.size),
+                )
+            }
+            val generation = sessionId.mintReadGeneration()
+            sessionId.pinBlobSizeIfAbsent(bytes.size)
+            return TonexResult.Success(PedalState(sessionId, generation, bytes))
+        }
     }
 }

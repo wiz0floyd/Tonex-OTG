@@ -62,12 +62,14 @@ object StateBlobPatcher {
      * slot in the same write (the common "press a footswitch button" case); this function alone
      * only reassigns which preset [slot] points at.
      *
-     * @param state a blob read from the pedal during [currentSession]. Never synthesize one.
+     * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
+     *   freshness contract, the *most recent* such read this session has produced. Never
+     *   synthesize one, and never hold one across other work — see [PedalState]'s KDoc for why
+     *   S9 must re-read immediately before calling this.
      * @param currentSession the session the caller believes is live right now; compared against
      *   [PedalState.sessionId] by reference. See [TonexError.StaleSessionState].
      * @return the patched bytes, or a [TonexResult.Failure] — never throws for an out-of-range,
-     *   stale, or implausible input; see [TonexError.StaleSessionState] and
-     *   [TonexError.UnexpectedBlobShape].
+     *   stale, or implausible input; see [prepareForPatch] for the exhaustive list of rejections.
      */
     fun patchSlotAssignment(
         state: PedalState,
@@ -75,7 +77,7 @@ object StateBlobPatcher {
         slot: PresetSlot,
         preset: PresetIndex,
     ): TonexResult<ByteArray> {
-        val prepared = prepareForPatch(state, currentSession)
+        val prepared = prepareForPatch(state, currentSession, preset)
         if (prepared is TonexResult.Failure) return prepared
         val bytes = (prepared as TonexResult.Success).value
 
@@ -89,7 +91,10 @@ object StateBlobPatcher {
      * [StateBlobOffsets.END_CURRENT_SLOT] — leaving every slot assignment and every other byte
      * untouched.
      *
-     * @param state a blob read from the pedal during [currentSession]. Never synthesize one.
+     * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
+     *   freshness contract, the *most recent* such read this session has produced. Never
+     *   synthesize one, and never hold one across other work — see [PedalState]'s KDoc for why
+     *   S9 must re-read immediately before calling this.
      * @param currentSession the session the caller believes is live right now; compared against
      *   [PedalState.sessionId] by reference. See [TonexError.StaleSessionState].
      * @return the patched bytes, or a [TonexResult.Failure]; see [patchSlotAssignment].
@@ -99,7 +104,7 @@ object StateBlobPatcher {
         currentSession: SessionId,
         slot: PresetSlot,
     ): TonexResult<ByteArray> {
-        val prepared = prepareForPatch(state, currentSession)
+        val prepared = prepareForPatch(state, currentSession, preset = null)
         if (prepared is TonexResult.Failure) return prepared
         val bytes = (prepared as TonexResult.Success).value
 
@@ -119,6 +124,10 @@ object StateBlobPatcher {
      * [PedalState] and this module has no way — deliberately — to wrap intermediate bytes back
      * into one; see the "no synthesis" contract on [StateBlobPatcher].
      *
+     * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
+     *   freshness contract, the *most recent* such read this session has produced. Never
+     *   synthesize one, and never hold one across other work — see [PedalState]'s KDoc for why
+     *   S9 must re-read immediately before calling this.
      * @return the patched bytes, or a [TonexResult.Failure]; see [patchSlotAssignment].
      */
     fun selectPreset(
@@ -127,7 +136,7 @@ object StateBlobPatcher {
         slot: PresetSlot,
         preset: PresetIndex,
     ): TonexResult<ByteArray> {
-        val prepared = prepareForPatch(state, currentSession)
+        val prepared = prepareForPatch(state, currentSession, preset)
         if (prepared is TonexResult.Failure) return prepared
         val bytes = (prepared as TonexResult.Success).value
 
@@ -139,23 +148,53 @@ object StateBlobPatcher {
     /**
      * The shared entry gate every patch function above runs through, in this fixed order:
      *
-     * 1. **Provenance** — [state] must carry the exact [currentSession] instance, or the write is
-     *    refused with [TonexError.StaleSessionState]. Reference (`===`) equality only, matching
-     *    [SessionId]'s deliberate lack of a public constructor or structural equality.
-     * 2. **Length** — [state] must be at least [StateBlobOffsets.MAX_END_OFFSET] bytes, or every
-     *    offset this module indexes cannot be trusted to exist at all, and the write is refused
-     *    with [TonexError.UnexpectedBlobShape].
-     * 3. **Shape sanity** — the bytes currently sitting at the slot-preset and active-slot
+     * 1. **Session provenance** — [state] must carry the exact [currentSession] instance, or the
+     *    write is refused with [TonexError.StaleSessionState]. Reference (`===`) equality only,
+     *    matching [SessionId]'s deliberate lack of a public constructor or structural equality.
+     *    This alone only proves [state] was read *during this connection* — see the next check
+     *    for why that is not enough on its own.
+     * 2. **Read freshness** — [state] must be [currentSession]'s *most recently observed* read,
+     *    not merely one from sometime during this session. A session can run for a long time, and
+     *    the pedal has no host UI — the user can change global state directly at the footswitch
+     *    (FR6) at any point, at which point every [PedalState] read before that moment is stale
+     *    even though its [PedalState.sessionId] still matches. Checked as
+     *    `state.readGeneration != currentSession.latestReadGeneration()`, refused with
+     *    [TonexError.StaleSessionState] on mismatch — see [PedalState]'s freshness contract,
+     *    which is what makes this check meaningful (it depends on S9 minting a new generation for
+     *    every fresh observation of state, explicit or pushed).
+     * 3. **Length vs. handshake** — [state]'s length must match the length pinned when
+     *    [currentSession] saw its first successful read (typically the handshake), or the write is
+     *    refused with [TonexError.BlobSizeChangedSinceHandshake]. A layout shift almost always
+     *    changes the blob's overall length, so this is the primary shape-drift signal.
+     * 4. **Minimum plausible length** — [state] must be at least
+     *    [StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE] bytes — a floor derived from the pedal's known
+     *    field layout, not merely "long enough to index safely" — or the write is refused with
+     *    [TonexError.BlobTooShortToPatch].
+     * 5. **Shape sanity** — the bytes currently sitting at the slot-preset and active-slot
      *    offsets must look like what those fields are documented to hold (plausible preset
      *    indices, a plausible slot number). A firmware whose state layout has moved again since
      *    the pin in [StateBlobOffsets] is far more likely to fail this check than to coincidentally
      *    produce four plausible-looking bytes, and failing here is the difference between a loud,
-     *    typed error and a silent write to the wrong field.
+     *    typed error and a silent write to the wrong field. Refused with
+     *    [TonexError.ImplausibleStateBlobShape].
+     * 6. **Preset range (defense-in-depth)** — if [preset] is supplied, `preset.value` must fall
+     *    in `PresetIndex.VALID_RANGE`, checked again here with an ordinary runtime comparison
+     *    rather than trusted from [PresetIndex]'s own constructor guard — because that guard is a
+     *    `@JvmInline value class` `init` block, which does not run for a caller that reaches this
+     *    boundary without going through `PresetIndex`'s Kotlin constructor (e.g. a Java or
+     *    reflection caller). Refused with [TonexError.InvalidPresetIndex]. This closes the gap
+     *    for this entry point specifically; it is not a blanket guarantee about every other
+     *    consumer of a `PresetIndex` in this codebase — see [TonexError.InvalidPresetIndex]'s
+     *    KDoc.
      *
      * Returns a *fresh, defensive copy* of the blob's bytes on success — callers patch that copy
      * directly; [state] itself is never mutated (it has no mutable surface to mutate).
      */
-    private fun prepareForPatch(state: PedalState, currentSession: SessionId): TonexResult<ByteArray> {
+    private fun prepareForPatch(
+        state: PedalState,
+        currentSession: SessionId,
+        preset: PresetIndex?,
+    ): TonexResult<ByteArray> {
         if (state.sessionId !== currentSession) {
             return TonexResult.Failure(
                 TonexError.StaleSessionState(
@@ -164,13 +203,40 @@ object StateBlobPatcher {
             )
         }
 
+        if (state.readGeneration != currentSession.latestReadGeneration()) {
+            return TonexResult.Failure(
+                TonexError.StaleSessionState(
+                    "state blob is not this session's most recently observed read - it may have been " +
+                        "superseded by a later read or by the pedal pushing an update (e.g. an " +
+                        "external/footswitch change); re-read state immediately before patching",
+                ),
+            )
+        }
+
         val bytes = state.copyOfBytes()
-        if (bytes.size < StateBlobOffsets.MAX_END_OFFSET) {
-            return TonexResult.Failure(TonexError.UnexpectedBlobShape(expectedSize = null, actualSize = bytes.size))
+
+        val pinnedSize = currentSession.pinnedBlobSize()
+        if (pinnedSize != null && bytes.size != pinnedSize) {
+            return TonexResult.Failure(
+                TonexError.BlobSizeChangedSinceHandshake(pinnedSize = pinnedSize, actualSize = bytes.size),
+            )
+        }
+
+        if (bytes.size < StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE) {
+            return TonexResult.Failure(
+                TonexError.BlobTooShortToPatch(
+                    minimumSize = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE,
+                    actualSize = bytes.size,
+                ),
+            )
         }
 
         if (!looksLikeSlotRegion(bytes)) {
-            return TonexResult.Failure(TonexError.UnexpectedBlobShape(expectedSize = null, actualSize = bytes.size))
+            return TonexResult.Failure(TonexError.ImplausibleStateBlobShape(actualSize = bytes.size))
+        }
+
+        if (preset != null && preset.value !in PresetIndex.VALID_RANGE) {
+            return TonexResult.Failure(TonexError.InvalidPresetIndex(preset.value))
         }
 
         return TonexResult.Success(bytes)
