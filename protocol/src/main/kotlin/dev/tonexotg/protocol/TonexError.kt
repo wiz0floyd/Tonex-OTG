@@ -183,31 +183,31 @@ sealed class TonexError {
     }
 
     /**
-     * A [PedalState] blob's length differs from the length pinned at this session's first
-     * *plausible-sized* read (see [SessionId.pinBlobSizeIfAbsent]).
+     * A [PedalState] blob's length is *shorter* than the largest plausible-sized length observed
+     * so far this session (see [SessionId.pinOrWidenBlobSize]).
      *
      * That pin is **not** literally "the blob seen when this session connected" or "the
      * handshake blob" — despite this error's name, kept for continuity with earlier rounds of
      * issue #12's review. A [SessionId] does not exist until [ConnectionState.Ready] is reached,
      * and `Ready` is only reached *after* the handshake's `GetState` blob has already been read
      * (see [SessionId]'s KDoc) — so no [PedalState], and therefore no pin, can ever be anchored
-     * to that specific read. The pin is actually established by this session's first
-     * plausible-sized [PedalState], which is necessarily some read observed strictly after
-     * [ConnectionState.Ready], not the handshake read itself (issue #12 round-3 review corrected
-     * this KDoc and [message] to say so precisely, rather than changing the pinning mechanism
-     * itself). A firmware layout shift almost always changes the blob's overall length regardless
-     * of exactly which read established the pin, so a length change partway through a session
-     * remains this module's strongest available signal that the pinned offsets in
-     * `StateBlobOffsets` are no longer trustworthy for this pedal at all — a much more specific
-     * diagnosis than "the shape looks a bit odd" ([ImplausibleStateBlobShape]).
+     * to that specific read. It is also **not** necessarily "the first" plausible-sized read
+     * anymore, as of issue #12's round-4 review: the pin self-corrects upward — a later,
+     * *larger* plausible-sized read widens it, on the reasoning that a smaller earlier pin was
+     * itself more likely to have come from a corrupt/truncated read than the pedal's actual blob
+     * length changing mid-session (see [SessionId.pinOrWidenBlobSize]'s KDoc for the full
+     * reasoning and the HIGH finding this closes). Only a *shrink* below the established pin
+     * trips this error — that remains this module's strongest available signal that the pinned
+     * offsets in `StateBlobOffsets` are no longer trustworthy for this pedal at all — a much more
+     * specific diagnosis than "the shape looks a bit odd" ([ImplausibleStateBlobShape]).
      *
-     * @property pinnedSize the blob length pinned at this session's first plausible-sized read.
-     * @property actualSize the blob's actual length now.
+     * @property pinnedSize the largest plausible-sized blob length observed so far this session.
+     * @property actualSize the blob's actual length now, shorter than [pinnedSize].
      */
     data class BlobSizeChangedSinceHandshake(val pinnedSize: Int, val actualSize: Int) : TonexError() {
         override val message: String
-            get() = "State blob size changed from $pinnedSize bytes (this session's first " +
-                "plausible-sized read, observed after the connection reached Ready — not " +
+            get() = "State blob size shrank from $pinnedSize bytes (this session's largest " +
+                "plausible-sized read so far, observed after the connection reached Ready — not " +
                 "necessarily the handshake blob itself) to $actualSize bytes now — refusing to " +
                 "patch a blob whose layout may have moved"
     }
