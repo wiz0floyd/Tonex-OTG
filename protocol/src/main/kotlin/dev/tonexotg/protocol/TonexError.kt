@@ -102,18 +102,38 @@ sealed class TonexError {
     }
 
     /**
-     * A write was attempted against a [PedalState] that does not carry proof of having been
-     * read from the pedal during the *current* session.
+     * A write was attempted against a [PedalState] that is not currently authorized to write —
+     * either because it was never read during the *current* session, or because it was read
+     * during the current session but is no longer usable (superseded by a later read, or already
+     * spent on an earlier successful patch).
      *
      * This is the runtime backstop behind [PedalState]'s structural provenance guarantee: the
      * type system already makes it impossible for code outside `:protocol` to construct a
-     * [PedalState] at all, and [SessionId] equality further catches a *stale* blob retained
-     * from a previous, since-ended session of this same module. This error is what a caller
-     * sees if that second check trips.
+     * [PedalState] at all; [SessionId] equality catches a *stale* blob retained from a previous,
+     * since-ended session of this same module; and [SessionId]'s read-generation tracking catches
+     * a blob that is genuinely from *this* session but is no longer the authorized one to write —
+     * either because a later read has superseded it, or because it has already been used for one
+     * successful write (a [PedalState] is single-use as a write authorization; see
+     * [dev.tonexotg.protocol.state.StateBlobPatcher]'s `prepareForPatch`, issue #12 round-3
+     * review).
+     *
+     * @property details a specific, human-readable explanation of which of the above actually
+     *   happened — not meant to be parsed, but always accurate for the case it describes.
+     * @property sameSession `true` when [details] describes a same-session-but-no-longer-current
+     *   rejection (superseded-by-a-later-read, or already-spent), `false` when it describes a
+     *   genuinely cross-session rejection. Exists so [message] never claims a blob "is not from
+     *   the current session" when it demonstrably is — an inaccuracy the round-2 fix left in
+     *   place for the generation-stale case (issue #12 round-3 review) and this property closes.
      */
-    data class StaleSessionState(val details: String) : TonexError() {
+    data class StaleSessionState(val details: String, val sameSession: Boolean) : TonexError() {
         override val message: String
-            get() = "Refused write: state blob is not from the current session ($details)"
+            get() = if (sameSession) {
+                "Refused write: state blob IS from the current session, but is not currently " +
+                    "authorized to write with — it may have been superseded by a later read, or " +
+                    "already used for an earlier write ($details)"
+            } else {
+                "Refused write: state blob is not from the current session ($details)"
+            }
     }
 
     /**
@@ -125,12 +145,133 @@ sealed class TonexError {
      * [PedalState]): the patch offsets are firmware-version dependent, and a length mismatch
      * means the offsets are not trustworthy for this blob.
      *
+     * Used by [dev.tonexotg.protocol.codec.MessageHeaderCodec] for a frame whose declared body
+     * length does not match the bytes actually present. [StateBlobPatcher] does **not** use this
+     * case — it has its own, more specific error types ([BlobTooShortToPatch],
+     * [BlobSizeChangedSinceHandshake], [ImplausibleStateBlobShape]) precisely because collapsing
+     * "too short", "shape looks wrong", and "size changed since handshake" into one case with a
+     * nullable [expectedSize] made it impossible for a caller — or a user reading [message] mid-
+     * gig — to tell which of three very different problems actually happened (issue #12 review).
+     *
      * @property expectedSize the size the caller expected, if it had a specific expectation.
      * @property actualSize the size the blob actually had.
      */
     data class UnexpectedBlobShape(val expectedSize: Int?, val actualSize: Int) : TonexError() {
         override val message: String
             get() = "Unexpected state blob size: expected $expectedSize, got $actualSize"
+    }
+
+    /**
+     * A [PedalState] blob was too short for [StateBlobPatcher] to safely patch — shorter than
+     * [minimumSize], the smallest length a *real* state blob can plausibly be (derived from the
+     * pedal's known field layout: everything before the preset colour table, the colour table
+     * itself at its smallest possible encoding, and the tail this module actually indexes into —
+     * see `StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE`). This is a floor on real blob shapes, not
+     * merely "long enough to index without an out-of-bounds read" — an 18-byte blob used to pass
+     * this check (issue #12 review) despite being nowhere near a real state blob's size.
+     *
+     * Distinct from [BlobSizeChangedSinceHandshake] (was previously a plausible length, has since
+     * changed) and [ImplausibleStateBlobShape] (plausible length, wrong-looking bytes at the
+     * patched offsets).
+     *
+     * @property minimumSize the smallest blob length [StateBlobPatcher] will attempt to patch.
+     * @property actualSize the blob's actual length.
+     */
+    data class BlobTooShortToPatch(val minimumSize: Int, val actualSize: Int) : TonexError() {
+        override val message: String
+            get() = "State blob is too short to patch safely: need at least $minimumSize bytes, got $actualSize"
+    }
+
+    /**
+     * A [PedalState] blob's length is *shorter* than the largest plausible-sized length observed
+     * so far this session (see [SessionId.pinOrWidenBlobSize]).
+     *
+     * That pin is **not** literally "the blob seen when this session connected" or "the
+     * handshake blob" — despite this error's name, kept for continuity with earlier rounds of
+     * issue #12's review. A [SessionId] does not exist until [ConnectionState.Ready] is reached,
+     * and `Ready` is only reached *after* the handshake's `GetState` blob has already been read
+     * (see [SessionId]'s KDoc) — so no [PedalState], and therefore no pin, can ever be anchored
+     * to that specific read. It is also **not** necessarily "the first" plausible-sized read
+     * anymore, as of issue #12's round-4 review: the pin self-corrects upward — a later,
+     * *larger* plausible-sized read widens it, on the reasoning that a smaller earlier pin was
+     * itself more likely to have come from a corrupt/truncated read than the pedal's actual blob
+     * length changing mid-session (see [SessionId.pinOrWidenBlobSize]'s KDoc for the full
+     * reasoning and the HIGH finding this closes). Only a *shrink* below the established pin
+     * trips this error — that remains this module's strongest available signal that the pinned
+     * offsets in `StateBlobOffsets` are no longer trustworthy for this pedal at all — a much more
+     * specific diagnosis than "the shape looks a bit odd" ([ImplausibleStateBlobShape]).
+     *
+     * @property pinnedSize the largest plausible-sized blob length observed so far this session.
+     * @property actualSize the blob's actual length now, shorter than [pinnedSize].
+     */
+    data class BlobSizeChangedSinceHandshake(val pinnedSize: Int, val actualSize: Int) : TonexError() {
+        override val message: String
+            get() = "State blob size shrank from $pinnedSize bytes (this session's largest " +
+                "plausible-sized read so far, observed after the connection reached Ready — not " +
+                "necessarily the handshake blob itself) to $actualSize bytes now — refusing to " +
+                "patch a blob whose layout may have moved"
+    }
+
+    /**
+     * A [PedalState] blob is a plausible length, but the bytes currently sitting at the offsets
+     * [StateBlobPatcher] is about to patch do not look like the field they are documented to hold
+     * (e.g. an implausible preset index, an implausible slot number). This does not prove the
+     * offsets are correct for this blob — a coincidentally plausible value at a shifted offset
+     * would still pass — only that they are not *obviously* wrong; see the offset-drift caveat in
+     * `StateBlobOffsets`'s KDoc.
+     *
+     * @property actualSize the blob's actual length, kept for logging context even though this
+     *   case is not itself a length failure.
+     */
+    data class ImplausibleStateBlobShape(val actualSize: Int) : TonexError() {
+        override val message: String
+            get() = "State blob's slot-region bytes don't look like preset/slot data (length " +
+                "$actualSize bytes) — refusing to patch a blob whose layout may not match the " +
+                "offsets this module has pinned"
+    }
+
+    /**
+     * A byte array offered as pedal state exceeds [PedalState.MAX_STATE_BYTES] — larger than the
+     * pedal's own state blob (`MAX_STATE_DATA` upstream) could ever legitimately be.
+     *
+     * Surfaced as a typed error rather than thrown, per this module's contract (every fallible
+     * `:protocol` operation returns a [TonexResult] — see this file's top-level KDoc): a
+     * malformed or corrupted read must not be able to crash the reader with an uncaught
+     * `IllegalArgumentException` (issue #12 review).
+     *
+     * @property maxSize the largest size a [PedalState] will accept ([PedalState.MAX_STATE_BYTES]).
+     * @property actualSize the size actually offered.
+     */
+    data class OversizedStateBlob(val maxSize: Int, val actualSize: Int) : TonexError() {
+        override val message: String
+            get() = "State blob is $actualSize bytes, exceeds the pedal's maximum of $maxSize bytes"
+    }
+
+    /**
+     * A [dev.tonexotg.protocol.PresetIndex] passed to a state-blob patch function held a `value`
+     * outside `PresetIndex.VALID_RANGE` at the moment it was actually used to patch a byte,
+     * despite [dev.tonexotg.protocol.PresetIndex]'s own constructor guard.
+     *
+     * This exists as defense-in-depth, not paranoia: `PresetIndex` is a `@JvmInline value class`,
+     * and Kotlin represents inline value classes as their raw underlying primitive at many JVM
+     * call boundaries — a caller that never goes through `PresetIndex`'s Kotlin constructor (e.g.
+     * a Java or reflection caller supplying a raw `int` where a `PresetIndex` is expected) can
+     * make `preset.value` hold an out-of-range value that `PresetIndex`'s own `init { require(...) }`
+     * never ran for. This error is [StateBlobPatcher] re-checking the value explicitly, with an
+     * ordinary runtime comparison that cannot be erased at the same boundary, immediately before
+     * it is written into a byte that reaches the pedal.
+     *
+     * This closes the specific gap `StateBlobPatcher` is exposed to; it does **not** retroactively
+     * make every other consumer of a `PresetIndex` elsewhere in this codebase safe against the
+     * same erasure — any other call site that treats `PresetIndex.value` as pre-validated by the
+     * type alone carries the same residual risk and needs its own explicit check (issue #12
+     * review).
+     *
+     * @property value the out-of-range preset index that was rejected.
+     */
+    data class InvalidPresetIndex(val value: Int) : TonexError() {
+        override val message: String
+            get() = "Preset index $value is outside the valid 0..19 range — refusing to patch"
     }
 }
 
@@ -147,7 +288,18 @@ sealed class TonexError {
  * error to skip a branch on, which is deliberate.
  */
 sealed interface TonexResult<out T> {
-    /** The operation completed and produced [value]. */
+    /**
+     * The operation completed and produced [value].
+     *
+     * ⚠️ **`equals`/`hashCode` caveat when `T` is (or contains) a [ByteArray].** This is an
+     * ordinary Kotlin `data class`, so its generated `equals` compares [value] with `T`'s own
+     * `equals` — and [ByteArray] does not override `equals`, so two arrays with identical
+     * contents are unequal unless they are the same instance. `assertEquals(Success(expected),
+     * result)` against a freshly-computed `ByteArray` will fail even when the bytes match, and
+     * the corresponding `assertNotEquals` will pass vacuously and prove nothing. Compare
+     * `(result as Success).value.contentEquals(expected)` instead (as this module's own tests
+     * do), not `result == Success(expected)`.
+     */
     data class Success<out T>(val value: T) : TonexResult<T>
 
     /** The operation did not complete; [error] explains why. */
