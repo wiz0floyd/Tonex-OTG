@@ -38,7 +38,7 @@ import dev.tonexotg.protocol.SessionId
  *
  * There is no way to detect a *silent* further layout shift from the blob alone — the sanity
  * checks in [StateBlobPatcher] catch an *implausible* value at these offsets, and a length
- * mismatch against the size pinned at this session's first plausible-sized read (not literally
+ * mismatch against the size pinned at this session's largest plausible-sized read (not literally
  * the handshake blob — see [TonexError.BlobSizeChangedSinceHandshake]'s KDoc)
  * ([StateBlobPatcher] / [TonexError.BlobSizeChangedSinceHandshake]) catches most real shifts
  * (a layout shift almost always changes the blob's overall length) — but a shift that happens to
@@ -96,11 +96,23 @@ internal object StateBlobOffsets {
     /** Start-relative offset where the 20-entry preset colour table begins. */
     const val START_COLOUR_TABLE: Int = 22
 
-    /** Number of colour-table entries — one per onboard preset (20 presets; see [dev.tonexotg.protocol.PresetIndex]). */
-    private const val COLOUR_TABLE_ENTRY_COUNT: Int = 20
+    /**
+     * Number of colour-table entries — one per onboard preset (20 presets; see
+     * [dev.tonexotg.protocol.PresetIndex]).
+     *
+     * `internal`, not `private`: [StateBlobOffsetsTest] references this directly so that a change
+     * here is caught by the [MIN_PLAUSIBLE_BLOB_SIZE] derivation test below, rather than only by
+     * whatever (if anything) still hardcodes `20` elsewhere.
+     */
+    internal const val COLOUR_TABLE_ENTRY_COUNT: Int = 20
 
-    /** Bytes per colour-table entry (an R/G/B triple, each a `TonexVarint` — minimum 1 byte apiece when small). */
-    private const val COLOUR_TABLE_MIN_BYTES_PER_ENTRY: Int = 3
+    /**
+     * Bytes per colour-table entry (an R/G/B triple, each a `TonexVarint` — minimum 1 byte apiece
+     * when small).
+     *
+     * `internal`, not `private` — see [COLOUR_TABLE_ENTRY_COUNT]'s KDoc for why.
+     */
+    internal const val COLOUR_TABLE_MIN_BYTES_PER_ENTRY: Int = 3
 
     /**
      * The smallest a *real* state blob can plausibly be, derived from the pedal's known field
@@ -116,16 +128,26 @@ internal object StateBlobOffsets {
      * attempted, regardless of whether every individual offset would technically still be
      * in-bounds.
      *
-     * Defined here in prose/derivation, but the actual `const val` value lives on
-     * [SessionId.MIN_PLAUSIBLE_BLOB_SIZE] and is simply referenced from there — not computed
-     * independently here — to avoid a circular package dependency: [SessionId]/[PedalState] (in
-     * `dev.tonexotg.protocol`) need this floor too ([SessionId.pinOrWidenBlobSize],
-     * [PedalState.create]), and this package already imports from `dev.tonexotg.protocol` (see the
-     * imports above), so importing the other way around would create a cycle (issue #12 round-4
-     * review, LOW finding #2). `StateBlobOffsetsTest` pins this value's derivation (22 + 20×3 + 18
-     * = 100) against the literal on [SessionId], so the two cannot silently drift apart.
+     * ## This is the actual single source of truth for this value
+     * This `const val` is a genuine computed expression over this object's own local constants
+     * (all four listed above already live here), not a bare literal. [SessionId.MIN_PLAUSIBLE_BLOB_SIZE]
+     * holds a separately-maintained *mirror* of this same value (`100`) — it cannot simply
+     * reference this constant, because [SessionId] lives in `dev.tonexotg.protocol`, which this
+     * package already imports from (see the imports above), and importing the other way around
+     * here would create a circular package dependency and mean [PedalState] — deliberately opaque
+     * to this package's field-layout knowledge — ends up consulting a patcher-layer constant
+     * directly (issue #12 round-4 review, LOW finding #2). Because that mirror cannot simply
+     * reference this expression, `StateBlobOffsetsTest` is what actually keeps the two in sync: it
+     * asserts [SessionId.MIN_PLAUSIBLE_BLOB_SIZE] against a fresh computation over
+     * [START_COLOUR_TABLE], [COLOUR_TABLE_ENTRY_COUNT], [COLOUR_TABLE_MIN_BYTES_PER_ENTRY], and
+     * [MAX_END_OFFSET] — the named constants, not bare duplicated literals — so changing any one of
+     * those four is what actually fails the test if [SessionId]'s mirror is not updated to match
+     * (issue #12 round-5 review, LOW finding: an earlier version of that test asserted against
+     * bare literals disconnected from these constants, so it silently stopped catching drift in
+     * three of the four inputs — only [MAX_END_OFFSET] was still genuinely pinned).
      */
-    const val MIN_PLAUSIBLE_BLOB_SIZE: Int = SessionId.MIN_PLAUSIBLE_BLOB_SIZE
+    const val MIN_PLAUSIBLE_BLOB_SIZE: Int =
+        START_COLOUR_TABLE + (COLOUR_TABLE_ENTRY_COUNT * COLOUR_TABLE_MIN_BYTES_PER_ENTRY) + MAX_END_OFFSET
 
     /**
      * The end-relative offset of [slot]'s assigned-preset byte.

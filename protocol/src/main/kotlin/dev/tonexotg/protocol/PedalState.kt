@@ -53,6 +53,44 @@ class SessionId private constructor() {
     internal fun mintReadGeneration(): ReadGeneration = ReadGeneration(generationCounter.incrementAndGet())
 
     /**
+     * Invalidates whatever [PedalState] this session currently holds as its freshest read, without
+     * producing a replacement one.
+     *
+     * ## The contract this exists for — S9 (issue #13) MUST call this
+     * [PedalState.create] only ever runs for an observation attempt that actually produced bytes —
+     * it mints a generation unconditionally on every call, success *or* [TonexError.OversizedStateBlob]
+     * failure, which is what stops a failed-but-byte-producing observation (an oversized frame) from
+     * leaving a stale [PedalState] fully write-authorized. But an observation attempt that fails
+     * *before* producing any bytes at all — a timeout waiting for the pedal to respond, a CRC
+     * mismatch on the frame that did arrive, or a malformed frame the codec refuses to decode — never
+     * calls [PedalState.create] in the first place, because there is no [ByteArray] to pass it. None
+     * of that is [PedalState.create]'s failure mode to cover; see its KDoc for the honest scope of
+     * what its own unconditional mint actually closes.
+     *
+     * That gap is exactly what this function exists to close: whenever S9's connection state machine
+     * hits one of those byte-less observation failures — during the mandatory pre-patch re-read, or
+     * anywhere else it attempts to observe state — it MUST call `sessionId.invalidateCurrentRead()`
+     * before doing anything else with a previously-held [PedalState] for this session. Skipping this
+     * call leaves a previously-held, still-genuinely-valid [PedalState] fully authorized to patch
+     * with, even though the reason S9 attempted a fresh read at all was to make sure nothing had
+     * changed at the footswitch since that older read — reopening the exact stale-whole-device-echo
+     * bug this story exists to prevent, just via a failed re-read instead of a stale one (issue #12
+     * round-5 review).
+     *
+     * A thin wrapper over [mintReadGeneration] — advancing the generation counter with no
+     * accompanying [PedalState] is already exactly what "invalidate the current read" means, per the
+     * freshness check in [dev.tonexotg.protocol.state.StateBlobPatcher.patchSlotAssignment] and
+     * friends. Promoted to its own named function purely so this contract has a first-class,
+     * discoverable verb for S9 to call, rather than requiring whoever implements S9 to independently
+     * notice that [mintReadGeneration] — a function named and documented around minting a fresh
+     * [PedalState]'s generation — is also the correct call to make when there is no fresh
+     * [PedalState] to mint one for.
+     */
+    internal fun invalidateCurrentRead() {
+        mintReadGeneration()
+    }
+
+    /**
      * The most recently minted [ReadGeneration] for this session — i.e. how fresh the freshest
      * [PedalState] this connection has actually observed is. [dev.tonexotg.protocol.state.StateBlobPatcher]
      * compares an inbound state's [PedalState.readGeneration] against this value and refuses the
@@ -76,7 +114,7 @@ class SessionId private constructor() {
      * the blocker where calling a patch function twice against the same read (no re-read in
      * between) let the second call silently revert the first (issue #12 round-3 review).
      *
-     * On success, also records [generation] as [lastSpentGeneration] — see that property for why.
+     * On success, also records [generation] as [lastSpentGenerationRef] — see that property for why.
      */
     internal fun consumeReadGeneration(generation: ReadGeneration): Boolean {
         val advanced = generationCounter.compareAndSet(generation.value, generation.value + 1)
@@ -146,6 +184,45 @@ class SessionId private constructor() {
      * necessarily some plausible-sized read observed strictly after [ConnectionState.Ready]. See
      * [TonexError.BlobSizeChangedSinceHandshake]'s KDoc, which states this precisely rather than
      * claiming to be about "the blob seen when this session connected."
+     *
+     * ## ⚠️ Accepted residual risk: widening is gated on size alone, not shape
+     * [PedalState.create] calls this for *any* [size] at least [MIN_PLAUSIBLE_BLOB_SIZE], with no
+     * check that the bytes at that size actually *look like* a real state blob (the kind of check
+     * [dev.tonexotg.protocol.state.StateBlobPatcher] separately runs at patch time — see its
+     * `looksLikeSlotRegion`). Concretely: a correctly-shaped 200-byte read pins the session at 200;
+     * a later read of 512 bytes that is itself corrupt — garbage at every offset, including the
+     * ones `looksLikeSlotRegion` checks — still widens the pin to 512, because nothing at this call
+     * site evaluates shape at all, only length. Every subsequent, genuinely legitimate 200-byte read
+     * is then rejected as [TonexError.BlobSizeChangedSinceHandshake] for the rest of the
+     * connection's life, recoverable only by reconnect (issue #12 round-5 review, MEDIUM finding).
+     *
+     * This is accepted rather than closed here, deliberately:
+     * - **Shape checking lives one layer up, and reaching it from here would cost real
+     *   architecture.** [dev.tonexotg.protocol.state.StateBlobPatcher]'s shape check needs the
+     *   firmware-pinned field offsets in `dev.tonexotg.protocol.state.StateBlobOffsets` — exactly
+     *   the field-layout knowledge [PedalState] and [SessionId] are deliberately opaque to (see
+     *   [PedalState]'s "why this type exists"; see also [MIN_PLAUSIBLE_BLOB_SIZE]'s KDoc for the
+     *   same opacity argument already made once for this file). Calling into that check from here
+     *   would mean [PedalState.create] consulting a patcher-layer constant directly — the exact
+     *   shape of problem issue #12's round-4 review flagged as a LOW finding for a different
+     *   constant, not something to reintroduce for this one.
+     * - **What actually reaches this call site has already survived CRC/framing.** [PedalState.create]
+     *   only ever runs on bytes an observation attempt actually produced — see [invalidateCurrentRead]
+     *   for why a byte-less failure (timeout, CRC mismatch, malformed frame) never reaches here at
+     *   all. So *by construction*, any [size] this function is called with came from a frame S9's
+     *   framing/codec layer already accepted as intact. That is a real, honest mitigant — it rules
+     *   out plain bit-flip corruption in transit — but it is **not** a complete argument: a CRC
+     *   checks the integrity of the bytes actually received, not that those bytes constitute a
+     *   correctly-shaped, true-length state blob rather than, say, a reassembly bug stitching two
+     *   frames together, or a genuinely different message landing here. A read that is corrupt in a
+     *   way that still passes CRC — wrong content, right checksum — remains a real, accepted
+     *   residual risk, not a solved one. Do not read the CRC point above as ruling this out.
+     * - **The failure mode this residual risk causes is a false reject, not a silent bad write.**
+     *   A wrongly widened pin makes [dev.tonexotg.protocol.state.StateBlobPatcher] refuse every
+     *   subsequent legitimate-sized write with a loud, typed [TonexError.BlobSizeChangedSinceHandshake]
+     *   until reconnect — annoying, but exactly the "fail fast and loud" direction this project's
+     *   house philosophy prefers over silently patching the wrong bytes. It never causes a write to
+     *   go out with a wrong or corrupted field.
      */
     internal fun pinOrWidenBlobSize(size: Int) {
         while (true) {
@@ -176,17 +253,29 @@ class SessionId private constructor() {
         /**
          * The smallest a *real* pedal state blob can plausibly be — see
          * [dev.tonexotg.protocol.state.StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE]'s KDoc for the
-         * full field-layout derivation (colour-table size, indexed tail, etc.); that object
-         * defines its own constant in terms of this one, not the other way around.
+         * full field-layout derivation (colour-table size, indexed tail, etc.).
          *
-         * Owned here — by [SessionId], the type that actually enforces it via
-         * [pinOrWidenBlobSize] — rather than in `dev.tonexotg.protocol.state.StateBlobOffsets`,
-         * purely to avoid a circular package dependency: [PedalState.create] needs this floor, and
+         * ## This literal is a mirror, not the source of truth
+         * As of issue #12's round-5 review, [dev.tonexotg.protocol.state.StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE]
+         * is the actual computed derivation — a real expression over that object's own layout
+         * constants (`START_COLOUR_TABLE`, `COLOUR_TABLE_ENTRY_COUNT`,
+         * `COLOUR_TABLE_MIN_BYTES_PER_ENTRY`, `MAX_END_OFFSET`), all of which already live there.
+         * The bare `100` below is a manually-maintained *mirror* of that computed value, kept here
+         * — rather than simply referencing `StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE` — purely to
+         * avoid a circular package dependency: [PedalState.create] needs this floor, and
          * `dev.tonexotg.protocol.state` already imports from `dev.tonexotg.protocol` (e.g.
          * [PedalState] itself), so importing the other way around here would both create the cycle
          * and mean [PedalState] — which documents itself elsewhere as deliberately opaque to the
          * patching layer's field-layout knowledge — ends up consulting a patcher-layer constant
          * directly (issue #12 round-4 review, LOW finding #2).
+         *
+         * Because this is a mirror rather than a derivation, editing `START_COLOUR_TABLE`,
+         * `COLOUR_TABLE_ENTRY_COUNT`, `COLOUR_TABLE_MIN_BYTES_PER_ENTRY`, or `MAX_END_OFFSET` alone
+         * does **not** automatically update this literal — `StateBlobOffsetsTest` is what actually
+         * catches that drift, by asserting this value against a fresh computation over those same
+         * named constants (issue #12 round-5 review, LOW finding: an earlier version of that test
+         * asserted against bare duplicated literals instead of the real constants, so it silently
+         * stopped catching drift in three of the four inputs).
          */
         internal const val MIN_PLAUSIBLE_BLOB_SIZE: Int = 100
 
@@ -310,6 +399,13 @@ value class ReadGeneration internal constructor(val value: Long)
  *   reality the moment the user touches the pedal by hand, and the exact bug this story exists
  *   to prevent reappears at footswitch granularity instead of session granularity.
  *
+ * [create]'s own unconditional-mint-on-every-call behaviour (see its KDoc) only ever runs for an
+ * observation attempt that actually produced a [ByteArray] — it cannot cover an observation that
+ * fails *before* producing bytes at all (a timeout, a CRC mismatch, a malformed frame the codec
+ * never decodes). **S9 must separately call [SessionId.invalidateCurrentRead] for exactly those
+ * byte-less failures** — see that function's KDoc for the full contract and why skipping it
+ * reopens this story's bug via a failed re-read instead of a stale one.
+ *
  * @property sessionId the session this blob was read during. See [SessionId].
  * @property readGeneration this read's position in [sessionId]'s monotonic read sequence. See
  *   the freshness contract above and [ReadGeneration].
@@ -348,17 +444,29 @@ class PedalState private constructor(
          *
          * Mints a fresh [ReadGeneration] for [sessionId] on **every call, success or failure** —
          * see the freshness contract in this class's KDoc, which S9 (issue #13) MUST honour for
-         * every fresh observation of pedal state, not only explicit reads. The failure case
-         * matters just as much as success: if this call fails (e.g. S9's mandatory pre-patch
-         * re-read hits a timeout, a CRC failure, a malformed frame, or an oversized frame) but the
-         * caller goes on to patch anyway using a [PedalState] it obtained from an earlier,
-         * successful call, that earlier state must not still be fully write-authorized — otherwise
-         * a *failed* observation reopens the exact stale-whole-device-echo bug this story exists to
+         * every fresh observation of pedal state, not only explicit reads.
+         *
+         * ## Honest scope of what this function's own failure case covers
+         * This function has exactly one failure mode: [bytes] is longer than [MAX_STATE_BYTES]
+         * ([TonexError.OversizedStateBlob]). Minting unconditionally, before that size check can
+         * return early, means an oversized-but-*produced* read does not leave an earlier,
+         * successful [PedalState] fully write-authorized — otherwise that specific failed
+         * observation would reopen the exact stale-whole-device-echo bug this story exists to
          * prevent, just via a failed re-read instead of a stale one (issue #12 round-4 review,
-         * MEDIUM finding). Minting unconditionally, before the size check below can return early,
-         * is what closes that: [SessionId.latestReadGeneration] moves forward on this call
-         * regardless of its outcome, so any [PedalState] the caller was previously holding for
-         * [sessionId] now fails [dev.tonexotg.protocol.state.StateBlobPatcher]'s freshness check.
+         * MEDIUM finding). [SessionId.latestReadGeneration] moves forward on this call regardless
+         * of its outcome, so any [PedalState] the caller was previously holding for [sessionId] now
+         * fails [dev.tonexotg.protocol.state.StateBlobPatcher]'s freshness check.
+         *
+         * **This does not, and cannot, cover an observation attempt that never reaches this
+         * function at all.** A timeout waiting for the pedal to respond, a CRC mismatch on the
+         * frame that did arrive, or a malformed frame the codec refuses to decode all mean no
+         * [ByteArray] was ever produced — there is nothing to call [create] with, so it is simply
+         * never invoked, and this unconditional mint never runs. An earlier version of this KDoc
+         * claimed those three failure modes *and* the oversized case were all covered by "this
+         * call's" unconditional mint; that was false for the first three and has been corrected
+         * (issue #12 round-5 review, MEDIUM finding). **S9 (issue #13) MUST separately invalidate
+         * the session's current read for exactly those byte-less failures**, by calling
+         * [SessionId.invalidateCurrentRead] — see that function's KDoc for the full contract.
          *
          * @return [TonexResult.Success] with the new [PedalState], or
          *   [TonexResult.Failure]([TonexError.OversizedStateBlob]) if [bytes] is longer than

@@ -1,6 +1,7 @@
 package dev.tonexotg.protocol.state
 
 import dev.tonexotg.protocol.PresetSlot
+import dev.tonexotg.protocol.SessionId
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -44,14 +45,46 @@ class StateBlobOffsetsTest {
 
     @Test
     fun `MIN_PLAUSIBLE_BLOB_SIZE is derived from the colour table and the indexed tail, not an arbitrary guess`() {
-        // 22 bytes before the colour table + 20 preset entries * 3 bytes/entry (minimum varint
-        // encoding) + the 18-byte tail this module indexes into = 100. Pinned here so a future
-        // edit to any of the inputs shows up as an explicit test failure rather than a silent
-        // change to how permissive patching is (issue #12 review: the old floor, MAX_END_OFFSET
-        // alone, was ~5x too permissive - it accepted an 18-byte blob for patching).
-        val expected = 22 + (20 * 3) + StateBlobOffsets.MAX_END_OFFSET
+        // Computed from the *named* layout constants, not bare duplicated literals - a change to
+        // any of these four inputs must flow through this expression and fail the assertion below
+        // if StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE (itself now a real computed expression, not a
+        // bare literal - see its KDoc) was not updated to match. Pinning `expected` to a bare `22 +
+        // 20 * 3 + 18` here would silently stop catching drift in three of those four inputs, which
+        // is exactly the bug this test previously had (issue #12 round-5 review, LOW finding):
+        // moving MIN_PLAUSIBLE_BLOB_SIZE to a bare literal on SessionId left this test reconstructing
+        // `expected` from bare literals too, so changing START_COLOUR_TABLE or
+        // COLOUR_TABLE_ENTRY_COUNT changed neither side and this test kept passing regardless.
+        val expected = StateBlobOffsets.START_COLOUR_TABLE +
+            (StateBlobOffsets.COLOUR_TABLE_ENTRY_COUNT * StateBlobOffsets.COLOUR_TABLE_MIN_BYTES_PER_ENTRY) +
+            StateBlobOffsets.MAX_END_OFFSET
         assertEquals(100, expected, "sanity: the derivation itself should land on 100")
         assertEquals(expected, StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE)
+    }
+
+    @Test
+    fun `SessionId's mirrored floor has not drifted from StateBlobOffsets' derived floor`() {
+        // SessionId.MIN_PLAUSIBLE_BLOB_SIZE cannot simply reference StateBlobOffsets'
+        // MIN_PLAUSIBLE_BLOB_SIZE (see SessionId's KDoc for the circular-package-dependency reason
+        // why not), so it is a manually-maintained literal mirror of the same value. This test is
+        // what actually catches the two drifting apart: it asserts SessionId's mirror against a
+        // fresh computation over StateBlobOffsets' own named layout constants, so an edit to any of
+        // START_COLOUR_TABLE, COLOUR_TABLE_ENTRY_COUNT, COLOUR_TABLE_MIN_BYTES_PER_ENTRY, or
+        // MAX_END_OFFSET that isn't mirrored into SessionId's literal fails here (issue #12 round-5
+        // review, LOW finding).
+        val expected = StateBlobOffsets.START_COLOUR_TABLE +
+            (StateBlobOffsets.COLOUR_TABLE_ENTRY_COUNT * StateBlobOffsets.COLOUR_TABLE_MIN_BYTES_PER_ENTRY) +
+            StateBlobOffsets.MAX_END_OFFSET
+        assertEquals(
+            expected,
+            SessionId.MIN_PLAUSIBLE_BLOB_SIZE,
+            "SessionId.MIN_PLAUSIBLE_BLOB_SIZE has drifted from StateBlobOffsets' derivation - " +
+                "update SessionId's mirrored literal to match",
+        )
+        assertEquals(
+            StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE,
+            SessionId.MIN_PLAUSIBLE_BLOB_SIZE,
+            "the two constants must always agree - StateBlobPatcher enforces one, PedalState/SessionId enforce the other",
+        )
     }
 
     @Test
