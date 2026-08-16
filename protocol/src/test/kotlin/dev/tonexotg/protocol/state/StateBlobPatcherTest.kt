@@ -671,6 +671,69 @@ class StateBlobPatcherTest {
         assertEquals(512, session.pinnedBlobSize(), "the pin must land on the largest size ever observed")
     }
 
+    // ---- accepted residual risk: widening is gated on size alone, not shape (round-5 review) ----
+    //
+    // pinOrWidenBlobSize (see SessionId's KDoc) widens on ANY plausible-SIZED read, with no check
+    // that the bytes at that size actually look like a real state blob - that shape check
+    // (looksLikeSlotRegion, below) only runs later, at patch time. This is documented as an
+    // accepted residual risk rather than fixed here: closing it would mean PedalState.create()
+    // consulting this package's field-layout knowledge directly, which is exactly the
+    // circular-package-dependency / opacity problem round 4 fixed for a different constant. These
+    // tests characterise the accepted behaviour precisely, so a future change to it is deliberate,
+    // not accidental - and confirm the failure mode is a false reject (fail loud), never a silent
+    // bad write.
+
+    @Test
+    fun `a later corrupt-but-oversized read still widens the pin even though it would fail the shape check - accepted risk, exact repro`() {
+        val session = SessionId.create()
+
+        // A real, correctly-shaped 200-byte read - patches fine.
+        val legitSize = 200
+        val legit = stateFor(session, plausibleBlob(size = legitSize))
+        StateBlobPatcher.patchActiveSlot(legit, session, PresetSlot.B).assertSuccess()
+
+        // A later, larger read that is corrupt in shape, not just size - implausible values at
+        // every offset looksLikeSlotRegion checks. Nothing at PedalState.create()'s call site
+        // evaluates shape, only length, so this still widens the pin.
+        val corruptOversized = ByteArray(PedalState.MAX_STATE_BYTES) { 0xFF.toByte() }
+        PedalState.create(session, corruptOversized).assertSuccess()
+        assertEquals(
+            PedalState.MAX_STATE_BYTES,
+            session.pinnedBlobSize(),
+            "documents the accepted risk: a shape-implausible oversized read still widens the pin",
+        )
+
+        // Every subsequent, genuinely legitimate 200-byte read is now rejected - not silently
+        // patched wrong, but rejected loudly - until reconnect.
+        val nowRejected = stateFor(session, plausibleBlob(size = legitSize, slotB = 11))
+        val result = StateBlobPatcher.patchSlotAssignment(nowRejected, session, PresetSlot.B, PresetIndex(4))
+
+        val error = result.assertFailure()
+        assertTrue(
+            error is TonexError.BlobSizeChangedSinceHandshake,
+            "a legitimate read must be rejected loudly, not silently patched against the wrong pin - got $error",
+        )
+        assertEquals(PedalState.MAX_STATE_BYTES, (error as TonexError.BlobSizeChangedSinceHandshake).pinnedSize)
+        assertEquals(legitSize, error.actualSize)
+    }
+
+    @Test
+    fun `the shape-implausible oversized read that widened the pin is itself never usable to patch`() {
+        // The residual risk is a false reject of later LEGITIMATE reads, never a bad write: the
+        // corrupt read that caused the widening is, itself, still caught by the shape check at
+        // patch time - it never becomes a successful write.
+        val session = SessionId.create()
+        val corruptOversized = ByteArray(PedalState.MAX_STATE_BYTES) { 0xFF.toByte() }
+        val corruptState = stateFor(session, corruptOversized)
+
+        val result = StateBlobPatcher.patchActiveSlot(corruptState, session, PresetSlot.A)
+
+        assertTrue(
+            result.assertFailure() is TonexError.ImplausibleStateBlobShape,
+            "the corrupt read must never itself be usable to author a write, even though it widened the pin",
+        )
+    }
+
     @Test
     fun `a too-short blob is diagnosed as too-short, not as a pin mismatch, even when a pin already exists`() {
         // Reproduces the check-ordering bug: with a valid pin already established by an earlier

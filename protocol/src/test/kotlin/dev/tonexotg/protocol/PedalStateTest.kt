@@ -192,4 +192,53 @@ class PedalStateTest {
 
         assertTrue(state.sessionId === session, "PedalState.sessionId must be reference-identical to the session it was read during")
     }
+
+    // ---- invalidateCurrentRead() - the S9 contract for byte-less observation failures (round-5) -
+    //
+    // PedalState.create()'s unconditional mint only ever runs for an observation that actually
+    // produced bytes; it has no way to cover a timeout, CRC failure, or malformed frame, because
+    // none of those ever call create() at all - there is no ByteArray to pass it. SessionId.
+    // invalidateCurrentRead() is the dedicated verb S9 must call for exactly those byte-less
+    // failures, so a previously-held valid PedalState does not stay fully write-authorized across
+    // a failed re-read (issue #12 round-5 review, MEDIUM finding).
+
+    @Test
+    fun `invalidateCurrentRead advances the session's generation with no new PedalState`() {
+        val session = SessionId.create()
+        val before = session.latestReadGeneration()
+
+        session.invalidateCurrentRead()
+
+        assertNotEquals(before, session.latestReadGeneration(), "invalidateCurrentRead must advance the generation")
+    }
+
+    @Test
+    fun `invalidateCurrentRead invalidates a previously-held PedalState as a write authorization`() {
+        // Simulates the exact scenario the KDoc describes: a valid earlier read, then a byte-less
+        // re-read failure (timeout/CRC/malformed frame - simulated here since S9 does not exist yet
+        // to actually produce one), then a caller wrongly trying to patch with the stale state.
+        val session = SessionId.create()
+        val staleButOtherwiseValid = PedalState.create(session, ByteArray(10)).assertSuccess()
+
+        session.invalidateCurrentRead() // simulates S9's byte-less re-read failure
+
+        assertNotEquals(
+            staleButOtherwiseValid.readGeneration,
+            session.latestReadGeneration(),
+            "a PedalState held across a byte-less observation failure must no longer be the session's current generation",
+        )
+    }
+
+    @Test
+    fun `repeated invalidateCurrentRead calls each advance the generation further`() {
+        val session = SessionId.create()
+
+        session.invalidateCurrentRead()
+        val afterFirst = session.latestReadGeneration()
+        session.invalidateCurrentRead()
+        val afterSecond = session.latestReadGeneration()
+
+        assertNotEquals(afterFirst, afterSecond)
+        assertTrue(afterSecond.value > afterFirst.value)
+    }
 }
