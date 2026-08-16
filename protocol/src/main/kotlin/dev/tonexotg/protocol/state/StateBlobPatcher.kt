@@ -166,15 +166,20 @@ object StateBlobPatcher {
      *    This alone only proves [state] was read *during this connection* — see the next check
      *    for why that is not enough on its own.
      * 2. **Read freshness** — [state] must be [currentSession]'s *current* generation: not
-     *    superseded by a later read, and not already spent on an earlier successful patch (see
-     *    step 7). A session can run for a long time, and the pedal has no host UI — the user can
-     *    change global state directly at the footswitch (FR6) at any point, at which point every
-     *    [PedalState] read before that moment is stale even though its [PedalState.sessionId]
-     *    still matches. Checked as `state.readGeneration != currentSession.latestReadGeneration()`,
-     *    refused with [TonexError.StaleSessionState] on mismatch — see [PedalState]'s freshness
-     *    contract, which is what makes this check meaningful (it depends on S9 minting a new
-     *    generation for every fresh observation of state, explicit or pushed, and on step 7 below
-     *    consuming the generation on every successful write).
+     *    superseded by a later read (or failed observation — see [PedalState.create]'s KDoc), and
+     *    not already spent on an earlier successful patch (see step 7). A session can run for a
+     *    long time, and the pedal has no host UI — the user can change global state directly at
+     *    the footswitch (FR6) at any point, at which point every [PedalState] read before that
+     *    moment is stale even though its [PedalState.sessionId] still matches. Checked as
+     *    `state.readGeneration != currentSession.latestReadGeneration()`, refused with
+     *    [TonexError.StaleSessionState] on mismatch — see [PedalState]'s freshness contract, which
+     *    is what makes this check meaningful (it depends on S9 minting a new generation for every
+     *    fresh observation of state, explicit, pushed, or *failed*, and on step 7 below consuming
+     *    the generation on every successful write). The rejection message distinguishes *why* the
+     *    generation is no longer current — already spent by this caller's own earlier successful
+     *    patch ([SessionId.wasMostRecentlySpentByWrite]) versus superseded by something else — so a
+     *    caller reusing its own just-spent [PedalState] gets an accurate explanation instead of
+     *    generic "superseded" wording (issue #12 round-4 review, LOW finding #1).
      * 3. **Minimum plausible length** — [state] must be at least
      *    [StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE] bytes — a floor derived from the pedal's known
      *    field layout, not merely "long enough to index safely" — or the write is refused with
@@ -183,10 +188,10 @@ object StateBlobPatcher {
      *    (issue #12 round-3 review — the reverse order let the less useful
      *    [TonexError.BlobSizeChangedSinceHandshake] mask this more useful diagnosis, and also let
      *    a too-short *first* read for a session pin the session to an implausible size at all; see
-     *    [SessionId.pinBlobSizeIfAbsent]).
-     * 4. **Length vs. pinned size** — [state]'s length must match the length pinned at
-     *    [currentSession]'s first *plausible-sized* read (see [SessionId.pinBlobSizeIfAbsent] and
-     *    [TonexError.BlobSizeChangedSinceHandshake]'s KDoc for why that is not literally "the
+     *    [SessionId.pinOrWidenBlobSize]).
+     * 4. **Length vs. pinned size** — [state]'s length must match the length pinned (or widened) at
+     *    [currentSession]'s largest plausible-sized read so far (see [SessionId.pinOrWidenBlobSize]
+     *    and [TonexError.BlobSizeChangedSinceHandshake]'s KDoc for why that is not literally "the
      *    handshake blob" despite the error's name), or the write is refused with
      *    [TonexError.BlobSizeChangedSinceHandshake]. A layout shift almost always changes the
      *    blob's overall length, so this is the primary shape-drift signal.
@@ -235,14 +240,31 @@ object StateBlobPatcher {
         }
 
         if (state.readGeneration != currentSession.latestReadGeneration()) {
-            return TonexResult.Failure(
-                TonexError.StaleSessionState(
-                    details = "state blob is not this session's most recently observed read - it may have been " +
-                        "superseded by a later read or by the pedal pushing an update (e.g. an " +
-                        "external/footswitch change); re-read state immediately before patching",
-                    sameSession = true,
-                ),
-            )
+            // Distinguish *why* this generation is no longer current: it may have been spent by
+            // this caller's own earlier successful patch, or superseded by something else (a
+            // newer read, or a failed observation attempt - see PedalState.create's KDoc). Those
+            // are different situations with different accurate explanations, and conflating them
+            // under one generic message left the dedicated "already used for a write" wording
+            // effectively unreachable in the common sequential-reuse case (issue #12 round-4
+            // review, LOW finding #1) - see SessionId.wasMostRecentlySpentByWrite's KDoc.
+            return if (currentSession.wasMostRecentlySpentByWrite(state.readGeneration)) {
+                TonexResult.Failure(
+                    TonexError.StaleSessionState(
+                        details = "state blob has already been used to authorize a write - a PedalState is " +
+                            "single-use for a write; re-read state and retry",
+                        sameSession = true,
+                    ),
+                )
+            } else {
+                TonexResult.Failure(
+                    TonexError.StaleSessionState(
+                        details = "state blob is not this session's most recently observed read - it may have " +
+                            "been superseded by a later read or by the pedal pushing an update (e.g. an " +
+                            "external/footswitch change); re-read state immediately before patching",
+                        sameSession = true,
+                    ),
+                )
+            }
         }
 
         val bytes = state.copyOfBytes()

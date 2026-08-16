@@ -1,6 +1,5 @@
 package dev.tonexotg.protocol
 
-import dev.tonexotg.protocol.state.StateBlobOffsets
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -76,47 +75,120 @@ class SessionId private constructor() {
      * check, even though nothing about the blob's *contents* changed between the two calls. Closes
      * the blocker where calling a patch function twice against the same read (no re-read in
      * between) let the second call silently revert the first (issue #12 round-3 review).
+     *
+     * On success, also records [generation] as [lastSpentGeneration] — see that property for why.
      */
-    internal fun consumeReadGeneration(generation: ReadGeneration): Boolean =
-        generationCounter.compareAndSet(generation.value, generation.value + 1)
+    internal fun consumeReadGeneration(generation: ReadGeneration): Boolean {
+        val advanced = generationCounter.compareAndSet(generation.value, generation.value + 1)
+        if (advanced) {
+            lastSpentGenerationRef.set(generation.value)
+        }
+        return advanced
+    }
+
+    private val lastSpentGenerationRef = AtomicLong(NEVER_SPENT)
+
+    /**
+     * `true` iff [generation] is the *most recently* consumed-by-a-successful-write generation for
+     * this session — i.e. [consumeReadGeneration] most recently succeeded with exactly this value.
+     *
+     * Exists so [dev.tonexotg.protocol.state.StateBlobPatcher]'s stale-generation rejection can
+     * report an accurate reason: without this, "the blob is no longer this session's current read"
+     * is reported identically whether the blob was superseded by a newer read/failed observation,
+     * or was itself already spent on a successful patch — a dedicated "already used for a write"
+     * message existed but was unreachable in practice, because the ordinary freshness check (same
+     * numeric outcome either way: the counter has simply moved past [generation]) always caught
+     * reuse first with the generic wording (issue #12 round-4 review, LOW finding #1).
+     *
+     * ## Honest scope
+     * This tracks only the single *most recently* spent generation, not the full history of every
+     * generation ever spent. If a session spends generation 1, then reads and spends generation 2,
+     * a later attempt to reuse generation 1 reports as "superseded" rather than "already spent" —
+     * which is a defensible simplification, not a wrong answer: by the time that reuse is
+     * attempted, generation 2 genuinely *is* a later read that supersedes generation 1, regardless
+     * of whether generation 1 was also independently spent. The case this exists to fix — an
+     * immediate second patch attempt reusing the read that was *just* spent, with nothing else
+     * having happened in between — is exactly the case this correctly distinguishes.
+     */
+    internal fun wasMostRecentlySpentByWrite(generation: ReadGeneration): Boolean =
+        lastSpentGenerationRef.get() == generation.value
 
     private val pinnedBlobSizeRef = AtomicInteger(UNPINNED)
 
     /**
-     * Pins this session's expected state-blob length to [size], if it has not already been
-     * pinned for this session. A no-op on every call after the first (regardless of [size]).
+     * Pins (or widens) this session's expected state-blob length to [size].
      *
-     * [PedalState.create] only calls this for a [size] that is at least
-     * `StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE` — a truncated or corrupt first read (e.g. a
-     * malformed frame reassembled down to a handful of bytes) must not permanently pin the
-     * session to an implausible size and thereby reject every subsequent *legitimate* read for
-     * the rest of the connection's life, recoverable only by a reconnect (issue #12 round-3
-     * review). In practice this means the pin is established by this session's first
-     * *plausible-looking* [PedalState], which is not necessarily its first [PedalState] at all.
+     * The pin tracks the **largest** plausible size observed so far, not merely the first:
+     * - If nothing is pinned yet, [size] becomes the pin.
+     * - If [size] is larger than the current pin, the pin widens to [size]. Growth is treated as
+     *   evidence that a *smaller* previous pin was itself established by a corrupt or truncated
+     *   read, not evidence that the pedal's real blob shrank and then grew back — the pedal's
+     *   actual state-blob length does not change during a connection, so the largest plausible
+     *   size ever observed is the best available estimate of the true length.
+     * - If [size] is smaller than or equal to the current pin, this is a no-op: a **shrink** is
+     *   the layout-drift signal [TonexError.BlobSizeChangedSinceHandshake] exists to catch, so it
+     *   must not silently move the pin down — [dev.tonexotg.protocol.state.StateBlobPatcher]
+     *   compares against the (unmoved) pin and rejects the shrink.
      *
-     * That first pinned read is also **not** literally "the handshake blob": a `SessionId` is
-     * minted only once [ConnectionState.Ready] is reached (see this class's KDoc), and `Ready` is
-     * reached only *after* the handshake's `GetState` blob has already been read — so no
-     * [PedalState], and therefore no pin, can ever be anchored to that specific read; the true
-     * first-pinned blob is necessarily some plausible-sized read observed strictly after
-     * [ConnectionState.Ready]. See [TonexError.BlobSizeChangedSinceHandshake]'s KDoc, which
-     * states this precisely rather than claiming to be about "the blob seen when this session
-     * connected."
+     * Fixes a narrower bug in the previous "pin on first plausible read only" version: pinning is
+     * one-way only in the "resistant to shrink" sense now, but it is no longer a one-way *lock* to
+     * whatever value happened to be pinned first — a corrupt-but-plausible-sized read (e.g. a
+     * partial reassembly landing anywhere in `[MIN_PLAUSIBLE_BLOB_SIZE, MAX_STATE_BYTES)`, not
+     * just below the floor) used to pin permanently and then reject-forever every subsequent
+     * *legitimate*, larger read for the rest of the connection's life, recoverable only by a
+     * reconnect (issue #12 round-4 review, HIGH finding). [PedalState.create] only calls this for
+     * a [size] that is at least [MIN_PLAUSIBLE_BLOB_SIZE] at all — see that constant.
+     *
+     * The pin is also **not** literally "the handshake blob's size": a `SessionId` is minted only
+     * once [ConnectionState.Ready] is reached (see this class's KDoc), and `Ready` is reached only
+     * *after* the handshake's `GetState` blob has already been read — so no [PedalState], and
+     * therefore no pin, can ever be anchored to that specific read; the true first-pinned blob is
+     * necessarily some plausible-sized read observed strictly after [ConnectionState.Ready]. See
+     * [TonexError.BlobSizeChangedSinceHandshake]'s KDoc, which states this precisely rather than
+     * claiming to be about "the blob seen when this session connected."
      */
-    internal fun pinBlobSizeIfAbsent(size: Int) {
-        pinnedBlobSizeRef.compareAndSet(UNPINNED, size)
+    internal fun pinOrWidenBlobSize(size: Int) {
+        while (true) {
+            val current = pinnedBlobSizeRef.get()
+            if (current != UNPINNED && size <= current) return
+            if (pinnedBlobSizeRef.compareAndSet(current, size)) return
+        }
     }
 
     /**
-     * The blob length pinned by [pinBlobSizeIfAbsent], or `null` if no *plausible-sized*
-     * [PedalState] has been built for this session yet (a too-short first read does not pin —
-     * see [pinBlobSizeIfAbsent]).
+     * The blob length pinned (or widened) by [pinOrWidenBlobSize], or `null` if no
+     * *plausible-sized* [PedalState] has been built for this session yet (a too-short first read
+     * does not pin — see [pinOrWidenBlobSize]).
      */
     internal fun pinnedBlobSize(): Int? = pinnedBlobSizeRef.get().takeIf { it != UNPINNED }
 
     companion object {
         /** Sentinel meaning "no size pinned yet" — a real blob length is never negative. */
         private const val UNPINNED: Int = -1
+
+        /**
+         * Sentinel meaning "no generation has been spent by a successful write yet" —
+         * [ReadGeneration] values start at `1` ([mintReadGeneration] is `incrementAndGet()` from
+         * `0`), so `0` never collides with a real generation.
+         */
+        private const val NEVER_SPENT: Long = 0L
+
+        /**
+         * The smallest a *real* pedal state blob can plausibly be — see
+         * [dev.tonexotg.protocol.state.StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE]'s KDoc for the
+         * full field-layout derivation (colour-table size, indexed tail, etc.); that object
+         * defines its own constant in terms of this one, not the other way around.
+         *
+         * Owned here — by [SessionId], the type that actually enforces it via
+         * [pinOrWidenBlobSize] — rather than in `dev.tonexotg.protocol.state.StateBlobOffsets`,
+         * purely to avoid a circular package dependency: [PedalState.create] needs this floor, and
+         * `dev.tonexotg.protocol.state` already imports from `dev.tonexotg.protocol` (e.g.
+         * [PedalState] itself), so importing the other way around here would both create the cycle
+         * and mean [PedalState] — which documents itself elsewhere as deliberately opaque to the
+         * patching layer's field-layout knowledge — ends up consulting a patcher-layer constant
+         * directly (issue #12 round-4 review, LOW finding #2).
+         */
+        internal const val MIN_PLAUSIBLE_BLOB_SIZE: Int = 100
 
         /**
          * The only way to obtain a [SessionId]. Intended caller: the connection state machine
@@ -274,9 +346,19 @@ class PedalState private constructor(
          * does not guarantee here — the hard guarantee is [PedalState]'s constructor being
          * genuinely `private`, not this factory's name being merely inconvenient to spell.
          *
-         * Mints a fresh [ReadGeneration] for [sessionId] on every call — see the freshness
-         * contract in this class's KDoc, which S9 (issue #13) MUST honour for every fresh
-         * observation of pedal state, not only explicit reads.
+         * Mints a fresh [ReadGeneration] for [sessionId] on **every call, success or failure** —
+         * see the freshness contract in this class's KDoc, which S9 (issue #13) MUST honour for
+         * every fresh observation of pedal state, not only explicit reads. The failure case
+         * matters just as much as success: if this call fails (e.g. S9's mandatory pre-patch
+         * re-read hits a timeout, a CRC failure, a malformed frame, or an oversized frame) but the
+         * caller goes on to patch anyway using a [PedalState] it obtained from an earlier,
+         * successful call, that earlier state must not still be fully write-authorized — otherwise
+         * a *failed* observation reopens the exact stale-whole-device-echo bug this story exists to
+         * prevent, just via a failed re-read instead of a stale one (issue #12 round-4 review,
+         * MEDIUM finding). Minting unconditionally, before the size check below can return early,
+         * is what closes that: [SessionId.latestReadGeneration] moves forward on this call
+         * regardless of its outcome, so any [PedalState] the caller was previously holding for
+         * [sessionId] now fails [dev.tonexotg.protocol.state.StateBlobPatcher]'s freshness check.
          *
          * @return [TonexResult.Success] with the new [PedalState], or
          *   [TonexResult.Failure]([TonexError.OversizedStateBlob]) if [bytes] is longer than
@@ -284,19 +366,20 @@ class PedalState private constructor(
          *   returns a [TonexResult], see [TonexError]'s top-level KDoc).
          */
         internal fun create(sessionId: SessionId, bytes: ByteArray): TonexResult<PedalState> {
+            // Minted unconditionally, before the oversized check can return early - see the KDoc
+            // paragraph above for why a failed attempt must advance the generation too.
+            val generation = sessionId.mintReadGeneration()
+
             if (bytes.size > MAX_STATE_BYTES) {
                 return TonexResult.Failure(
                     TonexError.OversizedStateBlob(maxSize = MAX_STATE_BYTES, actualSize = bytes.size),
                 )
             }
-            val generation = sessionId.mintReadGeneration()
-            // Only a plausible-sized read pins the session's expected blob length - a truncated
-            // or corrupt first read (e.g. a malformed frame reassembled down to a handful of
-            // bytes) must not permanently pin the session to an implausible size and brick every
-            // subsequent legitimate read for the rest of the connection's life (issue #12
-            // round-3 review). See pinBlobSizeIfAbsent's KDoc.
-            if (bytes.size >= StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE) {
-                sessionId.pinBlobSizeIfAbsent(bytes.size)
+            // Only a plausible-sized read pins (or widens) the session's expected blob length -
+            // see pinOrWidenBlobSize's KDoc for both why a too-short read must not pin at all, and
+            // why a larger later read widens the pin rather than being rejected against it.
+            if (bytes.size >= SessionId.MIN_PLAUSIBLE_BLOB_SIZE) {
+                sessionId.pinOrWidenBlobSize(bytes.size)
             }
             return TonexResult.Success(PedalState(sessionId, generation, bytes))
         }

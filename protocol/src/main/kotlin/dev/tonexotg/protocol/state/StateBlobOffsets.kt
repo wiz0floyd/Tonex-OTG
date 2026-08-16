@@ -12,6 +12,7 @@ package dev.tonexotg.protocol.state
 
 import dev.tonexotg.protocol.PedalState
 import dev.tonexotg.protocol.PresetSlot
+import dev.tonexotg.protocol.SessionId
 
 /**
  * The firmware-pinned byte offsets within a [PedalState] blob that [StateBlobPatcher] is allowed
@@ -114,9 +115,17 @@ internal object StateBlobOffsets {
      * rejected with [dev.tonexotg.protocol.TonexError.BlobTooShortToPatch] before any indexing is
      * attempted, regardless of whether every individual offset would technically still be
      * in-bounds.
+     *
+     * Defined here in prose/derivation, but the actual `const val` value lives on
+     * [SessionId.MIN_PLAUSIBLE_BLOB_SIZE] and is simply referenced from there — not computed
+     * independently here — to avoid a circular package dependency: [SessionId]/[PedalState] (in
+     * `dev.tonexotg.protocol`) need this floor too ([SessionId.pinOrWidenBlobSize],
+     * [PedalState.create]), and this package already imports from `dev.tonexotg.protocol` (see the
+     * imports above), so importing the other way around would create a cycle (issue #12 round-4
+     * review, LOW finding #2). `StateBlobOffsetsTest` pins this value's derivation (22 + 20×3 + 18
+     * = 100) against the literal on [SessionId], so the two cannot silently drift apart.
      */
-    const val MIN_PLAUSIBLE_BLOB_SIZE: Int =
-        START_COLOUR_TABLE + (COLOUR_TABLE_ENTRY_COUNT * COLOUR_TABLE_MIN_BYTES_PER_ENTRY) + MAX_END_OFFSET
+    const val MIN_PLAUSIBLE_BLOB_SIZE: Int = SessionId.MIN_PLAUSIBLE_BLOB_SIZE
 
     /**
      * The end-relative offset of [slot]'s assigned-preset byte.
