@@ -459,10 +459,24 @@ class DefaultTonexController(
      * this function — a direct call would have that coroutine try to join itself, which never
      * completes. Launching a fresh coroutine for the teardown lets this function's own coroutine
      * body finish (completing `readerJob` naturally) before anything joins it.
+     *
+     * Captures [readerJob]'s identity *now*, before the launch — [PR #43's Opus review, finding
+     * 4](https://github.com/wiz0floyd/Tonex-OTG/pull/43#pullrequestreview-4955032352): the launched
+     * teardown is only dispatched later, and a fresh [connect] can in principle run to completion
+     * (resetting [teardownDone] and installing a new [readerJob]/transport) before this queued
+     * teardown is picked up. Without the identity check, that stale teardown would still win
+     * [teardown]'s CAS and tear down the *new* connection out from under it. Not a full generation
+     * counter (that would be the "elaborate automatic-recovery safety net" this project's house
+     * philosophy warns against) — just enough to no-op cleanly instead of corrupting a fresh
+     * connection when the two race.
      */
     private fun onTransportEnded(cause: Throwable?) {
         inbound.tryEmit(Inbound.TransportEnded(cause))
-        scope.launch { teardown(ConnectionState.Idle) }
+        val endedReaderJob = readerJob
+        scope.launch {
+            if (readerJob !== endedReaderJob) return@launch // superseded by a fresh connect(); not ours to tear down
+            teardown(ConnectionState.Idle)
+        }
     }
 
     // ---- connect() (§7) -----------------------------------------------------------------------
