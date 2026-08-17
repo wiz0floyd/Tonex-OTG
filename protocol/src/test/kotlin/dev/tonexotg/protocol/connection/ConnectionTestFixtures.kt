@@ -1,5 +1,6 @@
 package dev.tonexotg.protocol.connection
 
+import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.codec.MessageHeader
 import dev.tonexotg.protocol.codec.MessageHeaderCodec
@@ -8,6 +9,7 @@ import dev.tonexotg.protocol.message.PresetNameExtractor
 import dev.tonexotg.protocol.message.SetStateMessage
 import dev.tonexotg.protocol.message.SingleParameterPayloadCodec
 import dev.tonexotg.protocol.state.StateBlobOffsets
+import kotlinx.coroutines.test.TestScope
 
 /**
  * Message fixture builders shared by [DefaultTonexController]'s test suite — build the exact
@@ -107,4 +109,30 @@ fun plausibleBlob(
     bytes[size - StateBlobOffsets.END_SLOT_C_PRESET] = c.toByte()
     bytes[size - StateBlobOffsets.END_CURRENT_SLOT] = activeSlot.ordinal.toByte()
     return bytes
+}
+
+/**
+ * Drives [fake] through a full, successful handshake (Hello, GetState, all 20 preset-detail
+ * responses) up to and including [ConnectionState.Ready] — the shared setup every post-`Ready`
+ * test needs. Uses `testScheduler.runCurrent()` (never `advanceUntilIdle()`, which would
+ * fast-forward straight past an in-flight timeout) between each response so the reader and
+ * `connect()` coroutines are genuinely subscribed and waiting before the next response arrives,
+ * matching how a real pedal only ever responds after receiving a request.
+ */
+suspend fun TestScope.driveToReady(
+    fake: FakeTonexTransport,
+    activeSlot: PresetSlot = PresetSlot.A,
+    a: Int = 0,
+    b: Int = 1,
+    c: Int = 2,
+) {
+    testScheduler.runCurrent()
+    fake.emitMessage(helloResponse())
+    testScheduler.runCurrent()
+    fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = activeSlot, a = a, b = b, c = c)))
+    for (i in PresetIndex.VALID_RANGE) {
+        testScheduler.runCurrent()
+        fake.emitMessage(presetDetailsSummary("Preset $i"))
+    }
+    testScheduler.runCurrent()
 }
