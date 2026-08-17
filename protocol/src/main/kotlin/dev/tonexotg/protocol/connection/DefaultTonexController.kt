@@ -6,6 +6,7 @@ import dev.tonexotg.protocol.ParameterScope
 import dev.tonexotg.protocol.PedalState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSnapshot
 import dev.tonexotg.protocol.SessionId
 import dev.tonexotg.protocol.SnapshotStore
 import dev.tonexotg.protocol.TonexController
@@ -22,6 +23,7 @@ import dev.tonexotg.protocol.message.MasterVolumeMessage
 import dev.tonexotg.protocol.message.ParameterWriteMessage
 import dev.tonexotg.protocol.message.PresetDetailsKind
 import dev.tonexotg.protocol.message.PresetNameExtractor
+import dev.tonexotg.protocol.message.PresetParameterExtractor
 import dev.tonexotg.protocol.message.RequestMasterVolumeMessage
 import dev.tonexotg.protocol.message.RequestPresetDetailsMessage
 import dev.tonexotg.protocol.message.RequestStateMessage
@@ -236,6 +238,27 @@ class DefaultTonexController(
      * when the active preset changed for a reason other than this controller's own [selectPreset]
      * call. An implausible push is dropped: the generation was already minted by [PedalState.create],
      * so nothing stale stays authorized even though this function does nothing further with it.
+     *
+     * ## S9b: re-snapshot on every active-preset change
+     *
+     * Whenever the active preset changes — self-initiated *or* external alike, per issue #14
+     * ("re-snapshot whenever the active preset changes, including changes made externally") — the
+     * outgoing preset's [parameterValues] entries are dropped synchronously (before anything can
+     * observe them against the new active preset), and a fresh capture is launched. This sits
+     * **outside** the self/external `if`/`else` above, deliberately: a self-initiated change
+     * equally invalidates the previous preset's snapshot.
+     *
+     * The capture is [scope].[launch]ed, never called inline: this function runs on the reader
+     * coroutine, and [captureSnapshotLocked] suspends on a round trip through that same reader —
+     * calling it inline would have the reader wait on itself, a guaranteed hang (and this function
+     * is not even a `suspend fun`, so it would not compile that way). The launched coroutine may
+     * then block on [operationMutex] while e.g. [selectPreset] still holds it — that is fine, the
+     * *reader* never blocks, it has already returned from this function.
+     *
+     * `session !== s` mirrors [onTransportEnded]'s `endedReaderJob` guard (PR #43 finding 4):
+     * without it, a queued capture dispatched after a teardown/reconnect could run against a fresh
+     * connection. [captureSnapshotLocked]'s own liveness/session checks are a second line of
+     * defence; keep both.
      */
     private fun applyStateUpdate(state: PedalState) {
         val read = StateBlobReader.activePreset(state)
@@ -248,6 +271,13 @@ class DefaultTonexController(
                 selfInitiatedPreset = null
             } else {
                 _events.tryEmit(TonexEvent.ExternalPresetChange(idx))
+            }
+            // ---- S9b: the previous preset's snapshot is not valid for this one -------------------
+            dropPresetScopedValues()
+            val s = session
+            scope.launch {
+                if (session !== s) return@launch // superseded by a teardown/reconnect
+                operationMutex.withLock { captureSnapshotLocked(idx) }
             }
         }
     }
@@ -538,6 +568,7 @@ class DefaultTonexController(
         // ---- Post-Ready harvest -----------------------------------------------------------------
         harvestPresetNames().orFinish { return@withLock it } // fatal — see harvestPresetNames' KDoc
         harvestMasterVolume() // best-effort, result ignored
+        captureSnapshotLocked(initialActive) // best-effort, result ignored — see D3 / §E.5 of the S9b plan
         TonexResult.Success(Unit)
     }
 
@@ -554,6 +585,11 @@ class DefaultTonexController(
      * can only be represented by inventing a placeholder (exactly the guessing "fail fast and
      * loud" forbids) or a short list (which every UI screen would have to special-case). This
      * preserves the invariant `connect() returned Success ⟺ Ready ⟺ presets has exactly 20 entries`.
+     *
+     * The awaiter matches `!full` specifically (S9b §E.6): a FULL (`0x0303`) preset-details
+     * response is never requested by this module (see [PresetParameterExtractor]'s KDoc for why)
+     * and would otherwise be a latent cross-match now that [captureSnapshotLocked] issues a second,
+     * distinct preset-details read elsewhere in this class.
      */
     private suspend fun harvestPresetNames(): TonexResult<Unit> {
         val out = ArrayList<PresetInfo>(PresetIndex.VALID_RANGE.count())
@@ -565,9 +601,10 @@ class DefaultTonexController(
                 "preset-details",
             ) { inb ->
                 commonInbound("preset-details", inb) ?: when {
-                    inb is Inbound.Message && inb.message is TonexMessage.PresetDetails ->
+                    inb is Inbound.Message && inb.message is TonexMessage.PresetDetails &&
+                        !(inb.message as TonexMessage.PresetDetails).full ->
                         TonexResult.Success((inb.message as TonexMessage.PresetDetails).payload)
-                    else -> null // StateUpdate / Other / ParameterChanged interleaved: ignore, keep waiting
+                    else -> null // StateUpdate / Other / ParameterChanged / a FULL response interleaved: ignore, keep waiting
                 }
             }.orReturn { return it }
             val name = PresetNameExtractor.extract(payload).orReturn { return it }
@@ -598,6 +635,111 @@ class DefaultTonexController(
                 else -> null
             }
         } // result deliberately discarded
+    }
+
+    // ---- snapshot capture (S9b / §E) -----------------------------------------------------------
+
+    /**
+     * Captures a [PresetSnapshot] of preset [index]'s 109 parameter values and records it in
+     * [snapshotStore] — the write-safety net's read half (issue #14). Requests
+     * [PresetDetailsKind.SUMMARY] (byte-identical to [harvestPresetNames]' own request), **not**
+     * `FULL` — see [PresetParameterExtractor]'s KDoc for why `FULL` is never the right request
+     * here.
+     *
+     * ## Caller contract
+     * The caller MUST already hold [operationMutex]. `Mutex` is not reentrant, so this function
+     * must never take it itself — [connect] calls it while already holding the lock, and the
+     * launched path in [applyStateUpdate] acquires the lock *around* the call.
+     *
+     * ## Failure semantics — best-effort, never fatal, never partial
+     * A failed capture records **nothing** in [snapshotStore] — every failure path below returns
+     * before [SnapshotStore.record] is ever reached, and [PresetParameterExtractor] structurally
+     * cannot return a partially-populated array. The user-visible consequence is that
+     * [revertActivePreset] returns [TonexError.NoSnapshotAvailable] — not a gap, that error's own
+     * KDoc anticipates exactly this case. Both callers of this function (`connect` and
+     * `applyStateUpdate`) therefore discard the result; do not make a capture failure fatal to
+     * [connect] (a pedal that answers the name harvest but not the parameter read still gives a
+     * fully usable app minus the revert affordance), and do not add a retry loop here (reject-and-
+     * explain beats patch-and-hope).
+     */
+    private suspend fun captureSnapshotLocked(index: PresetIndex): TonexResult<Unit> {
+        // 1. Re-check liveness. Load-bearing for the launched path in applyStateUpdate, which can
+        //    be dispatched after a racing disconnect()/detach.
+        if (_connectionState.value !is ConnectionState.Ready) {
+            return TonexResult.Failure(
+                TonexError.ProtocolStateViolation(_connectionState.value, "snapshot capture requires Ready"),
+            )
+        }
+        // 2. Pin the session identity — mirrors selectPreset's existing guard verbatim.
+        val s = session ?: return TonexResult.Failure(
+            TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+        )
+
+        // 3. Request and await, mirroring harvestPresetNames' awaiter shape (including the `!full`
+        //    tightening, §E.6) exactly.
+        val payload = requestAndAwait(
+            RequestPresetDetailsMessage.encode(index, PresetDetailsKind.SUMMARY),
+            timeouts.presetParametersMillis,
+            "preset-parameters",
+        ) { inb ->
+            commonInbound("preset-parameters", inb) ?: when {
+                inb is Inbound.Message && inb.message is TonexMessage.PresetDetails &&
+                    !(inb.message as TonexMessage.PresetDetails).full ->
+                    TonexResult.Success((inb.message as TonexMessage.PresetDetails).payload)
+                else -> null // StateUpdate / ParameterChanged / a FULL response interleaved: ignore, keep waiting
+            }
+        }.orReturn { return it }
+
+        // 4. Extract the 109-float block.
+        val values = PresetParameterExtractor.extract(payload).orReturn { return it }
+
+        // 5. Re-check that the capture is still about the currently active preset. The reader
+        //    coroutine can change _activePreset at any moment (a footswitch press); whether a
+        //    SUMMARY response for a NON-active preset even contains a parameter block — and if so,
+        //    whose values it holds — is unverified and unverifiable without hardware (upstream
+        //    only ever parses this block out of a response for the currently active preset). Discard
+        //    rather than guess: a stale snapshot from a different preset is worse than none
+        //    (SnapshotStore.record's own KDoc). Filed for hardware on #25.
+        if (session !== s || _activePreset.value != index) {
+            return TonexResult.Failure(
+                TonexError.ProtocolStateViolation(
+                    _connectionState.value,
+                    "the active preset changed while preset ${index.value}'s snapshot was being " +
+                        "captured; discarding the capture rather than recording a possibly-wrong snapshot",
+                ),
+            )
+        }
+
+        // 6. Publish, then record — in that order. PresetSnapshot's constructor copies `values`, so
+        //    handing it the same array applyCapturedValues just read from is safe; applyCapturedValues
+        //    itself builds a Map<ParameterId, Float> of boxed floats and does not retain the array.
+        applyCapturedValues(values)
+        snapshotStore.record(PresetSnapshot(index, s, values))
+        return TonexResult.Success(Unit)
+    }
+
+    /**
+     * Publishes a freshly captured preset's 109 values, replacing any prior PRESET-scoped entries
+     * and preserving GLOBAL-scoped ones (master volume is not part of any preset). Implements the
+     * "preset load/change" half of [parameterValues]' documented contract — before S9b only
+     * master volume and post-[setParameter] values ever landed there.
+     */
+    private fun applyCapturedValues(values: FloatArray) {
+        val captured = ParameterId.PRESET_RANGE.associate { ParameterId(it) to values[it] }
+        _parameterValues.update { previous ->
+            previous.filterKeys { it.index in ParameterId.GLOBAL_RANGE } + captured
+        }
+    }
+
+    /**
+     * Drops every PRESET-scoped entry from [parameterValues], keeping GLOBAL ones. Called
+     * synchronously the moment the active preset changes ([applyStateUpdate]): the outgoing
+     * preset's values are not the incoming preset's values, and [parameterValues]' contract is
+     * that absence means "not yet known", never "zero" — so if the subsequent capture then fails,
+     * the map is left with no preset entries rather than a stale or wrong ones.
+     */
+    private fun dropPresetScopedValues() {
+        _parameterValues.update { it.filterKeys { id -> id.index in ParameterId.GLOBAL_RANGE } }
     }
 
     // ---- disconnect() (§6.10) ------------------------------------------------------------------

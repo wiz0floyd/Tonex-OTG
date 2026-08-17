@@ -226,17 +226,5 @@ class DefaultTonexControllerDisconnectTest {
         assertEquals(ConnectionState.Idle, controller.connectionState.value)
     }
 
-    // ---- shared driver ------------------------------------------------------------------------
-
-    private suspend fun kotlinx.coroutines.test.TestScope.driveToReady(fake: FakeTonexTransport) {
-        testScheduler.runCurrent()
-        fake.emitMessage(helloResponse())
-        testScheduler.runCurrent()
-        fake.emitMessage(stateUpdateMessage(plausibleBlob()))
-        for (i in PresetIndex.VALID_RANGE) {
-            testScheduler.runCurrent()
-            fake.emitMessage(presetDetailsSummary("Preset $i"))
-        }
-        testScheduler.runCurrent()
-    }
+    // ---- shared driver: driveToReady (ConnectionTestFixtures.kt) now covers this file's needs --
 }

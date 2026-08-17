@@ -205,7 +205,10 @@ class DefaultTonexControllerSetParameterTest {
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
         )
         connectToReady(controller, fake)
-        assertTrue(!controller.parameterValues.value.containsKey(presetParam.id))
+        // S9b: connect()'s capture pre-populates every PRESET-scoped entry (the snapshotValues()
+        // fixture's value for this index), not absence -- see ConnectionTestFixtures.snapshotValues.
+        val capturedValue = snapshotValues()[presetParam.id.index]
+        assertEquals(capturedValue, controller.parameterValues.value[presetParam.id])
 
         controller.setParameter(presetParam.id, -25f)
 
@@ -220,12 +223,14 @@ class DefaultTonexControllerSetParameterTest {
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
         )
         connectToReady(controller, fake)
+        val capturedValue = snapshotValues()[presetParam.id.index]
         fake.writeThrows = java.io.IOException("wedged")
 
         val result = controller.setParameter(presetParam.id, -25f)
 
         assertIs<TonexResult.Failure>(result)
-        assertTrue(!controller.parameterValues.value.containsKey(presetParam.id))
+        // S9b: unchanged means still holding the value connect()'s capture populated, not absent.
+        assertEquals(capturedValue, controller.parameterValues.value[presetParam.id])
     }
 
     // ---- revertActivePreset: both non-snapshot failure modes, no throw, no write --------------

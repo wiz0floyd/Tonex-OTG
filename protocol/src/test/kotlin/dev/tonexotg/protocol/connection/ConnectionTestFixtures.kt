@@ -1,14 +1,21 @@
 package dev.tonexotg.protocol.connection
 
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetSlot
+import dev.tonexotg.protocol.PresetSnapshot
 import dev.tonexotg.protocol.codec.MessageHeader
 import dev.tonexotg.protocol.codec.MessageHeaderCodec
 import dev.tonexotg.protocol.codec.MessageType
+import dev.tonexotg.protocol.message.MasterVolumeMessage
 import dev.tonexotg.protocol.message.PresetNameExtractor
+import dev.tonexotg.protocol.message.PresetParameterExtractor
 import dev.tonexotg.protocol.message.SetStateMessage
 import dev.tonexotg.protocol.message.SingleParameterPayloadCodec
+import dev.tonexotg.protocol.params.ParameterRegistry
 import dev.tonexotg.protocol.state.StateBlobOffsets
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlinx.coroutines.test.TestScope
 
 /**
@@ -44,6 +51,48 @@ fun presetDetailsSummary(name: String): ByteArray {
         unknownB = 3L,
     )
     return MessageHeaderCodec.encode(header, payload)
+}
+
+/** The parameter block: `BA 03 BA 6D` followed by 109 x (0x88 + LE float32) — see [PresetParameterExtractor]. */
+fun presetParameterBlock(values: FloatArray): ByteArray {
+    require(values.size == PresetSnapshot.PARAMETER_COUNT)
+    var bytes = PresetParameterExtractor.marker()
+    for (v in values) {
+        val buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(v)
+        bytes += byteArrayOf(0x88.toByte()) + buf.array()
+    }
+    return bytes
+}
+
+/**
+ * A [MessageType.PresetDetailsSummary] response carrying BOTH the name field and the parameter
+ * block — the real response shape (S9b plan §0): name marker + 32-byte field, then the parameter
+ * block.
+ */
+fun presetDetailsSummaryWithParameters(name: String, values: FloatArray): ByteArray {
+    val nameField = ByteArray(PresetNameExtractor.NAME_FIELD_LENGTH)
+    val nameBytes = name.toByteArray(Charsets.UTF_8)
+    nameBytes.copyInto(nameField, 0, 0, minOf(nameBytes.size, nameField.size))
+    val payload = PresetNameExtractor.marker() + nameField + presetParameterBlock(values)
+    val header = MessageHeader(
+        type = MessageType.PresetDetailsSummary,
+        declaredSize = payload.size.toLong(),
+        unknownA = 11L,
+        unknownB = 3L,
+    )
+    return MessageHeaderCodec.encode(header, payload)
+}
+
+/**
+ * 109 distinct, in-range values, one per [ParameterId.PRESET_RANGE] index: for each index `i`,
+ * `spec.min + (spec.max - spec.min) * (i % 9) / 9f`. Distinct per index (mod 9, not a constant
+ * fraction) so a cross-index copy or off-by-one in capture/replay shows up as a mismatch rather
+ * than hiding behind coincidentally-equal values — the same reasoning as [plausibleBlob]'s
+ * non-zero filler.
+ */
+fun snapshotValues(): FloatArray = FloatArray(PresetSnapshot.PARAMETER_COUNT) { i ->
+    val spec = requireNotNull(ParameterRegistry.byIndex(i)) { "no registry entry for preset index $i" }
+    spec.min + (spec.max - spec.min) * (i % 9) / 9f
 }
 
 /**
@@ -113,11 +162,26 @@ fun plausibleBlob(
 
 /**
  * Drives [fake] through a full, successful handshake (Hello, GetState, all 20 preset-detail
- * responses) up to and including [ConnectionState.Ready] — the shared setup every post-`Ready`
- * test needs. Uses `testScheduler.runCurrent()` (never `advanceUntilIdle()`, which would
- * fast-forward straight past an in-flight timeout) between each response so the reader and
- * `connect()` coroutines are genuinely subscribed and waiting before the next response arrives,
- * matching how a real pedal only ever responds after receiving a request.
+ * responses, the master-volume harvest, and the S9b snapshot-capture read) up to and including
+ * [ConnectionState.Ready] — the shared setup every post-`Ready` test needs. Uses
+ * `testScheduler.runCurrent()` (never `advanceUntilIdle()`, which would fast-forward straight past
+ * an in-flight timeout) between each response so the reader and `connect()` coroutines are
+ * genuinely subscribed and waiting before the next response arrives, matching how a real pedal
+ * only ever responds after receiving a request.
+ *
+ * @param captureValues values for the S9b snapshot-capture response, or `null` to never answer
+ *   that read at all (for tests exercising the no-snapshot / capture-timeout path).
+ *
+ * ⚠️ **Why the master-volume response is now emitted unconditionally.** Before S9b,
+ * `harvestMasterVolume()` was `connect()`'s last step, so capability-confirmed tests simply let it
+ * time out during `connectDeferred.await()` (which advances virtual time). With the capture read
+ * appended *after* it, this fixture would have to advance past that 2s timeout before it could
+ * emit the capture response, breaking this function's deliberate `runCurrent()`-only discipline.
+ * Answering the harvest is simpler, faster, and closer to what a real pedal does. With
+ * `NONE_CONFIRMED` the harvest returns without ever awaiting and this frame is simply dropped by
+ * the reader (`tryEmit` with no subscriber) — harmless either way. **This changes one existing
+ * behaviour:** `parameterValues` now contains `MASTER_VOLUME` after this function in
+ * capability-confirmed tests.
  */
 suspend fun TestScope.driveToReady(
     fake: FakeTonexTransport,
@@ -125,6 +189,7 @@ suspend fun TestScope.driveToReady(
     a: Int = 0,
     b: Int = 1,
     c: Int = 2,
+    captureValues: FloatArray? = snapshotValues(),
 ) {
     testScheduler.runCurrent()
     fake.emitMessage(helloResponse())
@@ -133,6 +198,17 @@ suspend fun TestScope.driveToReady(
     for (i in PresetIndex.VALID_RANGE) {
         testScheduler.runCurrent()
         fake.emitMessage(presetDetailsSummary("Preset $i"))
+    }
+
+    // S9b: harvestMasterVolume() runs before the capture read whenever the capability is
+    // confirmed. Answer it so the sequence proceeds on runCurrent() alone.
+    testScheduler.runCurrent()
+    fake.emitMessage(masterVolumeChanged(MasterVolumeMessage.decibelsToNative(0f)))
+
+    // S9b: the snapshot-capture read.
+    if (captureValues != null) {
+        testScheduler.runCurrent()
+        fake.emitMessage(presetDetailsSummaryWithParameters("Capture", captureValues))
     }
     testScheduler.runCurrent()
 }

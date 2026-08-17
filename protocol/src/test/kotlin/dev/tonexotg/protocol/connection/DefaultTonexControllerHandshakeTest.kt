@@ -103,14 +103,17 @@ class DefaultTonexControllerHandshakeTest {
         connectDeferred.await()
 
         val written = fake.writtenMessages()
-        // Hello + RequestState + 20x RequestPresetDetails; NONE_CONFIRMED means no master-volume request.
-        assertEquals(22, written.size)
+        // Hello + RequestState + 20x RequestPresetDetails + the S9b snapshot-capture request
+        // (unconditional, not gated on capability -- D4); NONE_CONFIRMED means no master-volume
+        // request. The capture request is never answered here, so it times out and connect()
+        // still succeeds (capture is best-effort, §E.5).
+        assertEquals(23, written.size)
         // Hello and RequestState's OUTBOUND envelope type is 0x0000 (Unknown) for both -- see
         // HelloMessage/RequestStateMessage's own KDoc -- so identify them by their fixed opaque
         // payload content instead of by header.type.
         assertContentEquals(byteArrayOf(0xB9.toByte(), 0x02, 0x02, 0x0B), written[0].payload)
         assertContentEquals(byteArrayOf(0xB9.toByte(), 0x02, 0x81.toByte(), 0x06, 0x03, 0x0B), written[1].payload)
-        for (i in 2 until 22) {
+        for (i in 2 until 23) {
             assertEquals(MessageType.Unknown(0x0300L), written[i].header.type)
         }
     }
