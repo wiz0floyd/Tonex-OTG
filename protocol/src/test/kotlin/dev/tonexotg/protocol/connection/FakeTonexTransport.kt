@@ -31,6 +31,14 @@ class FakeTonexTransport : TonexTransport {
     /** Set to make the next (and every subsequent) [write] call throw instead of returning. */
     var writeThrows: Throwable? = null
 
+    /**
+     * Set to make [write] suspend forever instead of returning — for exercising
+     * [ConnectionTimeouts.transportWriteMillis]'s timeout. `write`'s KDoc on [dev.tonexotg.protocol.TonexTransport]
+     * permits it to "suspend for as long as the underlying transport needs," so this is a
+     * legitimate fake behaviour, not an edge case invented for testing's sake.
+     */
+    var writeHangs: Boolean = false
+
     /** `true` once [close] has been called at least once. */
     var closed: Boolean = false
         private set
@@ -38,6 +46,7 @@ class FakeTonexTransport : TonexTransport {
     override suspend fun write(bytes: ByteArray): Int {
         writeThrows?.let { throw it }
         written += bytes
+        if (writeHangs) kotlinx.coroutines.awaitCancellation()
         return writeBehavior(bytes)
     }
 
