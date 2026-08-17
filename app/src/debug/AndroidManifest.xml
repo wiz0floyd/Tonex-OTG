@@ -1,0 +1,20 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Debug-only manifest fragment, merged into debug builds only (never release).
+
+      Registers the bare androidx.activity.ComponentActivity so Robolectric-backed Compose UI
+      tests (createComposeRule(), S15/issue #20's ConnectionStatusIndicatorTest) can resolve an
+      activity to host composables under test — Robolectric's ActivityScenario needs a manifest
+      entry to launch, and Compose's default test host is ComponentActivity itself, not
+      MainActivity. This is the standard pattern for Compose+Robolectric testing (see
+      https://developer.android.com/develop/ui/compose/testing) and has no effect on the release
+      manifest or the shipped app.
+    -->
+    <application>
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            android:exported="false" />
+    </application>
+
+</manifest>

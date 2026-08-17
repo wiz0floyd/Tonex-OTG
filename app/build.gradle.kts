@@ -43,6 +43,12 @@ android {
             isMinifyEnabled = false
         }
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 kotlin {
@@ -63,4 +69,13 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     debugImplementation(libs.androidx.ui.tooling)
+
+    // Spike: non-visual Compose semantics-tree assertions via Robolectric, which runs as a
+    // plain JVM unit test (`testDebugUnitTest`) rather than `connectedAndroidTest` — no
+    // emulator/device required. See S15/issue #20's verification notes for why this is a
+    // JUnit4 island inside an otherwise JUnit5 codebase: Robolectric's `RobolectricTestRunner`
+    // is JUnit4-only, and `androidx.compose.ui:ui-test-junit4` requires it.
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.junit4)
 }
