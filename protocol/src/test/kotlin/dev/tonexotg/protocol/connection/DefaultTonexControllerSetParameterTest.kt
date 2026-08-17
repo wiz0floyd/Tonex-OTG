@@ -251,13 +251,16 @@ class DefaultTonexControllerSetParameterTest {
     }
 
     @Test
-    fun `revertActivePreset with capability confirmed fails NoSnapshotAvailable - unreachable success in S9`() = runTest {
+    fun `revertActivePreset with capability confirmed but no captured snapshot fails NoSnapshotAvailable, no write`() = runTest {
+        // S9b: revertActivePreset's success path (a snapshot present, replay landing) now lives in
+        // DefaultTonexControllerRevertTest.kt. This test keeps guard 4's own failure mode covered
+        // here -- capture never answered, so no snapshot exists for the active preset.
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
             scope = backgroundScope,
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
         )
-        connectToReady(controller, fake, activeSlot = PresetSlot.A, a = 4, b = 1, c = 2)
+        connectToReady(controller, fake, activeSlot = PresetSlot.A, a = 4, b = 1, c = 2, captureValues = null)
         val writesBefore = fake.writtenMessages().size
 
         val result = controller.revertActivePreset()
@@ -265,7 +268,7 @@ class DefaultTonexControllerSetParameterTest {
         val error = (result as TonexResult.Failure).error
         assertIs<TonexError.NoSnapshotAvailable>(error)
         assertEquals(PresetIndex(4), (error as TonexError.NoSnapshotAvailable).presetIndex)
-        assertEquals(fake.writtenMessages().size, writesBefore, "revertActivePreset must never write in S9")
+        assertEquals(fake.writtenMessages().size, writesBefore, "no snapshot means no write, ever")
     }
 
     // ---- shared setup -------------------------------------------------------------------------
@@ -277,9 +280,10 @@ class DefaultTonexControllerSetParameterTest {
         a: Int = 0,
         b: Int = 1,
         c: Int = 2,
+        captureValues: FloatArray? = snapshotValues(),
     ) {
         val connectDeferred = async { controller.connect(fake) }
-        driveToReady(fake, activeSlot = activeSlot, a = a, b = b, c = c)
+        driveToReady(fake, activeSlot = activeSlot, a = a, b = b, c = c, captureValues = captureValues)
         val result = connectDeferred.await()
         assertIs<TonexResult.Success<Unit>>(result)
     }

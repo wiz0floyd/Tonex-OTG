@@ -942,20 +942,53 @@ class DefaultTonexController(
         result
     }
 
-    // ---- revertActivePreset() (§10.2) — S9's deliberate stopping point --------------------------
+    // ---- revertActivePreset() (§10.2) -----------------------------------------------------------
 
     /**
-     * S9 implements this as a complete, permanent four-guard chain that returns a real typed
-     * [TonexResult.Failure] — no `TODO()`, no throw, no stub, and no misuse of an existing error
-     * case. S9b (issue #14) adds exactly one step to the end (replaying a captured [dev.tonexotg.protocol.PresetSnapshot]
-     * as per-parameter writes) — steps 1-4 below are the permanent implementation and do not
-     * change when that lands.
+     * A complete four-guard chain (S9, issue #13) followed by the replay S9b (issue #14) adds:
+     * restoring the active preset's snapshot as **per-parameter writes only, never a whole-state
+     * write**. Guards 1-4 are unchanged from S9 and verified correct and complete for S9b; only
+     * guard 4's result is now bound (a snapshot can genuinely exist, now that
+     * [captureSnapshotLocked] calls [SnapshotStore.record]) rather than discarded.
      *
-     * Step 4 (snapshot lookup) is structurally unreachable to a `Success` in S9: nothing in S9
-     * calls [SnapshotStore.record], so [SnapshotStore.snapshotFor] always returns `null` and this
-     * always ends at [TonexError.NoSnapshotAvailable]. This is not a placeholder to "fix" — both
-     * non-snapshot guards (steps 2 and 3) remain independently reachable and tested, because
-     * [capabilities] is injected.
+     * ## Guard 2 discharges issue #14's firmware-fallback prohibition in full
+     * It runs before any write, returns [TonexError.UnsupportedByFirmware]`("revert-active-preset")`,
+     * and there is no fallback branch anywhere in this function. [writeParameterLocked] →
+     * [ParameterWriteMessage.encode] independently re-checks the same capability and returns
+     * `UnsupportedByFirmware("single-parameter-write")`, so the prohibition is enforced twice, at
+     * two layers, on two distinct operation strings.
+     *
+     * ## Replay: all 109, unconditionally, ascending wire index
+     * A diff-based replay (only parameters that differ from [parameterValues]) is tempting —
+     * 109 writes typically becomes 2 — and issue #14's wording ("restores every *changed*
+     * parameter") permits it, but [parameterValues] is a local mirror that can drift from the
+     * pedal without this module knowing (the reader deliberately applies only `index == 0` of an
+     * inbound `ParameterChanged`, see [applyParameterChanged]'s KDoc): a diff computed against a
+     * drifted mirror would silently skip a parameter that genuinely needed restoring and report
+     * `Success` — a false success in the one operation whose entire job is to be trustworthy.
+     * Writing all 109 unconditionally also makes [TonexError.RevertIncomplete.appliedCount] mean
+     * something exact, and makes retrying a partial revert idempotent (see below). Ascending
+     * [ParameterId.PRESET_RANGE] order is load-bearing, not cosmetic — it is what makes
+     * `appliedCount` decodable as "`ParameterId(0)` … `ParameterId(appliedCount - 1)` were
+     * accepted."
+     *
+     * ## Partial failure: abort at the first failure, snapshot retained, retry is safe
+     * A [writeParameterLocked] failure means the transport threw, short-wrote, or timed out; the
+     * remaining parameters are overwhelmingly likely to fail identically, so this aborts rather
+     * than continuing through them (turning one clear error into a long pile-up). The snapshot is
+     * deliberately **not** discarded on this failure — because the replay always re-issues all 109
+     * writes from the same immutable snapshot, calling this function again after a
+     * [TonexError.RevertIncomplete] simply re-issues everything from scratch; nothing accumulates,
+     * nothing is skipped. No automatic retry is implemented here (CLAUDE.md: no elaborate
+     * automatic-recovery nets) — offering the user a retry is a UI-layer decision.
+     *
+     * ## The whole-state write remains structurally impossible
+     * This function reaches the wire only through [writeParameterLocked] →
+     * [ParameterWriteMessage.encode] / [MasterVolumeMessage.encode] → [writeFramed].
+     * [SetStateMessage.encode] — the only whole-state write in this module — is called at exactly
+     * one site, inside [selectPreset], and nothing here adds another.
+     *
+     * @throws never — every failure mode returns a typed [TonexResult.Failure].
      */
     override suspend fun revertActivePreset(): TonexResult<Unit> = operationMutex.withLock {
         // 1. Lifecycle.
@@ -974,13 +1007,55 @@ class DefaultTonexController(
             TonexError.ProtocolStateViolation(_connectionState.value, "the active preset is not known yet"),
         )
         // 4. A snapshot must exist for it.
-        snapshotStore.snapshotFor(active)
+        val snapshot = snapshotStore.snapshotFor(active)
             ?: return@withLock TonexResult.Failure(TonexError.NoSnapshotAvailable(active))
 
-        // 5. ── S9b INSERTS THE REPLAY HERE ──
-        //    Unreachable in S9: step 4 above always returns at the Failure, since nothing in S9
-        //    calls snapshotStore.record(). S9b replays the snapshot as per-parameter writes via
-        //    setParameter's encode path — NEVER a whole-state write (issue #14).
-        TonexResult.Failure(TonexError.NoSnapshotAvailable(active)) // unreachable; see above.
+        // 5a. Pre-validate the WHOLE snapshot before issuing a single write. A value that the
+        //     per-write range check would reject must not be discovered at parameter 47, with 46
+        //     writes already on the wire and the preset left half-reverted. The snapshot holds
+        //     values the PEDAL reported; if any captured value falls outside the registry's
+        //     bounds, that most likely means the registry's bounds are wrong for this pedal's
+        //     firmware, not that the caller did anything wrong (see #25 — ParameterRegistry
+        //     already flags two entries as pending hardware verification, e.g. VIR M2X). Refusing
+        //     up front, with zero writes, is the only outcome that is both honest and atomic —
+        //     clamping is not even reachable as a design option, since ParameterWriteMessage.encode
+        //     clamps internally regardless, so "write the captured value verbatim" is impossible
+        //     through the existing encoder either way.
+        for (i in ParameterId.PRESET_RANGE) {
+            val id = ParameterId(i)
+            val spec = ParameterRegistry.byIndex(i) ?: return@withLock TonexResult.Failure(
+                TonexError.ProtocolStateViolation(
+                    _connectionState.value,
+                    "parameter index $i is not in the registry (internal invariant violated)",
+                ),
+            )
+            val v = snapshot.valueOf(id)
+            if (v < spec.min || v > spec.max) {
+                return@withLock TonexResult.Failure(
+                    TonexError.ParameterValueOutOfRange(id, v, spec.min, spec.max),
+                )
+            }
+        }
+
+        // 5b. Replay. Per-parameter writes only, NEVER a whole-state write (issue #14). Ascending
+        //     wire index, so RevertIncomplete's appliedCount identifies exactly which parameters
+        //     landed.
+        var applied = 0
+        for (i in ParameterId.PRESET_RANGE) {
+            val id = ParameterId(i)
+            when (val r = writeParameterLocked(id, snapshot.valueOf(id))) {
+                is TonexResult.Success -> applied++
+                is TonexResult.Failure -> return@withLock TonexResult.Failure(
+                    TonexError.RevertIncomplete(
+                        presetIndex = active,
+                        appliedCount = applied,
+                        totalCount = PresetSnapshot.PARAMETER_COUNT,
+                        failedParameter = id,
+                        cause = r.error,
+                    ),
+                )
+            }
+        }
+        TonexResult.Success(Unit)
     }
 }
