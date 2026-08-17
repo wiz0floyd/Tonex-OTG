@@ -365,10 +365,13 @@ class DefaultTonexControllerFailureTest {
      * feeds remain in place and exercised by every other test in this suite; only this one
      * *specific interleaving* is untestable without real thread-level concurrency.
      *
-     * Attempting the scenario the test name describes here still resolves to a `Failure` below,
-     * matching the assertion — but not by actually landing inside the intended race window, which,
-     * per the reasoning above, this single-threaded dispatcher structurally cannot do; see the
-     * assertion's own comment for why a `Failure` is still the correct outcome even so.
+     * Under this single-threaded dispatcher the scenario resolves to `Success`, not the `Failure`
+     * the body asserts — the corrupt frame's `invalidateCurrentRead()` cannot land inside the
+     * re-read→patch gap, so nothing rejects the patch. The assertions below are deliberately
+     * written for the multi-threaded case they are pinned against (see #25 item 7); they are the
+     * expected outcome once this can be exercised for real, not a description of what happens
+     * today. Do not "fix" them to match the current single-threaded result — that would delete
+     * the finding.
      */
     @Ignore(
         "Cannot be constructed deterministically under a single-threaded TestDispatcher - see this " +
