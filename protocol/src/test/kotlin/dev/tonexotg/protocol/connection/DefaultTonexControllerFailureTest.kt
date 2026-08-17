@@ -354,8 +354,7 @@ class DefaultTonexControllerFailureTest {
      * no matter how the emissions in this test are sequenced or interleaved; any frame emitted
      * before `selectPreset` starts is processed (and its invalidation effect fully resolved)
      * before the re-read's `PedalState` is ever handed back, and any frame emitted after
-     * `selectPreset` has already returned is too late to matter. Attempting the scenario the test
-     * name describes here produces a `Success` (proved below), not the intended `StaleSessionState`.
+     * `selectPreset` has already returned is too late to matter.
      *
      * This gap **is** real for production use, where `scope` may be backed by a genuinely
      * multi-threaded dispatcher (e.g. `Dispatchers.Default`) — a JVM thread can be preempted at
@@ -365,11 +364,18 @@ class DefaultTonexControllerFailureTest {
      * production behaviour itself — `session?.invalidateCurrentRead()` and the freshness check it
      * feeds remain in place and exercised by every other test in this suite; only this one
      * *specific interleaving* is untestable without real thread-level concurrency.
+     *
+     * Attempting the scenario the test name describes here still resolves to a `Failure` below,
+     * matching the assertion — but not by actually landing inside the intended race window, which,
+     * per the reasoning above, this single-threaded dispatcher structurally cannot do; see the
+     * assertion's own comment for why a `Failure` is still the correct outcome even so.
      */
     @Ignore(
         "Cannot be constructed deterministically under a single-threaded TestDispatcher - see this " +
-            "test's KDoc. Filed on issue #25 per S9_ARCHITECTURE_PLAN.md §11.4 / CLAUDE.md's rule " +
-            "against silently pinning or dropping an untestable-without-hardware-or-real-threads finding.",
+            "test's KDoc. Filed on issue #25 (comment " +
+            "https://github.com/wiz0floyd/Tonex-OTG/issues/25#issuecomment-5320980545) per " +
+            "S9_ARCHITECTURE_PLAN.md §11.4 / CLAUDE.md's rule against silently pinning or dropping an " +
+            "untestable-without-hardware-or-real-threads finding.",
     )
     @Test
     fun `a good StateUpdate immediately followed by a CRC-bad frame invalidates the read - selectPreset sees StaleSessionState`() = runTest {
