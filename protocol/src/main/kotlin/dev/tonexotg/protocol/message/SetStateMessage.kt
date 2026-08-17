@@ -31,9 +31,10 @@ import dev.tonexotg.protocol.codec.MessageType
  * // followed by memcpy(..., StateData, StateDataLength)
  * ```
  *
- * Verified 2026-08-06 against upstream commit `7079f157107a7bc91f171e51e3da0d799d31fcfb` (S9
- * architecture plan §0) — the same commit [dev.tonexotg.protocol.state.StateBlobOffsets] is pinned
- * to.
+ * Verified 2026-08-17 against upstream commit `7079f157107a7bc91f171e51e3da0d799d31fcfb` (S9
+ * architecture plan §0 — the commit was fetched 2026-08-17, matching this citation date; the same
+ * commit [dev.tonexotg.protocol.state.StateBlobOffsets] is pinned to). Independently re-derived
+ * byte-for-byte from the same upstream source during the PR #43 adversarial review (2026-08-17).
  *
  * ## Three things here that look like bugs to a future reader and are not
  *
