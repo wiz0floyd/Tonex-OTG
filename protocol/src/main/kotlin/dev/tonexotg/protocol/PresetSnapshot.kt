@@ -48,15 +48,27 @@ class PresetSnapshot internal constructor(
      * This snapshot's value for [id], in the same engineering units as the corresponding
      * [ParameterSpec.min]/[ParameterSpec.max].
      *
+     * **Indexing convention (load-bearing):** `values[n]` is the value of `ParameterId(n)` —
+     * position *is* identity. This is forced by upstream's `param_ptr[loop]` positional layout
+     * (see [dev.tonexotg.protocol.message.PresetParameterExtractor]'s KDoc) and by
+     * [ParameterId]'s own "index is positional and load-bearing" contract. Because
+     * [ParameterId.PRESET_RANGE] is exactly `0..108` and [PARAMETER_COUNT] is exactly 109,
+     * `id.index` *is* the array index directly — no offset table, no registry lookup.
+     *
      * @throws IllegalArgumentException if [id] is not [ParameterScope.PRESET]-scoped, or is not
      *   present in this snapshot.
      */
-    fun valueOf(id: ParameterId): Float = TODO(
-        "S9b: look up id's position among the 109 preset parameters and return values[that position]",
-    )
+    fun valueOf(id: ParameterId): Float {
+        require(id.index in ParameterId.PRESET_RANGE) {
+            "PresetSnapshot covers only the $PARAMETER_COUNT PRESET-scoped parameters " +
+                "(${ParameterId.PRESET_RANGE}); $id is not one of them"
+        }
+        return values[id.index]
+    }
 
-    /** This snapshot's values as an id-keyed map; a fresh copy, safe to mutate. */
-    fun toMap(): Map<ParameterId, Float> = TODO("S9b: zip PRESET-scoped ParameterIds with values")
+    /** This snapshot's values as an id-keyed map; a fresh copy (a new `Map` every call), safe to mutate. */
+    fun toMap(): Map<ParameterId, Float> =
+        ParameterId.PRESET_RANGE.associate { ParameterId(it) to values[it] }
 
     companion object {
         /** The number of per-preset parameters every snapshot must contain — asserted, not sampled. */
