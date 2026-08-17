@@ -589,16 +589,31 @@ class DefaultTonexController(
     // ---- disconnect() (§6.10) ------------------------------------------------------------------
 
     /**
-     * Ends the current connection. Deliberately does NOT take [operationMutex] first — its
+     * Ends the current connection. **Documented safe to call from any state, including
+     * [ConnectionState.Error]** — this is the machine's only guaranteed escape hatch, so it must
+     * always land on [ConnectionState.Idle] itself rather than merely delegating to [teardown] and
+     * trusting whatever that publishes. Deliberately does NOT take [operationMutex] first — its
      * sequence:
      * 1. No-op if already [ConnectionState.Idle].
      * 2. Emit [Inbound.Disconnected] — every awaiter unblocks *immediately* with
      *    [TonexError.ProtocolStateViolation]`(Idle, ...)`, rather than hanging until its timeout.
-     * 3. `operationMutex.withLock { teardown(Idle) }` — by then the interrupted operation has
-     *    returned and released the lock.
+     * 3. `operationMutex.withLock { teardown(Idle); _connectionState.value = Idle }` — by then the
+     *    interrupted operation has returned and released the lock.
      *
      * This is deadlock-free: [disconnect] can interrupt an in-flight [connect]/[selectPreset]/etc.
      * that is itself holding [operationMutex], because it never tries to acquire that lock first.
+     *
+     * **Why the explicit re-assignment after [teardown]:** [teardown]'s [teardownDone] guard makes
+     * it idempotent by design, but that guard trips on *state publication*, not just resource
+     * release — a teardown that already ran (e.g. a failing [connect] that published
+     * [ConnectionState.Error], or a racing transport-detach that already published `Idle`) makes
+     * this call's own `teardown(Idle)` a complete no-op that publishes nothing. Without the
+     * explicit assignment below, calling [disconnect] from [ConnectionState.Error] would silently
+     * do nothing and leave the machine wedged in `Error` forever — contradicting this function's
+     * own "safe to call from any state" contract, [ConnectionState.Error]'s documented recovery
+     * path, and issue #13's "must not wedge" scope bullet. The extra assignment is a no-op publish
+     * when [teardown] already did the real work (same value, same `StateFlow` de-dupe), and the
+     * one-and-only recovery path when it didn't.
      *
      * **Accepted simplification:** between steps 2 and 3 a fresh [connect] could in principle
      * acquire the mutex first; it would then observe `connectionState` is not `Idle` and fail with
@@ -609,7 +624,13 @@ class DefaultTonexController(
     override suspend fun disconnect() {
         if (_connectionState.value is ConnectionState.Idle) return
         inbound.tryEmit(Inbound.Disconnected)
-        operationMutex.withLock { teardown(ConnectionState.Idle) }
+        operationMutex.withLock {
+            teardown(ConnectionState.Idle)
+            // teardown() may have no-opped above (a failing connect() — or a racing
+            // transport-detach — already tore down and published Error/Idle itself).
+            // disconnect() is documented safe from any state and must always land on Idle.
+            _connectionState.value = ConnectionState.Idle
+        }
     }
 
     // ---- selectPreset() (§9) -------------------------------------------------------------------
