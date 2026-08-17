@@ -42,7 +42,9 @@ import dev.tonexotg.protocol.TonexResult
  *   and send.
  * - **No mutation just to read.** Nothing here ever needs to write a byte in order to observe
  *   pedal state; that upstream anti-pattern (writing a fake preset into Slot A just to provoke a
- *   name response, fixed upstream in V1.0.8.2) has no equivalent here at all.
+ *   name response, fixed upstream in V1.0.8.2) has no equivalent here at all. [StateBlobReader] is
+ *   the dedicated read-only accessor for "which preset/slot is active right now" — its own KDoc
+ *   explains why it cannot be used to synthesize a write, cross-referencing this same claim.
  *
  * ## Byte-exactness contract
  * Every function below returns a fresh copy of the input blob's bytes with **at most the bytes
@@ -290,7 +292,7 @@ object StateBlobPatcher {
             )
         }
 
-        if (!looksLikeSlotRegion(bytes)) {
+        if (!StateBlobReader.looksLikeSlotRegion(bytes)) {
             return TonexResult.Failure(TonexError.ImplausibleStateBlobShape(actualSize = bytes.size))
         }
 
@@ -314,31 +316,5 @@ object StateBlobPatcher {
         }
 
         return TonexResult.Success(bytes)
-    }
-
-    /**
-     * `true` iff the bytes at every offset [StateBlobPatcher] is prepared to write to currently
-     * hold a value that field is documented to be able to hold: a preset index for each of the
-     * three slot-assignment bytes, and a valid [PresetSlot] ordinal for the active-slot byte.
-     *
-     * This does not prove the offsets are correct for this blob — a coincidentally plausible
-     * value at a shifted offset would still pass — only that they are not *obviously* wrong. See
-     * the offset-drift caveat in [StateBlobOffsets]'s KDoc.
-     */
-    private fun looksLikeSlotRegion(bytes: ByteArray): Boolean {
-        val slotPresetOffsets = intArrayOf(
-            StateBlobOffsets.END_SLOT_A_PRESET,
-            StateBlobOffsets.END_SLOT_B_PRESET,
-            StateBlobOffsets.END_SLOT_C_PRESET,
-        )
-        for (offset in slotPresetOffsets) {
-            val value = bytes[bytes.size - offset].toInt() and 0xFF
-            if (value !in PresetIndex.VALID_RANGE) return false
-        }
-
-        val activeSlotValue = bytes[bytes.size - StateBlobOffsets.END_CURRENT_SLOT].toInt() and 0xFF
-        if (activeSlotValue !in PresetSlot.entries.indices) return false
-
-        return true
     }
 }
