@@ -710,29 +710,40 @@ class DefaultTonexController(
 
     // ---- setParameter() (§10.1) ----------------------------------------------------------------
 
-    override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = operationMutex.withLock {
-        if (_connectionState.value !is ConnectionState.Ready) {
-            return@withLock TonexResult.Failure(
-                TonexError.ProtocolStateViolation(_connectionState.value, "setParameter requires Ready"),
-            )
-        }
+    /**
+     * The single per-parameter write path, shared by [setParameter] and [revertActivePreset]'s
+     * replay: registry lookup, range rejection, PRESET/master-volume/other-global routing, the
+     * framed write, and the post-success [parameterValues] update.
+     *
+     * ## Caller contract
+     * The caller MUST already hold [operationMutex] and MUST already have verified
+     * [ConnectionState.Ready]. This function takes no lock and performs no lifecycle check —
+     * `Mutex` is not reentrant, so a version that locked internally could not be called from
+     * [revertActivePreset]'s replay loop at all (it would deadlock on the lock that loop already
+     * holds).
+     *
+     * Deliberately does NOT emit [TonexEvent.FirstDestructiveWrite]: that signal belongs to a
+     * user-initiated edit, not to a revert restoring values the user already had. See
+     * [maybeSignalFirstDestructiveWrite].
+     */
+    private suspend fun writeParameterLocked(id: ParameterId, value: Float): TonexResult<Unit> {
         // Same @JvmInline ABI-erasure hazard as PresetIndex — re-validate explicitly.
         val spec = ParameterRegistry.byIndex(id.index)
-            ?: return@withLock TonexResult.Failure(
+            ?: return TonexResult.Failure(
                 TonexError.ProtocolStateViolation(_connectionState.value, "parameter index ${id.index} is not in the registry"),
             )
 
         // Reject, do NOT clamp — TonexController.setParameter's contract is explicit about this.
         if (value < spec.min || value > spec.max) {
-            return@withLock TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, spec.max))
+            return TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, spec.max))
         }
 
         val encoded: ByteArray = when {
             spec.scope == ParameterScope.PRESET ->
-                ParameterWriteMessage.encode(id, value, capabilities).orReturn { return@withLock it }
+                ParameterWriteMessage.encode(id, value, capabilities).orReturn { return it }
             spec.enumName == "MASTER_VOLUME" ->
-                MasterVolumeMessage.encode(value, capabilities).orReturn { return@withLock it }
-            else -> return@withLock TonexResult.Failure(
+                MasterVolumeMessage.encode(value, capabilities).orReturn { return it }
+            else -> return TonexResult.Failure(
                 TonexError.ProtocolStateViolation(
                     _connectionState.value,
                     "${spec.enumName} is a global parameter other than master volume; :protocol has no write " +
@@ -742,9 +753,51 @@ class DefaultTonexController(
             )
         }
 
-        writeFramed(encoded).orReturn { return@withLock it }
+        writeFramed(encoded).orReturn { return it }
         _parameterValues.update { it + (id to value) } // AFTER success only
-        TonexResult.Success(Unit)
+        return TonexResult.Success(Unit)
+    }
+
+    /**
+     * Fires [TonexEvent.FirstDestructiveWrite] at most once per session, after the session's first
+     * successful parameter write that actually altered a snapshotted preset. See [TonexController]
+     * and the S9b architecture plan's §F.3 for why this is a post-hoc notice rather than a
+     * pre-write gate: `events` is a zero-replay `SharedFlow` with no suspending-confirmation
+     * mechanism, a pre-write gate would have to block inside [operationMutex] (wedging every other
+     * operation for the duration of a modal dialog), and firing before the write would be
+     * dishonest when the write then fails.
+     *
+     * The four conditions below are all mandated by existing KDoc, not invented here:
+     * [SnapshotStore.hasWarnedThisSession]'s KDoc defines the triggering fact as "a parameter
+     * write against a **snapshotted** preset," which pins both the snapshot-exists condition and
+     * (with [PresetSnapshot]'s "a snapshot covers exactly the 109 PRESET-scoped parameters") the
+     * PRESET-scope condition. Master volume is excluded because it is global, not part of any
+     * preset, not captured by any snapshot, and not restored by revert — writing it destroys
+     * nothing a snapshot could have saved.
+     *
+     * Always called with [operationMutex] held, which is what makes the read-then-mark sequence
+     * below safe without further synchronisation. `markWarned()` precedes `tryEmit` so the
+     * once-per-session guarantee is structural rather than dependent on the emit succeeding.
+     */
+    private fun maybeSignalFirstDestructiveWrite(id: ParameterId) {
+        if (snapshotStore.hasWarnedThisSession()) return
+        val spec = ParameterRegistry.byIndex(id.index) ?: return
+        if (spec.scope != ParameterScope.PRESET) return // master volume is global; not part of a preset
+        val active = _activePreset.value ?: return
+        if (snapshotStore.snapshotFor(active) == null) return // "against a snapshotted preset" — SnapshotStore's own wording
+        snapshotStore.markWarned() // mark BEFORE emit: "at most once" is the contract
+        _events.tryEmit(TonexEvent.FirstDestructiveWrite(active))
+    }
+
+    override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = operationMutex.withLock {
+        if (_connectionState.value !is ConnectionState.Ready) {
+            return@withLock TonexResult.Failure(
+                TonexError.ProtocolStateViolation(_connectionState.value, "setParameter requires Ready"),
+            )
+        }
+        val result = writeParameterLocked(id, value)
+        if (result is TonexResult.Success) maybeSignalFirstDestructiveWrite(id)
+        result
     }
 
     // ---- revertActivePreset() (§10.2) — S9's deliberate stopping point --------------------------

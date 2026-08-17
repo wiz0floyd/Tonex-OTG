@@ -30,11 +30,20 @@ data class PresetInfo(
 sealed interface TonexEvent {
 
     /**
-     * The first parameter write of this session that will actually alter the pedal's saved
-     * preset is about to happen (or has just happened — see [TonexController] for exactly when
-     * this fires). Fires at most once per session (S9b); presentation is a UI concern (D3), but
-     * the underlying signal originates here because only the protocol layer knows this pedal
-     * has no undo.
+     * The session's first parameter write against a snapshotted preset has **just succeeded** —
+     * a post-hoc notice, not a pre-write gate. Fires at most once per session, immediately after
+     * [TonexController.setParameter] returns `Success` for the first time against a preset that
+     * has a captured [PresetSnapshot]; a caller must not treat this as something to acknowledge
+     * before the write proceeds — the write has already happened, and is recoverable via
+     * [TonexController.revertActivePreset].
+     *
+     * Deliberately post-hoc, not pre-write (S9b architecture plan §F.3): `events` is a
+     * zero-replay [SharedFlow] with no suspending-confirmation mechanism, a pre-write gate would
+     * have to block inside the controller's write lock (wedging every other operation for as
+     * long as a confirmation dialog takes to answer), and firing before the write would be
+     * dishonest when the write then fails. Presentation of this signal is a UI concern (D3), but
+     * the underlying fact — this pedal has no undo, and this is the first change to it this
+     * session — originates here.
      */
     data class FirstDestructiveWrite(val presetIndex: PresetIndex) : TonexEvent
 
@@ -135,7 +144,9 @@ interface TonexController {
      * clamped, so a caller cannot mistake a clamped write for the value it asked for.
      *
      * This is the first operation this session that can permanently alter the active preset —
-     * see [TonexEvent.FirstDestructiveWrite].
+     * see [TonexEvent.FirstDestructiveWrite], which fires immediately after this call returns
+     * `Success` for the first time against a preset with a captured [PresetSnapshot] (a
+     * post-hoc notice; the write has already happened by the time it fires).
      */
     suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit>
 
