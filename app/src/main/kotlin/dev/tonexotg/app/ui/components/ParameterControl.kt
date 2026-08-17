@@ -7,41 +7,56 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.app.ui.theme.minTouchTarget
 
 /**
- * The slider + numeric-entry pairing used everywhere a preset parameter is edited (S17's quick
- * tier and S19's full editor — D2 screens 2/2b/2c). This is deliberately a translation of what
- * D1/D2 show, not a commitment to one specific interaction mechanic: D3 (S17's interaction spec)
- * may not exist yet when this is built, so the component exposes a plain
- * value/range/callback shape general enough for either interaction to be layered on top of it
- * without changing this component's signature:
+ * The slider + numeric-entry pairing used everywhere a preset `RANGE` parameter is edited (S17's
+ * quick tier and S19's full editor — D2 screens 2/2b/2c, and now D3 §3/§3.1's binding interaction
+ * contract). D3 resolves the drag-vs-exact-entry ambiguity **architecturally**, not with a
+ * tap/long-press timing heuristic, and this component's layout is a direct translation of that:
  *
- * - **Drag**: [Slider] is fully wired here — dragging updates [value] via [onValueChange] on
- *   every step and [onValueChangeFinished] once the drag ends, standard M3 slider semantics.
- * - **Direct numeric entry**: this component does not assume *how* exact entry happens (a
- *   keypad bottom sheet per D2 screen 2b, an inline text field, a stepper — D3's call). It only
- *   guarantees the numeric readout ([valueText]) is present and, if [onValueTextClick] is
- *   supplied, tappable — the caller wires whatever exact-entry surface D3 ultimately specifies
- *   behind that single callback. If [onValueTextClick] is null the readout is still shown, just
- *   inert, so this composable is equally usable for a not-yet-interactive preview.
+ * - **The slider band** ([ParameterSliderBand], tagged `"paramControl.sliderBand"`) spans the full
+ *   card width and is sized to [dev.tonexotg.app.ui.theme.TonexTouchTargets.min] (64dp) — D1
+ *   §4.2's mid-performance minimum — even though the visual track drawn inside it is a slim 8dp
+ *   (D3 §3: "the visual track stays slim, but the tappable/draggable region around it is
+ *   full-size"). Any touch-and-move here is a drag; it can never resolve to "open exact entry."
+ * - **The numeric value chip** ([ParameterValueReadout], tagged `"paramControl.valueChip"`) is a
+ *   separate, non-overlapping element in its own [Row] above the slider band, top-right of the
+ *   card, sized to [dev.tonexotg.app.ui.theme.TonexTouchTargets.secondary] (48dp). A tap here —
+ *   anywhere on the chip, no drag — is the *only* way to open exact numeric entry (D3's bottom
+ *   sheet, [ParameterNumericEntrySheet]); it is not inside the slider band's layout subtree, so it
+ *   can never participate in the slider's drag gesture.
+ *
+ * D3 §3 is explicit about the failure mode this avoids: **do not** build this as an editable text
+ * field overlaid on or adjacent to the slider thumb, where a drag could be misread as text
+ * selection. Keeping the two controls in physically separate [Column] rows — not overlapping
+ * `Box`es — is what makes that failure mode structurally impossible rather than merely unlikely;
+ * [dev.tonexotg.app.ui.components.ParameterControlTest] pins the two regions' bounds as
+ * non-overlapping so a future layout change can't reintroduce it silently.
  *
  * [value]/[valueRange] are plain `Float`/`ClosedFloatingPointRange<Float>` — this module never
  * imports `dev.tonexotg.protocol.*`, so the view model that eventually drives this from a real
- * `ParameterSpec` is what does that translation.
+ * `ParameterSpec` is what does that translation. [onValueTextClick] is where a caller wires up
+ * [ParameterNumericEntrySheet]; it stays a plain callback here (rather than this component owning
+ * the sheet) so a not-yet-interactive preview or a caller with different exact-entry needs can
+ * still use this component with the callback left null.
  */
 @Composable
 fun ParameterControl(
@@ -83,27 +98,13 @@ fun ParameterControl(
             )
         }
 
-        // Full 64dp tap/drag band around the thumb (D1 §4.2: any control used mid-performance),
-        // even though the visual track inside it is thin — matches D2 screen 2's slider-wrap.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .minTouchTarget(),
-            contentAlignment = Alignment.Center,
-        ) {
-            Slider(
-                value = value,
-                onValueChange = onValueChange,
-                valueRange = valueRange,
-                enabled = enabled,
-                onValueChangeFinished = onValueChangeFinished,
-                colors = SliderDefaults.colors(
-                    thumbColor = MaterialTheme.colorScheme.primary,
-                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                ),
-            )
-        }
+        ParameterSliderBand(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            enabled = enabled,
+            onValueChangeFinished = onValueChangeFinished,
+        )
 
         if (minLabel != null && maxLabel != null) {
             Row(
@@ -118,10 +119,63 @@ fun ParameterControl(
 }
 
 /**
- * The numeric readout chip (D2's `.param-value`) — the entry point into direct numeric entry,
- * whatever form D3 eventually gives that flow. Sized to
- * [dev.tonexotg.app.ui.theme.TonexTouchTargets.secondary] (48dp): D2 screen 2's own annotation
- * treats "tap to open exact-entry" as a between-songs action, not a mid-song slider drag.
+ * D3 §3's slider band: a [dev.tonexotg.app.ui.theme.TonexTouchTargets.min] (64dp) tall drag/hit
+ * region spanning the full card width, with an 8dp visual track centered inside it. The 64dp
+ * height is applied to the [Slider] itself (not a wrapping `Box`) so the actual pointer-input
+ * region — not just the visually reserved space — is the full 64dp; a `Box` with a min-height
+ * around a default-sized `Slider` would reserve the layout space without enlarging the real
+ * touch/drag target, which is exactly the gap D3 §3 exists to close.
+ *
+ * Uses the `track =` slot overload of M3's [Slider] (`@ExperimentalMaterial3Api`) to draw the
+ * slim 8dp track — the stable slot API, not a hand-rolled gesture implementation, so drag/tap
+ * semantics and accessibility stay M3's own well-tested behavior.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ParameterSliderBand(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    enabled: Boolean,
+    onValueChangeFinished: (() -> Unit)?,
+) {
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(TonexTheme.touchTargets.min)
+            .testTag("paramControl.sliderBand"),
+        valueRange = valueRange,
+        enabled = enabled,
+        onValueChangeFinished = onValueChangeFinished,
+        colors = SliderDefaults.colors(
+            thumbColor = MaterialTheme.colorScheme.primary,
+            activeTrackColor = MaterialTheme.colorScheme.primary,
+            inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ),
+        track = { sliderState: SliderState ->
+            // D1 §4.2 / D3 §3: the visual track stays a slim 8dp even though the tappable region
+            // around it (this whole Slider's 64dp-tall bounding box, set above) is full-size.
+            SliderDefaults.Track(
+                sliderState = sliderState,
+                modifier = Modifier.height(8.dp),
+                colors = SliderDefaults.colors(
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                ),
+                enabled = enabled,
+            )
+        },
+    )
+}
+
+/**
+ * The numeric readout chip (D2's `.param-value`) — per D3 §3, the *only* entry point into
+ * [ParameterNumericEntrySheet]. Sized to
+ * [dev.tonexotg.app.ui.theme.TonexTouchTargets.secondary] (48dp) and tagged
+ * `"paramControl.valueChip"` so [dev.tonexotg.app.ui.components.ParameterControlTest] can assert
+ * its bounds never overlap [ParameterSliderBand]'s.
  */
 @Composable
 private fun ParameterValueReadout(text: String, onClick: (() -> Unit)?) {
@@ -132,7 +186,8 @@ private fun ParameterValueReadout(text: String, onClick: (() -> Unit)?) {
             .minTouchTarget(TonexTheme.touchTargets.secondary)
             .background(MaterialTheme.colorScheme.surfaceContainerHighest, shape)
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = TonexTheme.spacing.space2),
+            .padding(horizontal = TonexTheme.spacing.space2)
+            .testTag("paramControl.valueChip"),
         contentAlignment = Alignment.Center,
     ) {
         Text(
