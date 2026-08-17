@@ -18,6 +18,8 @@ import dev.tonexotg.protocol.TonexError
  *   `operation == "state-read"`.
  * @property presetDetailsMillis budget for one preset-name harvest round trip.
  *   `operation == "preset-details"`.
+ * @property presetParametersMillis budget for the snapshot-capture preset-details round trip.
+ *   `operation == "preset-parameters"`.
  * @property masterVolumeMillis budget for the master-volume harvest round trip.
  *   `operation == "master-volume"`.
  * @property transportWriteMillis budget for a single [dev.tonexotg.protocol.TonexTransport.write]
@@ -28,6 +30,7 @@ data class ConnectionTimeouts(
     val getStateMillis: Long,
     val stateReadMillis: Long,
     val presetDetailsMillis: Long,
+    val presetParametersMillis: Long,
     val masterVolumeMillis: Long,
     val transportWriteMillis: Long,
 ) {
@@ -43,6 +46,7 @@ data class ConnectionTimeouts(
          * | [ConnectionTimeouts.getStateMillis] | 2000 | Same shape; the response is capped at [dev.tonexotg.protocol.PedalState.MAX_STATE_BYTES] (512 B) — a handful of transport chunks. |
          * | [ConnectionTimeouts.stateReadMillis] | 2000 | The mandatory pre-patch re-read. Numerically equal to [getStateMillis] but kept **separate**: it is a different operation with a different `operation` string, so a timeout here is diagnosable as "the re-read failed" rather than "the handshake failed", and later tuning can adjust the two independently. |
          * | [ConnectionTimeouts.presetDetailsMillis] | 3000 | The summary response is ~2 KB — many more transport chunks and reassembly steps than the small messages, so it gets more headroom. Still not upstream-derived. |
+         * | [ConnectionTimeouts.presetParametersMillis] | 3000 | The snapshot-capture read (S9b). The request is byte-identical to the name harvest's and the response is the same ~2 KB summary, so the budget is numerically equal to [presetDetailsMillis] — but it is kept as a **separate field for the same reason [stateReadMillis] is separate from [getStateMillis]**: it is a different operation with a different `operation` string, so a timeout here is diagnosable as "the snapshot capture failed" (benign — revert is unavailable) rather than "the preset-name harvest failed" (fatal to `connect`), and the two can be tuned independently later. |
          * | [ConnectionTimeouts.masterVolumeMillis] | 2000 | Response is a single 10-byte `0x0309` payload. |
          * | [ConnectionTimeouts.transportWriteMillis] | 1000 | **Not a protocol delay at all.** [dev.tonexotg.protocol.TonexTransport.write]'s KDoc permits it to "suspend for as long as the underlying transport needs"; without a bound, one wedged write hangs `setParameter` forever. This bounds the seam, not the pedal. |
          *
@@ -77,6 +81,7 @@ data class ConnectionTimeouts(
             getStateMillis = 2_000L,
             stateReadMillis = 2_000L,
             presetDetailsMillis = 3_000L,
+            presetParametersMillis = 3_000L,
             masterVolumeMillis = 2_000L,
             transportWriteMillis = 1_000L,
         )

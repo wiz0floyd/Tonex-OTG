@@ -294,6 +294,51 @@ sealed class TonexError {
     }
 
     /**
+     * [TonexController.revertActivePreset]'s replay stopped after a per-parameter write failed,
+     * partway through restoring the snapshot's 109 values.
+     *
+     * This exists as its own case, rather than surfacing the underlying [cause] directly, because
+     * FR11 requires surfacing a failure rather than assuming success, and a bare
+     * [TransportFailure]/[Timeout] from write 47 of 109 tells a caller nothing about the 46
+     * writes that *did* land. This case is what lets a caller — ultimately the UI — say something
+     * true about a revert that is now half-applied.
+     *
+     * [appliedCount] writes, for `ParameterId(0)` through `ParameterId(appliedCount - 1)`, are
+     * known to have been accepted by the transport; [failedParameter] is `ParameterId(appliedCount)`.
+     * This exactness depends on the replay writing in strict ascending
+     * [ParameterId.PRESET_RANGE] order and aborting at the first failure — see
+     * [TonexController.revertActivePreset]'s KDoc.
+     *
+     * ⚠️ **"Accepted by the transport" is not "confirmed applied by the pedal."** Issue #14
+     * explicitly rejects per-write read-back verification; this project does not pay that
+     * verification round trip. Do not read [appliedCount] as a pedal-confirmed count.
+     *
+     * The snapshot backing this revert is deliberately **not** discarded on this failure —
+     * retrying [TonexController.revertActivePreset] is safe and idempotent, since the replay
+     * always re-issues all 109 writes from the same immutable snapshot.
+     *
+     * @property presetIndex the preset the revert was restoring.
+     * @property appliedCount how many of the 109 per-parameter writes succeeded before the failure.
+     * @property totalCount the total number of parameters a full revert writes ([PresetSnapshot.PARAMETER_COUNT]).
+     * @property failedParameter the parameter whose write failed and stopped the replay.
+     * @property cause the underlying [TonexError] from the failing write, unwrapped and preserved.
+     */
+    data class RevertIncomplete(
+        val presetIndex: PresetIndex,
+        val appliedCount: Int,
+        val totalCount: Int,
+        val failedParameter: ParameterId,
+        val cause: TonexError,
+    ) : TonexError() {
+        override val message: String
+            get() = "Revert of preset ${presetIndex.value} stopped after $appliedCount of " +
+                "$totalCount parameter writes: parameter ${failedParameter.index} failed " +
+                "(${cause.message}). The preset is now in a mixed state — $appliedCount snapshot " +
+                "values were restored and the remainder are as they were. The snapshot is retained; " +
+                "retrying revert is safe."
+    }
+
+    /**
      * A value handed to [TonexController.setParameter] fell outside its [ParameterSpec.min]..[ParameterSpec.max].
      *
      * [TonexController.setParameter]'s contract is explicit that "out-of-range values are rejected
