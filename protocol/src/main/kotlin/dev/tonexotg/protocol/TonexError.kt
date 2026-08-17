@@ -273,6 +273,52 @@ sealed class TonexError {
         override val message: String
             get() = "Preset index $value is outside the valid 0..19 range — refusing to patch"
     }
+
+    /**
+     * [TonexController.revertActivePreset] was called but no [PresetSnapshot] has been captured for
+     * the currently active preset this session.
+     *
+     * Reverting to a snapshot of a *different* preset would itself be data loss (see S9b / issue
+     * #14), so this refuses rather than substituting the nearest available snapshot. This is a
+     * permanent member of the error taxonomy, not an S9 placeholder: even once S9b's capture path
+     * lands, a preset whose snapshot read failed (or which became active before capture completed)
+     * legitimately has no snapshot, and revert must still refuse loudly.
+     *
+     * @property presetIndex the preset that has no captured snapshot.
+     */
+    data class NoSnapshotAvailable(val presetIndex: PresetIndex) : TonexError() {
+        override val message: String
+            get() = "No snapshot has been captured for preset ${presetIndex.value} during this " +
+                "session — refusing to revert, because reverting to another preset's values would " +
+                "itself be data loss"
+    }
+
+    /**
+     * A value handed to [TonexController.setParameter] fell outside its [ParameterSpec.min]..[ParameterSpec.max].
+     *
+     * [TonexController.setParameter]'s contract is explicit that "out-of-range values are rejected
+     * rather than silently clamped, so a caller cannot mistake a clamped write for the value it
+     * asked for" — this is that rejection. Note this is a *different* policy from the message
+     * layer's: [dev.tonexotg.protocol.message.ParameterWriteMessage]/[dev.tonexotg.protocol.message.MasterVolumeMessage]
+     * clamp, because at that layer an out-of-range value has one unambiguous safe interpretation.
+     * The controller rejects first, so the clamp there is unreachable for values arriving through
+     * this API and remains a backstop for direct callers.
+     *
+     * @property id the parameter whose value was rejected.
+     * @property value the out-of-range value that was rejected.
+     * @property min the parameter's valid lower bound.
+     * @property max the parameter's valid upper bound.
+     */
+    data class ParameterValueOutOfRange(
+        val id: ParameterId,
+        val value: Float,
+        val min: Float,
+        val max: Float,
+    ) : TonexError() {
+        override val message: String
+            get() = "Parameter ${id.index} value $value is outside its valid range $min..$max — " +
+                "refusing the write (this layer rejects out-of-range values rather than clamping them)"
+    }
 }
 
 /**
