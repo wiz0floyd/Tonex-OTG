@@ -223,6 +223,57 @@ class DefaultTonexControllerRevertTest {
         assertEquals(109, fake.writtenMessages().drop(retryWritesBefore).size, "the retry re-issues everything from scratch")
     }
 
+    // ---- mid-replay active-preset change: abort loudly, remaining writes withheld ---------------
+
+    @Test
+    fun `the pedal's active preset changing mid-replay aborts with ActivePresetChangedDuringRevert and withholds the remaining writes`() = runTest {
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+        )
+        connectToReady(controller, fake) // activeSlot=A, a=0, b=1, c=2 -> activeIndex == PresetIndex(0)
+        val writesBefore = fake.written.size
+        val changeoverAt = 40 // mirrors the review's repro (footswitch mid-replay at write #40 of 109)
+        val newActive = PresetIndex(5)
+
+        // The injection point: after the `changeoverAt`th write reaches the fake transport, push an
+        // externally-triggered StateUpdate naming a different active preset and drive the reader
+        // coroutine to process it with runCurrent() before returning from write(). This mirrors how
+        // a real footswitch/MIDI/external-editor active-preset change arrives on the reader
+        // coroutine, independent of operationMutex (DefaultTonexController.kt applyStateUpdate,
+        // :263-283) -- not gated by, and not synchronized with, the replay loop's writes.
+        fake.writeBehavior = { bytes ->
+            if (fake.written.size - writesBefore == changeoverAt) {
+                fake.emitMessage(
+                    stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 0, b = newActive.value, c = 2)),
+                )
+                testScheduler.runCurrent()
+            }
+            bytes.size
+        }
+
+        val result = controller.revertActivePreset()
+
+        val error = (result as TonexResult.Failure).error
+        val changed = assertIs<TonexError.ActivePresetChangedDuringRevert>(error)
+        assertEquals(activeIndex, changed.intendedPreset)
+        assertEquals(newActive, changed.observedPreset)
+        assertEquals(changeoverAt, changed.appliedCount, "the write in flight when the change was detected should still count as applied")
+        assertEquals(PresetSnapshot.PARAMETER_COUNT, changed.totalCount)
+        assertEquals(ParameterId(changeoverAt), changed.nextParameter, "the withheld write is the very next one after the changeover")
+
+        // Assertion (b) — the one that actually proves the fix closes the bug: the remaining 69
+        // writes genuinely never reached the transport. An error-type-only assertion would pass
+        // even if the loop had kept writing all 109 regardless of the guard.
+        assertEquals(
+            changeoverAt,
+            fake.written.size - writesBefore,
+            "only the writes issued before the changeover should have reached the transport -- the " +
+                "remaining ${PresetSnapshot.PARAMETER_COUNT - changeoverAt} must be withheld, not just error-flagged",
+        )
+    }
+
     // ---- pre-validation: out-of-range snapshot value refuses the WHOLE revert, zero writes ------
 
     @Test
