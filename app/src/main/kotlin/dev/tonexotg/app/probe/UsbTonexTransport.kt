@@ -98,10 +98,26 @@ class UsbTonexTransport(
 
     override fun incoming(): Flow<ByteArray> = incomingChannel.receiveAsFlow()
 
-    /** Stops this transport's reader thread. Does NOT close [connection] — see class KDoc. */
+    /**
+     * Stops this transport's reader thread and **waits for it to actually exit** before
+     * returning. Does NOT close [connection] — see class KDoc.
+     *
+     * The `join` is load-bearing, not cosmetic: [UsbDeviceConnection.bulkTransfer] is a blocking
+     * JNI call that [Thread.interrupt] does not reliably unblock, and this class's KDoc already
+     * documents that the caller reuses the *same* [connection]/[inEndpoint] for a fresh
+     * [UsbTonexTransport] moments after this one closes (the S20 write test's reconnect cycles).
+     * `UsbDeviceConnection` is documented (issue #16) as not thread-safe, so without this join, a
+     * still-blocked old reader thread and a brand-new one could both call `bulkTransfer` on the
+     * same IN endpoint concurrently — exactly the kind of race that could steal or corrupt the
+     * pedal-response frame a reconnect's read-back verification depends on. The bound is twice
+     * [READ_TIMEOUT_MILLIS]: the read loop's own `bulkTransfer` call always returns within
+     * [READ_TIMEOUT_MILLIS] regardless of whether the interrupt took effect, so this join
+     * reliably completes well inside that budget.
+     */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         readerThread.interrupt()
+        readerThread.join(READ_TIMEOUT_MILLIS.toLong() * 2)
     }
 
     companion object {
