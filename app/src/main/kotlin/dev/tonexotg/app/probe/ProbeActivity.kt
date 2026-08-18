@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -186,7 +185,12 @@ private fun ProbeScreen(scope: CoroutineScope) {
         }
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            // Deliberately no ColumnScope.weight() here - `import ...layout.weight` collides with
+            // an internal `RowColumnParentData?.weight` property in this Compose BOM version and
+            // fails the whole module's compile ("it is internal in file"). fillMaxWidth() alone is
+            // enough: the parent Column already has a bounded height (fillMaxSize()), so this
+            // LazyColumn gets a real max-height constraint from measurement without needing weight.
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(2.dp),
             contentPadding = PaddingValues(vertical = 8.dp),
         ) {
