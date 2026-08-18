@@ -366,15 +366,19 @@ sealed class TonexError {
      *
      * ⚠️ **Unlike [RevertIncomplete], retrying [TonexController.revertActivePreset] right now is
      * NOT automatically safe.** Calling it again targets whatever preset is *currently* active —
-     * [observedPreset], not [intendedPreset] — so a naive retry reverts the wrong preset. Worse,
-     * this module re-captures a snapshot on every active-preset change (including the one that
-     * caused this failure), and snapshot capture replaces any prior snapshot for that index in
-     * place. So the moment the caller re-selects [intendedPreset], the still-good snapshot for it
-     * is overwritten by a fresh capture of the *half-reverted* state this error just reported —
-     * the original values are gone at that point, not merely stale. Do not advise "reselect the
-     * preset and retry" anywhere this error is surfaced; there is no safe automatic recovery here,
-     * only an honest report of what happened (per CLAUDE.md: no elaborate automatic-recovery nets,
-     * and no guessing where the codebase can instead reject and explain).
+     * [observedPreset], not [intendedPreset] — so a naive retry reverts the wrong preset ([observedPreset]).
+     *
+     * **Reselecting [intendedPreset] and retrying IS safe (issue #46).** Snapshot retention is
+     * first-arrival-wins: a preset's snapshot is recorded once per session, the first time it
+     * becomes active, and is never overwritten by a later re-arrival at that same preset — see
+     * [dev.tonexotg.protocol.connection.DefaultTonexController.captureSnapshotLocked]'s KDoc. So
+     * the caller's obvious recovery — reselect [intendedPreset], then call
+     * [TonexController.revertActivePreset] again — is exactly right: [intendedPreset]'s original,
+     * still-good snapshot survives being re-arrived at while in this mixed, half-reverted state,
+     * and the retried revert replays that original snapshot in full. (Before issue #46 this used to
+     * be actively unsafe, because re-arriving at [intendedPreset] would silently overwrite its
+     * snapshot with a fresh capture of the half-reverted state — the original values would be gone,
+     * not merely stale. That hazard is what first-arrival-wins retention exists to close.)
      *
      * @property intendedPreset the preset the revert was restoring — the preset captured as
      *   `active` when [TonexController.revertActivePreset] began.

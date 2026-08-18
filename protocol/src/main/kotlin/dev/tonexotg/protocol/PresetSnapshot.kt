@@ -99,9 +99,16 @@ interface SnapshotStore {
     /**
      * Records [snapshot], replacing any prior snapshot for the same [PresetSnapshot.presetIndex].
      *
-     * Callers must re-snapshot (call this again) whenever the active preset changes, including
-     * changes originating externally at the footswitch (FR6) — a stale snapshot from a
-     * different preset is worse than none, since reverting to it would itself be data loss.
+     * This method itself is unconditional — it always replaces. The retention *policy* of when to
+     * call it is the caller's responsibility, not this store's:
+     * [dev.tonexotg.protocol.connection.DefaultTonexController] calls it first-arrival-wins (issue
+     * #46) — once per preset per session, guarded by `snapshotFor(index) == null` at the call site
+     * — precisely so an already-snapshotted preset's original values survive later edits, external
+     * changes, and re-arrivals (including returning to a preset after an aborted/partial revert;
+     * see [TonexError.ActivePresetChangedDuringRevert]'s KDoc). A stale-forever snapshot is the
+     * accepted tradeoff of that policy — see issue #46 for the alternatives considered. Do not call
+     * this unconditionally on every active-preset change; that was S9b's original (issue #14)
+     * behavior and is exactly the policy issue #46 replaced.
      */
     fun record(snapshot: PresetSnapshot)
 
