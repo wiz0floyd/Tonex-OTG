@@ -1043,6 +1043,30 @@ class DefaultTonexController(
         var applied = 0
         for (i in ParameterId.PRESET_RANGE) {
             val id = ParameterId(i)
+            // Re-verify the target BEFORE every write, including the first. Per-parameter writes
+            // are NOT preset-indexed on the wire — they land on whatever preset is active on the
+            // pedal at the moment they arrive, not the preset this snapshot was captured from. If
+            // the pedal has moved (footswitch, MIDI program change, external editor) since `active`
+            // was captured above, every remaining write would corrupt a DIFFERENT preset than the
+            // one being reverted. Abort loudly; never continue. This lives here, in the replay
+            // loop, and NOT inside writeParameterLocked — setParameter deliberately targets
+            // "whatever preset is active right now" (correct for a live slider drag), and pushing
+            // this check into the shared write path would break that. Replay is the only caller
+            // with a pinned target preset, so the check belongs to replay alone. This narrows the
+            // corruption window; see TonexError.ActivePresetChangedDuringRevert's KDoc for why it
+            // cannot close it.
+            val now = _activePreset.value
+            if (now != active) {
+                return@withLock TonexResult.Failure(
+                    TonexError.ActivePresetChangedDuringRevert(
+                        intendedPreset = active,
+                        observedPreset = now,
+                        appliedCount = applied,
+                        totalCount = PresetSnapshot.PARAMETER_COUNT,
+                        nextParameter = id,
+                    ),
+                )
+            }
             when (val r = writeParameterLocked(id, snapshot.valueOf(id))) {
                 is TonexResult.Success -> applied++
                 is TonexResult.Failure -> return@withLock TonexResult.Failure(
