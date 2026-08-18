@@ -191,7 +191,7 @@ private fun ProbeScreen(scope: CoroutineScope) {
         }
 
         OutlinedButton(
-            enabled = handles != null,
+            enabled = !busy && handles != null,
             onClick = {
                 handles?.let {
                     runCatching { it.connection.releaseInterface(it.usbInterface) }
