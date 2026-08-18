@@ -38,7 +38,14 @@
         <activity
             android:name=".probe.ProbeActivity"
             android:label="Tonex Probe (Diagnostic)"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
+            <!--
+              configChanges above keeps a rotation (or keyboard/UI-mode change) from destroying
+              and recreating this Activity mid-probe, which would cancel its CoroutineScope —
+              see ProbeSession.runWriteTest's NonCancellable restore-write guard (issue #25,
+              opus-reviewer-probe25 B1).
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

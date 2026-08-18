@@ -10,6 +10,8 @@ import dev.tonexotg.protocol.connection.DefaultTonexController
 import dev.tonexotg.protocol.message.FirmwareCapabilities
 import dev.tonexotg.protocol.params.ParameterRegistry
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * ⚠️ DIAGNOSTIC-ONLY. Orchestrates the S20 hardware probe (issue #25) against a real pedal: the
@@ -203,6 +205,23 @@ class ProbeSession(
             transport1.close()
             return
         }
+        if (before < spec.min || before > spec.max) {
+            // DefaultTonexController.writeParameterLocked REJECTS (does not clamp) out-of-range
+            // values, and the read path applies no range validation — so a pedal-reported value
+            // outside the registered bounds would mean the test write lands, then the restore
+            // write is rejected client-side before a single byte is sent. Abort before writing
+            // anything, same as the "before == null" guard above.
+            log.error(
+                "Write test: current value of $writeTestParameterEnumName ($before ${spec.unit}) is OUTSIDE " +
+                    "the registered range (${spec.min}..${spec.max} ${spec.unit}) — refusing to write, " +
+                    "because the restore write would be rejected client-side after the test write already " +
+                    "landed. This itself is a finding: this firmware reports $writeTestParameterEnumName " +
+                    "outside ParameterRegistry's bounds. Aborting; nothing was written.",
+            )
+            controller1.disconnect()
+            transport1.close()
+            return
+        }
 
         val testValue = if (before <= (spec.min + spec.max) / 2f) spec.max else spec.min
         log.info(
@@ -230,64 +249,98 @@ class ProbeSession(
         transport1.close()
 
         // ---- Cycle 2: reconnect, read back to verify, then restore the original value ---------
-        val transport2 = UsbTonexTransport(connection, inEndpoint, outEndpoint)
-        val controller2 = DefaultTonexController(
-            scope = scope,
-            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
-            timeouts = ConnectionTimeouts.DEFAULT,
-        )
-        val connect2 = controller2.connect(transport2)
-        if (connect2 is TonexResult.Failure) {
-            log.error(
-                "Write test: reconnect (cycle 2, to verify + restore) FAILED: ${connect2.error.message}. " +
-                    "Per-parameter write support: UNKNOWN (write was sent but could not be verified). " +
-                    "The pedal's $writeTestParameterEnumName may still hold the TEST value ($testValue " +
-                    "${spec.unit}), NOT the original ($before ${spec.unit}) — please check/fix this " +
-                    "manually on the pedal or via a future connection.",
+        //
+        // Wrapped in NonCancellable from here through the end of the restore: ProbeActivity's
+        // scope can be cancelled (onDestroy, e.g. back press or the system reclaiming the
+        // Activity) at any point in this multi-second reconnect-and-verify window, and a plain
+        // CancellationException unwind here would skip the restore write silently — the pedal
+        // would be left at the test value with no log trace. See issue #25, opus-reviewer-probe25
+        // B1. (ProbeActivity also declares android:configChanges so a rotation specifically can't
+        // trigger this in the first place — this NonCancellable guard is the backstop for the
+        // other triggers: back press, Home + system reclaim, etc.)
+        withContext(NonCancellable) {
+            val transport2 = UsbTonexTransport(connection, inEndpoint, outEndpoint)
+            val controller2 = DefaultTonexController(
+                scope = scope,
+                capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+                timeouts = ConnectionTimeouts.DEFAULT,
             )
+            val connect2 = controller2.connect(transport2)
+            if (connect2 is TonexResult.Failure) {
+                log.error(
+                    "Write test: reconnect (cycle 2, to verify + restore) FAILED: ${connect2.error.message}. " +
+                        "Per-parameter write support: UNKNOWN (write was sent but could not be verified). " +
+                        "The pedal's $writeTestParameterEnumName may still hold the TEST value ($testValue " +
+                        "${spec.unit}), NOT the original ($before ${spec.unit}) — please check/fix this " +
+                        "manually on the pedal or via a future connection.",
+                )
+                transport2.close()
+                return@withContext
+            }
+
+            // Per-parameter writes carry no preset index — they land on whatever preset is
+            // currently active on the pedal. If the active preset drifted during the reconnect
+            // window (footswitch, front panel, IK editor — anything), then `after` below would be
+            // read from the WRONG preset (a near-certain false "CONFIRMED NO"), and restoring
+            // `before` would write preset A's original value onto preset B. Re-check before
+            // trusting either. See issue #25, opus-reviewer-probe25 B3.
+            val active2 = controller2.activePreset.value
+            if (active2 != active1) {
+                log.error(
+                    "Write test: active preset changed during the reconnect window (was ${active1?.value}, " +
+                        "now ${active2?.value}). The read-back cannot be trusted to reflect preset " +
+                        "${active1?.value}, and restoring $writeTestParameterEnumName would land on preset " +
+                        "${active2?.value}, not the preset it came from. Per-parameter write support: " +
+                        "INCONCLUSIVE (preset drift during test — not a real result, do NOT treat as " +
+                        "CONFIRMED NO). Skipping the restore write. Preset ${active1?.value} may still hold " +
+                        "the TEST value ($testValue ${spec.unit}) — please manually restore " +
+                        "$writeTestParameterEnumName on preset ${active1?.value} to $before ${spec.unit}.",
+                )
+                controller2.disconnect()
+                transport2.close()
+                return@withContext
+            }
+
+            val after = controller2.parameterValues.value[id]
+            when {
+                after == null -> log.error(
+                    "Per-parameter write support: INCONCLUSIVE — could not re-read $writeTestParameterEnumName " +
+                        "after reconnecting (snapshot capture failed on the verification read).",
+                )
+                kotlin.math.abs(after - testValue) < 0.01f -> log.finding(
+                    "Per-parameter write support: CONFIRMED YES. Read back $writeTestParameterEnumName = " +
+                        "$after ${spec.unit} after reconnecting — matches the test value ($testValue) that was " +
+                        "written, independently of the transport's own accepted-the-bytes signal.",
+                )
+                else -> log.finding(
+                    "Per-parameter write support: CONFIRMED NO (or firmware silently ignored it). Read back " +
+                        "$writeTestParameterEnumName = $after ${spec.unit} after reconnecting — this does NOT " +
+                        "match the test value ($testValue) that was written. STOP AND ESCALATE per issue #25: " +
+                        "S9b's revert design (per-parameter writes) needs revisiting for this pedal's firmware.",
+                )
+            }
+
+            val restoreResult = controller2.setParameter(id, before)
+            when (restoreResult) {
+                is TonexResult.Success -> log.info(
+                    "Restore write (back to original value $before ${spec.unit}) was ACCEPTED BY THE " +
+                        "TRANSPORT. Its actual effect on the pedal was NOT independently re-verified via " +
+                        "another read-back — this harness does not chain a third reconnect for that, matching " +
+                        "this project's documented stance against per-write read-back verification (see " +
+                        "TonexError.RevertIncomplete's KDoc). If you want certainty, check " +
+                        "$writeTestParameterEnumName on the pedal directly, or reconnect once more.",
+                )
+                is TonexResult.Failure -> log.error(
+                    "Restore write FAILED at the transport/protocol layer: ${restoreResult.error.message}. The " +
+                        "pedal's $writeTestParameterEnumName is very likely STILL AT THE TEST VALUE " +
+                        "($testValue ${spec.unit}), not the original ($before ${spec.unit}). Please restore it " +
+                        "manually.",
+                )
+            }
+
+            controller2.disconnect()
             transport2.close()
-            return
         }
-
-        val after = controller2.parameterValues.value[id]
-        when {
-            after == null -> log.error(
-                "Per-parameter write support: INCONCLUSIVE — could not re-read $writeTestParameterEnumName " +
-                    "after reconnecting (snapshot capture failed on the verification read).",
-            )
-            kotlin.math.abs(after - testValue) < 0.01f -> log.finding(
-                "Per-parameter write support: CONFIRMED YES. Read back $writeTestParameterEnumName = " +
-                    "$after ${spec.unit} after reconnecting — matches the test value ($testValue) that was " +
-                    "written, independently of the transport's own accepted-the-bytes signal.",
-            )
-            else -> log.finding(
-                "Per-parameter write support: CONFIRMED NO (or firmware silently ignored it). Read back " +
-                    "$writeTestParameterEnumName = $after ${spec.unit} after reconnecting — this does NOT " +
-                    "match the test value ($testValue) that was written. STOP AND ESCALATE per issue #25: " +
-                    "S9b's revert design (per-parameter writes) needs revisiting for this pedal's firmware.",
-            )
-        }
-
-        val restoreResult = controller2.setParameter(id, before)
-        when (restoreResult) {
-            is TonexResult.Success -> log.info(
-                "Restore write (back to original value $before ${spec.unit}) was ACCEPTED BY THE " +
-                    "TRANSPORT. Its actual effect on the pedal was NOT independently re-verified via " +
-                    "another read-back — this harness does not chain a third reconnect for that, matching " +
-                    "this project's documented stance against per-write read-back verification (see " +
-                    "TonexError.RevertIncomplete's KDoc). If you want certainty, check " +
-                    "$writeTestParameterEnumName on the pedal directly, or reconnect once more.",
-            )
-            is TonexResult.Failure -> log.error(
-                "Restore write FAILED at the transport/protocol layer: ${restoreResult.error.message}. The " +
-                    "pedal's $writeTestParameterEnumName is very likely STILL AT THE TEST VALUE " +
-                    "($testValue ${spec.unit}), not the original ($before ${spec.unit}). Please restore it " +
-                    "manually.",
-            )
-        }
-
-        controller2.disconnect()
-        transport2.close()
         log.warn("=== Single-parameter write test complete ===")
     }
 }
