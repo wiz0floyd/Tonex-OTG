@@ -13,6 +13,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 
@@ -154,24 +155,43 @@ object UsbDeviceOpener {
         return OpenResult.Success(connection, usbInterface, inEndpoint, outEndpoint, rawDescriptors)
     }
 
+    /**
+     * The permission dialog's answer, the cancellation path, and the timeout fallback below are
+     * three independent sources that could all try to resolve/unregister at once (e.g. the user
+     * answers right as the timeout fires) — [resolved] ensures exactly one of them actually
+     * resumes [cont] and unregisters [receiver]; every unregister is also wrapped in
+     * [runCatching] as a second line of defense, since [Context.unregisterReceiver] throws
+     * `IllegalArgumentException` if called on an already-unregistered receiver, and that would
+     * otherwise crash the one interactive step a human has to click through.
+     */
     private suspend fun requestPermission(
         context: Context,
         manager: UsbManager,
         device: UsbDevice,
         timeoutMillis: Long,
     ): Boolean = suspendCancellableCoroutine { cont ->
-        val receiver = object : BroadcastReceiver() {
+        val resolved = AtomicBoolean(false)
+        lateinit var receiver: BroadcastReceiver
+
+        fun resolve(granted: Boolean) {
+            if (!resolved.compareAndSet(false, true)) return
+            runCatching { context.unregisterReceiver(receiver) }
+            if (cont.isActive) cont.resume(granted)
+        }
+
+        receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
                 if (intent.action != ACTION_USB_PERMISSION) return
-                context.unregisterReceiver(this)
-                val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                if (cont.isActive) cont.resume(granted)
+                resolve(intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false))
             }
         }
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
-        cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
+        cont.invokeOnCancellation {
+            resolved.set(true) // cont is already cancelled; only unregister, never resume it again
+            runCatching { context.unregisterReceiver(receiver) }
+        }
 
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -183,15 +203,7 @@ object UsbDeviceOpener {
 
         // No built-in timeout on the platform call; this harness adds one so a probe run that's
         // never answered fails loud instead of hanging the "Connect" button forever.
-        android.os.Handler(context.mainLooper).postDelayed(
-            {
-                if (cont.isActive) {
-                    runCatching { context.unregisterReceiver(receiver) }
-                    cont.resume(false)
-                }
-            },
-            timeoutMillis,
-        )
+        android.os.Handler(context.mainLooper).postDelayed({ resolve(false) }, timeoutMillis)
     }
 
     /** Hex-dumps [bytes] as space-separated byte pairs, 16 per line, for the raw descriptor log. */
