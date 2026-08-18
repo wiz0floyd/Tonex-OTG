@@ -35,6 +35,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.PresetIndex
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -108,48 +109,54 @@ private fun ProbeScreen(scope: CoroutineScope) {
             onClick = {
                 busy = true
                 scope.launch {
-                    val device = UsbDeviceOpener.findDevice(context)
-                    if (device == null) {
-                        log.error(
-                            "No USB device found for VID=0x${UsbDeviceOpener.VENDOR_ID.toString(16)}/" +
-                                "PID=0x${UsbDeviceOpener.PRODUCT_ID.toString(16)}. Is the pedal plugged in " +
-                                "and this phone's USB-OTG adapter/cable working?",
-                        )
-                        busy = false
-                        return@launch
-                    }
-                    log.info("Found device: ${device.deviceName} (VID=0x${device.vendorId.toString(16)}, PID=0x${device.productId.toString(16)})")
+                    try {
+                        val device = UsbDeviceOpener.findDevice(context)
+                        if (device == null) {
+                            log.error(
+                                "No USB device found for VID=0x${UsbDeviceOpener.VENDOR_ID.toString(16)}/" +
+                                    "PID=0x${UsbDeviceOpener.PRODUCT_ID.toString(16)}. Is the pedal plugged in " +
+                                    "and this phone's USB-OTG adapter/cable working?",
+                            )
+                            return@launch
+                        }
+                        log.info("Found device: ${device.deviceName} (VID=0x${device.vendorId.toString(16)}, PID=0x${device.productId.toString(16)})")
 
-                    when (val opened = UsbDeviceOpener.requestPermissionAndOpen(context, device)) {
-                        is UsbDeviceOpener.OpenResult.Failure -> {
-                            log.error("Could not open device: ${opened.reason}")
+                        when (val opened = UsbDeviceOpener.requestPermissionAndOpen(context, device)) {
+                            is UsbDeviceOpener.OpenResult.Failure -> {
+                                log.error("Could not open device: ${opened.reason}")
+                            }
+                            is UsbDeviceOpener.OpenResult.Success -> {
+                                log.finding(
+                                    "Raw config descriptors (${opened.rawDescriptors.size} bytes) — see issue #16's " +
+                                        "malformed wMaxPacketSize hazard; inspect this dump to confirm/refute it on " +
+                                        "Android specifically:\n${UsbDeviceOpener.hexDump(opened.rawDescriptors)}",
+                                )
+                                log.info(
+                                    "Claimed interface ${opened.usbInterface.id}, asserted DTR, IN endpoint " +
+                                        "0x${opened.inEndpoint.address.toString(16)}, OUT endpoint " +
+                                        "0x${opened.outEndpoint.address.toString(16)}.",
+                                )
+                                handles = UsbConnectionHandles(
+                                    opened.connection,
+                                    opened.usbInterface,
+                                    opened.inEndpoint,
+                                    opened.outEndpoint,
+                                )
+                                activePreset = probeSession.runReadOnlyDiagnostics(
+                                    opened.connection,
+                                    opened.inEndpoint,
+                                    opened.outEndpoint,
+                                )
+                                readOnlyPassDone = true
+                            }
                         }
-                        is UsbDeviceOpener.OpenResult.Success -> {
-                            log.finding(
-                                "Raw config descriptors (${opened.rawDescriptors.size} bytes) — see issue #16's " +
-                                    "malformed wMaxPacketSize hazard; inspect this dump to confirm/refute it on " +
-                                    "Android specifically:\n${UsbDeviceOpener.hexDump(opened.rawDescriptors)}",
-                            )
-                            log.info(
-                                "Claimed interface ${opened.usbInterface.id}, asserted DTR, IN endpoint " +
-                                    "0x${opened.inEndpoint.address.toString(16)}, OUT endpoint " +
-                                    "0x${opened.outEndpoint.address.toString(16)}.",
-                            )
-                            handles = UsbConnectionHandles(
-                                opened.connection,
-                                opened.usbInterface,
-                                opened.inEndpoint,
-                                opened.outEndpoint,
-                            )
-                            activePreset = probeSession.runReadOnlyDiagnostics(
-                                opened.connection,
-                                opened.inEndpoint,
-                                opened.outEndpoint,
-                            )
-                            readOnlyPassDone = true
-                        }
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        log.error("Read-only diagnostic pass crashed: ${t::class.simpleName}: ${t.message}")
+                    } finally {
+                        busy = false
                     }
-                    busy = false
                 }
             },
         ) {
@@ -228,10 +235,17 @@ private fun ProbeScreen(scope: CoroutineScope) {
                     showWriteTestDialog = false
                     busy = true
                     scope.launch {
-                        handles?.let {
-                            probeSession.runWriteTest(it.connection, it.inEndpoint, it.outEndpoint, activePreset)
+                        try {
+                            handles?.let {
+                                probeSession.runWriteTest(it.connection, it.inEndpoint, it.outEndpoint, activePreset)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            log.error("Single-parameter write test crashed: ${t::class.simpleName}: ${t.message}")
+                        } finally {
+                            busy = false
                         }
-                        busy = false
                     }
                 }) { Text("I understand, run the write test") }
             },

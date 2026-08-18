@@ -198,7 +198,12 @@ object UsbDeviceOpener {
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-        val pendingIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            0,
+            Intent(ACTION_USB_PERMISSION).setPackage(context.packageName),
+            flags,
+        )
         manager.requestPermission(device, pendingIntent)
 
         // No built-in timeout on the platform call; this harness adds one so a probe run that's
