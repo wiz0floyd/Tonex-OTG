@@ -40,12 +40,19 @@ class DefaultTonexControllerHarvestTest {
         connectDeferred.await()
 
         val presetDetailsRequests = fake.writtenMessages().drop(2) // Hello, RequestState first
-        assertEquals(20, presetDetailsRequests.size)
-        for ((i, msg) in presetDetailsRequests.withIndex()) {
+        // 20x preset-name-harvest requests + the S9b snapshot-capture request (also a 0x0300
+        // preset-details request, §0) -- capture's request for the active preset (index 0 here,
+        // plausibleBlob()'s default) is byte-identical to the harvest's own request for index 0.
+        assertEquals(21, presetDetailsRequests.size)
+        for (i in 0 until 20) {
+            val msg = presetDetailsRequests[i]
             // Payload prefix is fixed (b9 04 0b 01); the trailing two bytes are index, kind(=0 SUMMARY).
             assertEquals(i, msg.payload[4].toInt() and 0xFF, "request $i should ask for preset index $i")
             assertEquals(0, msg.payload[5].toInt() and 0xFF, "request $i should ask for SUMMARY (kind 0)")
         }
+        val captureRequest = presetDetailsRequests[20]
+        assertEquals(0, captureRequest.payload[4].toInt() and 0xFF, "capture should ask for the active preset (index 0)")
+        assertEquals(0, captureRequest.payload[5].toInt() and 0xFF, "capture should ask for SUMMARY (kind 0), never FULL")
     }
 
     @Test
@@ -107,7 +114,9 @@ class DefaultTonexControllerHarvestTest {
         val result = connectDeferred.await()
 
         assertIs<TonexResult.Success<Unit>>(result)
-        assertEquals(22, fake.writtenMessages().size) // no RequestMasterVolume written
+        // Hello + RequestState + 20 preset-details + the S9b capture request (unconditional, D4);
+        // no RequestMasterVolume written.
+        assertEquals(23, fake.writtenMessages().size)
         assertFalse(controller.parameterValues.value.containsKey(masterVolumeSpec.id))
     }
 
@@ -127,7 +136,9 @@ class DefaultTonexControllerHarvestTest {
         val result = connectDeferred.await()
 
         assertIs<TonexResult.Success<Unit>>(result)
-        assertEquals(23, fake.writtenMessages().size) // Hello + RequestState + 20 + RequestMasterVolume
+        // Hello + RequestState + 20 + RequestMasterVolume + the S9b capture request (unanswered
+        // here; it times out and connect() still succeeds, since capture is best-effort).
+        assertEquals(24, fake.writtenMessages().size)
         val expectedDb = MasterVolumeMessage.nativeToDecibels(5f)
         val actualDb = controller.parameterValues.value.getValue(masterVolumeSpec.id)
         assertTrue(abs(actualDb - expectedDb) < 1e-3f, "expected ~$expectedDb dB, got $actualDb")

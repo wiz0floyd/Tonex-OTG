@@ -205,7 +205,10 @@ class DefaultTonexControllerSetParameterTest {
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
         )
         connectToReady(controller, fake)
-        assertTrue(!controller.parameterValues.value.containsKey(presetParam.id))
+        // S9b: connect()'s capture pre-populates every PRESET-scoped entry (the snapshotValues()
+        // fixture's value for this index), not absence -- see ConnectionTestFixtures.snapshotValues.
+        val capturedValue = snapshotValues()[presetParam.id.index]
+        assertEquals(capturedValue, controller.parameterValues.value[presetParam.id])
 
         controller.setParameter(presetParam.id, -25f)
 
@@ -220,12 +223,14 @@ class DefaultTonexControllerSetParameterTest {
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
         )
         connectToReady(controller, fake)
+        val capturedValue = snapshotValues()[presetParam.id.index]
         fake.writeThrows = java.io.IOException("wedged")
 
         val result = controller.setParameter(presetParam.id, -25f)
 
         assertIs<TonexResult.Failure>(result)
-        assertTrue(!controller.parameterValues.value.containsKey(presetParam.id))
+        // S9b: unchanged means still holding the value connect()'s capture populated, not absent.
+        assertEquals(capturedValue, controller.parameterValues.value[presetParam.id])
     }
 
     // ---- revertActivePreset: both non-snapshot failure modes, no throw, no write --------------
@@ -246,13 +251,16 @@ class DefaultTonexControllerSetParameterTest {
     }
 
     @Test
-    fun `revertActivePreset with capability confirmed fails NoSnapshotAvailable - unreachable success in S9`() = runTest {
+    fun `revertActivePreset with capability confirmed but no captured snapshot fails NoSnapshotAvailable, no write`() = runTest {
+        // S9b: revertActivePreset's success path (a snapshot present, replay landing) now lives in
+        // DefaultTonexControllerRevertTest.kt. This test keeps guard 4's own failure mode covered
+        // here -- capture never answered, so no snapshot exists for the active preset.
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
             scope = backgroundScope,
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
         )
-        connectToReady(controller, fake, activeSlot = PresetSlot.A, a = 4, b = 1, c = 2)
+        connectToReady(controller, fake, activeSlot = PresetSlot.A, a = 4, b = 1, c = 2, captureValues = null)
         val writesBefore = fake.writtenMessages().size
 
         val result = controller.revertActivePreset()
@@ -260,7 +268,7 @@ class DefaultTonexControllerSetParameterTest {
         val error = (result as TonexResult.Failure).error
         assertIs<TonexError.NoSnapshotAvailable>(error)
         assertEquals(PresetIndex(4), (error as TonexError.NoSnapshotAvailable).presetIndex)
-        assertEquals(fake.writtenMessages().size, writesBefore, "revertActivePreset must never write in S9")
+        assertEquals(fake.writtenMessages().size, writesBefore, "no snapshot means no write, ever")
     }
 
     // ---- shared setup -------------------------------------------------------------------------
@@ -272,9 +280,10 @@ class DefaultTonexControllerSetParameterTest {
         a: Int = 0,
         b: Int = 1,
         c: Int = 2,
+        captureValues: FloatArray? = snapshotValues(),
     ) {
         val connectDeferred = async { controller.connect(fake) }
-        driveToReady(fake, activeSlot = activeSlot, a = a, b = b, c = c)
+        driveToReady(fake, activeSlot = activeSlot, a = a, b = b, c = c, captureValues = captureValues)
         val result = connectDeferred.await()
         assertIs<TonexResult.Success<Unit>>(result)
     }

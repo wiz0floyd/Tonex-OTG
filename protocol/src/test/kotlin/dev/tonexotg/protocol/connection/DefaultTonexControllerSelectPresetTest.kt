@@ -57,11 +57,16 @@ class DefaultTonexControllerSelectPresetTest {
         second.await().let { assertIs<TonexResult.Success<Unit>>(it) }
 
         val newWrites = fake.writtenMessages().drop(writesBefore)
-        assertEquals(4, newWrites.size, "expected [RequestState, SetState, RequestState, SetState]")
+        // [RequestState, SetState, RequestState, SetState] plus one more: the second re-read
+        // legitimately reports the active preset moving 0 -> 5 (slot A now holds what the first
+        // selectPreset just assigned it), so S9b re-snapshots -- a fifth, preset-details request,
+        // issued once selectPreset(6) releases operationMutex.
+        assertEquals(5, newWrites.size, "expected [RequestState, SetState, RequestState, SetState, RequestPresetDetails]")
         assertRequestState(newWrites[0])
         assertStateUpdateWrite(newWrites[1])
         assertRequestState(newWrites[2])
         assertStateUpdateWrite(newWrites[3])
+        assertEquals(MessageType.Unknown(0x0300L), newWrites[4].header.type, "the S9b re-snapshot capture request")
     }
 
     // ---- failed re-read never writes ------------------------------------------------------------

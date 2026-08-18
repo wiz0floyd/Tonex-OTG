@@ -294,6 +294,119 @@ sealed class TonexError {
     }
 
     /**
+     * [TonexController.revertActivePreset]'s replay stopped after a per-parameter write failed,
+     * partway through restoring the snapshot's 109 values.
+     *
+     * This exists as its own case, rather than surfacing the underlying [cause] directly, because
+     * FR11 requires surfacing a failure rather than assuming success, and a bare
+     * [TransportFailure]/[Timeout] from write 47 of 109 tells a caller nothing about the 46
+     * writes that *did* land. This case is what lets a caller — ultimately the UI — say something
+     * true about a revert that is now half-applied.
+     *
+     * [appliedCount] writes, for `ParameterId(0)` through `ParameterId(appliedCount - 1)`, are
+     * known to have been accepted by the transport; [failedParameter] is `ParameterId(appliedCount)`.
+     * This exactness depends on the replay writing in strict ascending
+     * [ParameterId.PRESET_RANGE] order and aborting at the first failure — see
+     * [TonexController.revertActivePreset]'s KDoc.
+     *
+     * ⚠️ **"Accepted by the transport" is not "confirmed applied by the pedal."** Issue #14
+     * explicitly rejects per-write read-back verification; this project does not pay that
+     * verification round trip. Do not read [appliedCount] as a pedal-confirmed count.
+     *
+     * The snapshot backing this revert is deliberately **not** discarded on this failure —
+     * retrying [TonexController.revertActivePreset] is safe and idempotent, since the replay
+     * always re-issues all 109 writes from the same immutable snapshot.
+     *
+     * @property presetIndex the preset the revert was restoring.
+     * @property appliedCount how many of the 109 per-parameter writes succeeded before the failure.
+     * @property totalCount the total number of parameters a full revert writes ([PresetSnapshot.PARAMETER_COUNT]).
+     * @property failedParameter the parameter whose write failed and stopped the replay.
+     * @property cause the underlying [TonexError] from the failing write, unwrapped and preserved.
+     */
+    data class RevertIncomplete(
+        val presetIndex: PresetIndex,
+        val appliedCount: Int,
+        val totalCount: Int,
+        val failedParameter: ParameterId,
+        val cause: TonexError,
+    ) : TonexError() {
+        override val message: String
+            get() = "Revert of preset ${presetIndex.value} stopped after $appliedCount of " +
+                "$totalCount parameter writes: parameter ${failedParameter.index} failed " +
+                "(${cause.message}). The preset is now in a mixed state — $appliedCount snapshot " +
+                "values were restored and the remainder are as they were. The snapshot is retained; " +
+                "retrying revert is safe."
+    }
+
+    /**
+     * [TonexController.revertActivePreset]'s replay was aborted because the pedal's active preset
+     * changed out from under it — a footswitch press, MIDI program change, or an external editor —
+     * partway through restoring the snapshot's 109 values.
+     *
+     * Per-parameter writes are **not** preset-indexed on the wire: they apply to whatever preset
+     * is active on the pedal at the moment they arrive, not the preset the snapshot was captured
+     * from. Continuing the replay after the active preset moved would have written the remaining
+     * snapshot values onto [observedPreset] — silently corrupting a preset nobody asked to touch.
+     * Aborting is the only honest outcome.
+     *
+     * This is deliberately a **separate case from [RevertIncomplete]**, not a reuse of it:
+     * [RevertIncomplete] means a write failed and nothing else is true about the world, but here
+     * nothing failed — [nextParameter] was never attempted, there is no underlying transport
+     * [cause] to carry, and — the important difference — [RevertIncomplete]'s retained-snapshot,
+     * "retrying revert is safe" guarantee does **not** hold in this scenario (see below).
+     *
+     * ⚠️ **The check that produces this error narrows the corruption window; it cannot close it.**
+     * There is no preset-indexed write on the wire, so the check and the write it guards are not,
+     * and cannot be, atomic: the pedal can change preset in the microseconds between reading
+     * [TonexController]'s active-preset state and the write frame landing. There is also inherent
+     * reporting latency — the pedal's own state update has to arrive and be parsed before that
+     * state reflects reality — so in practice a small number of writes right at the changeover may
+     * land on [observedPreset] anyway. This narrows "up to the remaining writes" down to "at most a
+     * couple," not to zero.
+     *
+     * ⚠️ **Unlike [RevertIncomplete], retrying [TonexController.revertActivePreset] right now is
+     * NOT automatically safe.** Calling it again targets whatever preset is *currently* active —
+     * [observedPreset], not [intendedPreset] — so a naive retry reverts the wrong preset. Worse,
+     * this module re-captures a snapshot on every active-preset change (including the one that
+     * caused this failure), and snapshot capture replaces any prior snapshot for that index in
+     * place. So the moment the caller re-selects [intendedPreset], the still-good snapshot for it
+     * is overwritten by a fresh capture of the *half-reverted* state this error just reported —
+     * the original values are gone at that point, not merely stale. Do not advise "reselect the
+     * preset and retry" anywhere this error is surfaced; there is no safe automatic recovery here,
+     * only an honest report of what happened (per CLAUDE.md: no elaborate automatic-recovery nets,
+     * and no guessing where the codebase can instead reject and explain).
+     *
+     * @property intendedPreset the preset the revert was restoring — the preset captured as
+     *   `active` when [TonexController.revertActivePreset] began.
+     * @property observedPreset the preset actually active on the pedal when the change was
+     *   detected, or `null` if the session tore down mid-replay (`_activePreset` is cleared on
+     *   teardown, and a disconnect mid-replay legitimately lands in this same branch).
+     * @property appliedCount how many of the 109 per-parameter writes had already gone out before
+     *   the change was detected.
+     * @property totalCount the total number of parameters a full revert writes ([PresetSnapshot.PARAMETER_COUNT]).
+     * @property nextParameter the parameter whose write was withheld — the first one this abort
+     *   prevented from reaching the wire.
+     */
+    data class ActivePresetChangedDuringRevert(
+        val intendedPreset: PresetIndex,
+        val observedPreset: PresetIndex?,
+        val appliedCount: Int,
+        val totalCount: Int,
+        val nextParameter: ParameterId,
+    ) : TonexError() {
+        override val message: String
+            get() = "Revert of preset ${intendedPreset.value} was aborted after $appliedCount of " +
+                "$totalCount parameter writes: the pedal's active preset changed to " +
+                "${observedPreset?.value?.toString() ?: "unknown (session disconnected)"} mid-revert " +
+                "(footswitch, MIDI, or an external editor). Preset ${intendedPreset.value} is now in " +
+                "a mixed state — $appliedCount snapshot values were restored and the rest are as " +
+                "they were. The remaining writes were withheld so they would not land on preset " +
+                "${observedPreset?.value?.toString() ?: "unknown"}; a small number of writes made " +
+                "around the changeover may have reached it anyway. Retrying revert now would target " +
+                "preset ${observedPreset?.value?.toString() ?: "unknown"}, not ${intendedPreset.value}."
+    }
+
+    /**
      * A value handed to [TonexController.setParameter] fell outside its [ParameterSpec.min]..[ParameterSpec.max].
      *
      * [TonexController.setParameter]'s contract is explicit that "out-of-range values are rejected

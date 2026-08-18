@@ -18,6 +18,7 @@ class ConnectionTimeoutsTest {
         assertTrue(d.getStateMillis > 0)
         assertTrue(d.stateReadMillis > 0)
         assertTrue(d.presetDetailsMillis > 0)
+        assertTrue(d.presetParametersMillis > 0)
         assertTrue(d.masterVolumeMillis > 0)
         assertTrue(d.transportWriteMillis > 0)
     }
@@ -29,6 +30,7 @@ class ConnectionTimeoutsTest {
         assertEquals(2_000L, d.getStateMillis)
         assertEquals(2_000L, d.stateReadMillis)
         assertEquals(3_000L, d.presetDetailsMillis)
+        assertEquals(3_000L, d.presetParametersMillis)
         assertEquals(2_000L, d.masterVolumeMillis)
         assertEquals(1_000L, d.transportWriteMillis)
     }
@@ -43,11 +45,31 @@ class ConnectionTimeoutsTest {
             getStateMillis = 111L,
             stateReadMillis = 222L,
             presetDetailsMillis = 1L,
+            presetParametersMillis = 1L,
             masterVolumeMillis = 1L,
             transportWriteMillis = 1L,
         )
         assertEquals(111L, custom.getStateMillis)
         assertEquals(222L, custom.stateReadMillis)
+    }
+
+    @Test
+    fun `presetDetailsMillis and presetParametersMillis are numerically equal but independently settable`() {
+        // §C of the S9b architecture plan: same reasoning as getStateMillis/stateReadMillis above
+        // -- the snapshot-capture read (S9b) is byte-identical to the name-harvest request and
+        // gets the same DEFAULT budget, but is a distinct operation string so it is diagnosable
+        // and independently tunable.
+        val custom = ConnectionTimeouts(
+            helloMillis = 1L,
+            getStateMillis = 1L,
+            stateReadMillis = 1L,
+            presetDetailsMillis = 333L,
+            presetParametersMillis = 444L,
+            masterVolumeMillis = 1L,
+            transportWriteMillis = 1L,
+        )
+        assertEquals(333L, custom.presetDetailsMillis)
+        assertEquals(444L, custom.presetParametersMillis)
     }
 
     @Test
@@ -57,6 +79,7 @@ class ConnectionTimeoutsTest {
             getStateMillis = 2L,
             stateReadMillis = 3L,
             presetDetailsMillis = 4L,
+            presetParametersMillis = 7L,
             masterVolumeMillis = 5L,
             transportWriteMillis = 6L,
         )
@@ -64,6 +87,7 @@ class ConnectionTimeoutsTest {
         assertEquals(2L, custom.getStateMillis)
         assertEquals(3L, custom.stateReadMillis)
         assertEquals(4L, custom.presetDetailsMillis)
+        assertEquals(7L, custom.presetParametersMillis)
         assertEquals(5L, custom.masterVolumeMillis)
         assertEquals(6L, custom.transportWriteMillis)
     }

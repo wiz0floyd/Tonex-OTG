@@ -6,6 +6,7 @@ import dev.tonexotg.protocol.ParameterScope
 import dev.tonexotg.protocol.PedalState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSnapshot
 import dev.tonexotg.protocol.SessionId
 import dev.tonexotg.protocol.SnapshotStore
 import dev.tonexotg.protocol.TonexController
@@ -22,6 +23,7 @@ import dev.tonexotg.protocol.message.MasterVolumeMessage
 import dev.tonexotg.protocol.message.ParameterWriteMessage
 import dev.tonexotg.protocol.message.PresetDetailsKind
 import dev.tonexotg.protocol.message.PresetNameExtractor
+import dev.tonexotg.protocol.message.PresetParameterExtractor
 import dev.tonexotg.protocol.message.RequestMasterVolumeMessage
 import dev.tonexotg.protocol.message.RequestPresetDetailsMessage
 import dev.tonexotg.protocol.message.RequestStateMessage
@@ -236,6 +238,27 @@ class DefaultTonexController(
      * when the active preset changed for a reason other than this controller's own [selectPreset]
      * call. An implausible push is dropped: the generation was already minted by [PedalState.create],
      * so nothing stale stays authorized even though this function does nothing further with it.
+     *
+     * ## S9b: re-snapshot on every active-preset change
+     *
+     * Whenever the active preset changes — self-initiated *or* external alike, per issue #14
+     * ("re-snapshot whenever the active preset changes, including changes made externally") — the
+     * outgoing preset's [parameterValues] entries are dropped synchronously (before anything can
+     * observe them against the new active preset), and a fresh capture is launched. This sits
+     * **outside** the self/external `if`/`else` above, deliberately: a self-initiated change
+     * equally invalidates the previous preset's snapshot.
+     *
+     * The capture is [scope].[launch]ed, never called inline: this function runs on the reader
+     * coroutine, and [captureSnapshotLocked] suspends on a round trip through that same reader —
+     * calling it inline would have the reader wait on itself, a guaranteed hang (and this function
+     * is not even a `suspend fun`, so it would not compile that way). The launched coroutine may
+     * then block on [operationMutex] while e.g. [selectPreset] still holds it — that is fine, the
+     * *reader* never blocks, it has already returned from this function.
+     *
+     * `session !== s` mirrors [onTransportEnded]'s `endedReaderJob` guard (PR #43 finding 4):
+     * without it, a queued capture dispatched after a teardown/reconnect could run against a fresh
+     * connection. [captureSnapshotLocked]'s own liveness/session checks are a second line of
+     * defence; keep both.
      */
     private fun applyStateUpdate(state: PedalState) {
         val read = StateBlobReader.activePreset(state)
@@ -248,6 +271,13 @@ class DefaultTonexController(
                 selfInitiatedPreset = null
             } else {
                 _events.tryEmit(TonexEvent.ExternalPresetChange(idx))
+            }
+            // ---- S9b: the previous preset's snapshot is not valid for this one -------------------
+            dropPresetScopedValues()
+            val s = session
+            scope.launch {
+                if (session !== s) return@launch // superseded by a teardown/reconnect
+                operationMutex.withLock { captureSnapshotLocked(idx) }
             }
         }
     }
@@ -538,6 +568,7 @@ class DefaultTonexController(
         // ---- Post-Ready harvest -----------------------------------------------------------------
         harvestPresetNames().orFinish { return@withLock it } // fatal — see harvestPresetNames' KDoc
         harvestMasterVolume() // best-effort, result ignored
+        captureSnapshotLocked(initialActive) // best-effort, result ignored — see D3 / §E.5 of the S9b plan
         TonexResult.Success(Unit)
     }
 
@@ -554,6 +585,11 @@ class DefaultTonexController(
      * can only be represented by inventing a placeholder (exactly the guessing "fail fast and
      * loud" forbids) or a short list (which every UI screen would have to special-case). This
      * preserves the invariant `connect() returned Success ⟺ Ready ⟺ presets has exactly 20 entries`.
+     *
+     * The awaiter matches `!full` specifically (S9b §E.6): a FULL (`0x0303`) preset-details
+     * response is never requested by this module (see [PresetParameterExtractor]'s KDoc for why)
+     * and would otherwise be a latent cross-match now that [captureSnapshotLocked] issues a second,
+     * distinct preset-details read elsewhere in this class.
      */
     private suspend fun harvestPresetNames(): TonexResult<Unit> {
         val out = ArrayList<PresetInfo>(PresetIndex.VALID_RANGE.count())
@@ -565,9 +601,10 @@ class DefaultTonexController(
                 "preset-details",
             ) { inb ->
                 commonInbound("preset-details", inb) ?: when {
-                    inb is Inbound.Message && inb.message is TonexMessage.PresetDetails ->
+                    inb is Inbound.Message && inb.message is TonexMessage.PresetDetails &&
+                        !(inb.message as TonexMessage.PresetDetails).full ->
                         TonexResult.Success((inb.message as TonexMessage.PresetDetails).payload)
-                    else -> null // StateUpdate / Other / ParameterChanged interleaved: ignore, keep waiting
+                    else -> null // StateUpdate / Other / ParameterChanged / a FULL response interleaved: ignore, keep waiting
                 }
             }.orReturn { return it }
             val name = PresetNameExtractor.extract(payload).orReturn { return it }
@@ -598,6 +635,111 @@ class DefaultTonexController(
                 else -> null
             }
         } // result deliberately discarded
+    }
+
+    // ---- snapshot capture (S9b / §E) -----------------------------------------------------------
+
+    /**
+     * Captures a [PresetSnapshot] of preset [index]'s 109 parameter values and records it in
+     * [snapshotStore] — the write-safety net's read half (issue #14). Requests
+     * [PresetDetailsKind.SUMMARY] (byte-identical to [harvestPresetNames]' own request), **not**
+     * `FULL` — see [PresetParameterExtractor]'s KDoc for why `FULL` is never the right request
+     * here.
+     *
+     * ## Caller contract
+     * The caller MUST already hold [operationMutex]. `Mutex` is not reentrant, so this function
+     * must never take it itself — [connect] calls it while already holding the lock, and the
+     * launched path in [applyStateUpdate] acquires the lock *around* the call.
+     *
+     * ## Failure semantics — best-effort, never fatal, never partial
+     * A failed capture records **nothing** in [snapshotStore] — every failure path below returns
+     * before [SnapshotStore.record] is ever reached, and [PresetParameterExtractor] structurally
+     * cannot return a partially-populated array. The user-visible consequence is that
+     * [revertActivePreset] returns [TonexError.NoSnapshotAvailable] — not a gap, that error's own
+     * KDoc anticipates exactly this case. Both callers of this function (`connect` and
+     * `applyStateUpdate`) therefore discard the result; do not make a capture failure fatal to
+     * [connect] (a pedal that answers the name harvest but not the parameter read still gives a
+     * fully usable app minus the revert affordance), and do not add a retry loop here (reject-and-
+     * explain beats patch-and-hope).
+     */
+    private suspend fun captureSnapshotLocked(index: PresetIndex): TonexResult<Unit> {
+        // 1. Re-check liveness. Load-bearing for the launched path in applyStateUpdate, which can
+        //    be dispatched after a racing disconnect()/detach.
+        if (_connectionState.value !is ConnectionState.Ready) {
+            return TonexResult.Failure(
+                TonexError.ProtocolStateViolation(_connectionState.value, "snapshot capture requires Ready"),
+            )
+        }
+        // 2. Pin the session identity — mirrors selectPreset's existing guard verbatim.
+        val s = session ?: return TonexResult.Failure(
+            TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+        )
+
+        // 3. Request and await, mirroring harvestPresetNames' awaiter shape (including the `!full`
+        //    tightening, §E.6) exactly.
+        val payload = requestAndAwait(
+            RequestPresetDetailsMessage.encode(index, PresetDetailsKind.SUMMARY),
+            timeouts.presetParametersMillis,
+            "preset-parameters",
+        ) { inb ->
+            commonInbound("preset-parameters", inb) ?: when {
+                inb is Inbound.Message && inb.message is TonexMessage.PresetDetails &&
+                    !(inb.message as TonexMessage.PresetDetails).full ->
+                    TonexResult.Success((inb.message as TonexMessage.PresetDetails).payload)
+                else -> null // StateUpdate / ParameterChanged / a FULL response interleaved: ignore, keep waiting
+            }
+        }.orReturn { return it }
+
+        // 4. Extract the 109-float block.
+        val values = PresetParameterExtractor.extract(payload).orReturn { return it }
+
+        // 5. Re-check that the capture is still about the currently active preset. The reader
+        //    coroutine can change _activePreset at any moment (a footswitch press); whether a
+        //    SUMMARY response for a NON-active preset even contains a parameter block — and if so,
+        //    whose values it holds — is unverified and unverifiable without hardware (upstream
+        //    only ever parses this block out of a response for the currently active preset). Discard
+        //    rather than guess: a stale snapshot from a different preset is worse than none
+        //    (SnapshotStore.record's own KDoc). Filed for hardware on #25.
+        if (session !== s || _activePreset.value != index) {
+            return TonexResult.Failure(
+                TonexError.ProtocolStateViolation(
+                    _connectionState.value,
+                    "the active preset changed while preset ${index.value}'s snapshot was being " +
+                        "captured; discarding the capture rather than recording a possibly-wrong snapshot",
+                ),
+            )
+        }
+
+        // 6. Publish, then record — in that order. PresetSnapshot's constructor copies `values`, so
+        //    handing it the same array applyCapturedValues just read from is safe; applyCapturedValues
+        //    itself builds a Map<ParameterId, Float> of boxed floats and does not retain the array.
+        applyCapturedValues(values)
+        snapshotStore.record(PresetSnapshot(index, s, values))
+        return TonexResult.Success(Unit)
+    }
+
+    /**
+     * Publishes a freshly captured preset's 109 values, replacing any prior PRESET-scoped entries
+     * and preserving GLOBAL-scoped ones (master volume is not part of any preset). Implements the
+     * "preset load/change" half of [parameterValues]' documented contract — before S9b only
+     * master volume and post-[setParameter] values ever landed there.
+     */
+    private fun applyCapturedValues(values: FloatArray) {
+        val captured = ParameterId.PRESET_RANGE.associate { ParameterId(it) to values[it] }
+        _parameterValues.update { previous ->
+            previous.filterKeys { it.index in ParameterId.GLOBAL_RANGE } + captured
+        }
+    }
+
+    /**
+     * Drops every PRESET-scoped entry from [parameterValues], keeping GLOBAL ones. Called
+     * synchronously the moment the active preset changes ([applyStateUpdate]): the outgoing
+     * preset's values are not the incoming preset's values, and [parameterValues]' contract is
+     * that absence means "not yet known", never "zero" — so if the subsequent capture then fails,
+     * the map is left with no preset entries rather than a stale or wrong ones.
+     */
+    private fun dropPresetScopedValues() {
+        _parameterValues.update { it.filterKeys { id -> id.index in ParameterId.GLOBAL_RANGE } }
     }
 
     // ---- disconnect() (§6.10) ------------------------------------------------------------------
@@ -710,29 +852,40 @@ class DefaultTonexController(
 
     // ---- setParameter() (§10.1) ----------------------------------------------------------------
 
-    override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = operationMutex.withLock {
-        if (_connectionState.value !is ConnectionState.Ready) {
-            return@withLock TonexResult.Failure(
-                TonexError.ProtocolStateViolation(_connectionState.value, "setParameter requires Ready"),
-            )
-        }
+    /**
+     * The single per-parameter write path, shared by [setParameter] and [revertActivePreset]'s
+     * replay: registry lookup, range rejection, PRESET/master-volume/other-global routing, the
+     * framed write, and the post-success [parameterValues] update.
+     *
+     * ## Caller contract
+     * The caller MUST already hold [operationMutex] and MUST already have verified
+     * [ConnectionState.Ready]. This function takes no lock and performs no lifecycle check —
+     * `Mutex` is not reentrant, so a version that locked internally could not be called from
+     * [revertActivePreset]'s replay loop at all (it would deadlock on the lock that loop already
+     * holds).
+     *
+     * Deliberately does NOT emit [TonexEvent.FirstDestructiveWrite]: that signal belongs to a
+     * user-initiated edit, not to a revert restoring values the user already had. See
+     * [maybeSignalFirstDestructiveWrite].
+     */
+    private suspend fun writeParameterLocked(id: ParameterId, value: Float): TonexResult<Unit> {
         // Same @JvmInline ABI-erasure hazard as PresetIndex — re-validate explicitly.
         val spec = ParameterRegistry.byIndex(id.index)
-            ?: return@withLock TonexResult.Failure(
+            ?: return TonexResult.Failure(
                 TonexError.ProtocolStateViolation(_connectionState.value, "parameter index ${id.index} is not in the registry"),
             )
 
         // Reject, do NOT clamp — TonexController.setParameter's contract is explicit about this.
         if (value < spec.min || value > spec.max) {
-            return@withLock TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, spec.max))
+            return TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, spec.max))
         }
 
         val encoded: ByteArray = when {
             spec.scope == ParameterScope.PRESET ->
-                ParameterWriteMessage.encode(id, value, capabilities).orReturn { return@withLock it }
+                ParameterWriteMessage.encode(id, value, capabilities).orReturn { return it }
             spec.enumName == "MASTER_VOLUME" ->
-                MasterVolumeMessage.encode(value, capabilities).orReturn { return@withLock it }
-            else -> return@withLock TonexResult.Failure(
+                MasterVolumeMessage.encode(value, capabilities).orReturn { return it }
+            else -> return TonexResult.Failure(
                 TonexError.ProtocolStateViolation(
                     _connectionState.value,
                     "${spec.enumName} is a global parameter other than master volume; :protocol has no write " +
@@ -742,25 +895,100 @@ class DefaultTonexController(
             )
         }
 
-        writeFramed(encoded).orReturn { return@withLock it }
+        writeFramed(encoded).orReturn { return it }
         _parameterValues.update { it + (id to value) } // AFTER success only
-        TonexResult.Success(Unit)
+        return TonexResult.Success(Unit)
     }
 
-    // ---- revertActivePreset() (§10.2) — S9's deliberate stopping point --------------------------
+    /**
+     * Fires [TonexEvent.FirstDestructiveWrite] at most once per session, after the session's first
+     * successful parameter write that actually altered a snapshotted preset. See [TonexController]
+     * and the S9b architecture plan's §F.3 for why this is a post-hoc notice rather than a
+     * pre-write gate: `events` is a zero-replay `SharedFlow` with no suspending-confirmation
+     * mechanism, a pre-write gate would have to block inside [operationMutex] (wedging every other
+     * operation for the duration of a modal dialog), and firing before the write would be
+     * dishonest when the write then fails.
+     *
+     * The four conditions below are all mandated by existing KDoc, not invented here:
+     * [SnapshotStore.hasWarnedThisSession]'s KDoc defines the triggering fact as "a parameter
+     * write against a **snapshotted** preset," which pins both the snapshot-exists condition and
+     * (with [PresetSnapshot]'s "a snapshot covers exactly the 109 PRESET-scoped parameters") the
+     * PRESET-scope condition. Master volume is excluded because it is global, not part of any
+     * preset, not captured by any snapshot, and not restored by revert — writing it destroys
+     * nothing a snapshot could have saved.
+     *
+     * Always called with [operationMutex] held, which is what makes the read-then-mark sequence
+     * below safe without further synchronisation. `markWarned()` precedes `tryEmit` so the
+     * once-per-session guarantee is structural rather than dependent on the emit succeeding.
+     */
+    private fun maybeSignalFirstDestructiveWrite(id: ParameterId) {
+        if (snapshotStore.hasWarnedThisSession()) return
+        val spec = ParameterRegistry.byIndex(id.index) ?: return
+        if (spec.scope != ParameterScope.PRESET) return // master volume is global; not part of a preset
+        val active = _activePreset.value ?: return
+        if (snapshotStore.snapshotFor(active) == null) return // "against a snapshotted preset" — SnapshotStore's own wording
+        snapshotStore.markWarned() // mark BEFORE emit: "at most once" is the contract
+        _events.tryEmit(TonexEvent.FirstDestructiveWrite(active))
+    }
+
+    override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = operationMutex.withLock {
+        if (_connectionState.value !is ConnectionState.Ready) {
+            return@withLock TonexResult.Failure(
+                TonexError.ProtocolStateViolation(_connectionState.value, "setParameter requires Ready"),
+            )
+        }
+        val result = writeParameterLocked(id, value)
+        if (result is TonexResult.Success) maybeSignalFirstDestructiveWrite(id)
+        result
+    }
+
+    // ---- revertActivePreset() (§10.2) -----------------------------------------------------------
 
     /**
-     * S9 implements this as a complete, permanent four-guard chain that returns a real typed
-     * [TonexResult.Failure] — no `TODO()`, no throw, no stub, and no misuse of an existing error
-     * case. S9b (issue #14) adds exactly one step to the end (replaying a captured [dev.tonexotg.protocol.PresetSnapshot]
-     * as per-parameter writes) — steps 1-4 below are the permanent implementation and do not
-     * change when that lands.
+     * A complete four-guard chain (S9, issue #13) followed by the replay S9b (issue #14) adds:
+     * restoring the active preset's snapshot as **per-parameter writes only, never a whole-state
+     * write**. Guards 1-4 are unchanged from S9 and verified correct and complete for S9b; only
+     * guard 4's result is now bound (a snapshot can genuinely exist, now that
+     * [captureSnapshotLocked] calls [SnapshotStore.record]) rather than discarded.
      *
-     * Step 4 (snapshot lookup) is structurally unreachable to a `Success` in S9: nothing in S9
-     * calls [SnapshotStore.record], so [SnapshotStore.snapshotFor] always returns `null` and this
-     * always ends at [TonexError.NoSnapshotAvailable]. This is not a placeholder to "fix" — both
-     * non-snapshot guards (steps 2 and 3) remain independently reachable and tested, because
-     * [capabilities] is injected.
+     * ## Guard 2 discharges issue #14's firmware-fallback prohibition in full
+     * It runs before any write, returns [TonexError.UnsupportedByFirmware]`("revert-active-preset")`,
+     * and there is no fallback branch anywhere in this function. [writeParameterLocked] →
+     * [ParameterWriteMessage.encode] independently re-checks the same capability and returns
+     * `UnsupportedByFirmware("single-parameter-write")`, so the prohibition is enforced twice, at
+     * two layers, on two distinct operation strings.
+     *
+     * ## Replay: all 109, unconditionally, ascending wire index
+     * A diff-based replay (only parameters that differ from [parameterValues]) is tempting —
+     * 109 writes typically becomes 2 — and issue #14's wording ("restores every *changed*
+     * parameter") permits it, but [parameterValues] is a local mirror that can drift from the
+     * pedal without this module knowing (the reader deliberately applies only `index == 0` of an
+     * inbound `ParameterChanged`, see [applyParameterChanged]'s KDoc): a diff computed against a
+     * drifted mirror would silently skip a parameter that genuinely needed restoring and report
+     * `Success` — a false success in the one operation whose entire job is to be trustworthy.
+     * Writing all 109 unconditionally also makes [TonexError.RevertIncomplete.appliedCount] mean
+     * something exact, and makes retrying a partial revert idempotent (see below). Ascending
+     * [ParameterId.PRESET_RANGE] order is load-bearing, not cosmetic — it is what makes
+     * `appliedCount` decodable as "`ParameterId(0)` … `ParameterId(appliedCount - 1)` were
+     * accepted."
+     *
+     * ## Partial failure: abort at the first failure, snapshot retained, retry is safe
+     * A [writeParameterLocked] failure means the transport threw, short-wrote, or timed out; the
+     * remaining parameters are overwhelmingly likely to fail identically, so this aborts rather
+     * than continuing through them (turning one clear error into a long pile-up). The snapshot is
+     * deliberately **not** discarded on this failure — because the replay always re-issues all 109
+     * writes from the same immutable snapshot, calling this function again after a
+     * [TonexError.RevertIncomplete] simply re-issues everything from scratch; nothing accumulates,
+     * nothing is skipped. No automatic retry is implemented here (CLAUDE.md: no elaborate
+     * automatic-recovery nets) — offering the user a retry is a UI-layer decision.
+     *
+     * ## The whole-state write remains structurally impossible
+     * This function reaches the wire only through [writeParameterLocked] →
+     * [ParameterWriteMessage.encode] / [MasterVolumeMessage.encode] → [writeFramed].
+     * [SetStateMessage.encode] — the only whole-state write in this module — is called at exactly
+     * one site, inside [selectPreset], and nothing here adds another.
+     *
+     * @throws never — every failure mode returns a typed [TonexResult.Failure].
      */
     override suspend fun revertActivePreset(): TonexResult<Unit> = operationMutex.withLock {
         // 1. Lifecycle.
@@ -779,13 +1007,79 @@ class DefaultTonexController(
             TonexError.ProtocolStateViolation(_connectionState.value, "the active preset is not known yet"),
         )
         // 4. A snapshot must exist for it.
-        snapshotStore.snapshotFor(active)
+        val snapshot = snapshotStore.snapshotFor(active)
             ?: return@withLock TonexResult.Failure(TonexError.NoSnapshotAvailable(active))
 
-        // 5. ── S9b INSERTS THE REPLAY HERE ──
-        //    Unreachable in S9: step 4 above always returns at the Failure, since nothing in S9
-        //    calls snapshotStore.record(). S9b replays the snapshot as per-parameter writes via
-        //    setParameter's encode path — NEVER a whole-state write (issue #14).
-        TonexResult.Failure(TonexError.NoSnapshotAvailable(active)) // unreachable; see above.
+        // 5a. Pre-validate the WHOLE snapshot before issuing a single write. A value that the
+        //     per-write range check would reject must not be discovered at parameter 47, with 46
+        //     writes already on the wire and the preset left half-reverted. The snapshot holds
+        //     values the PEDAL reported; if any captured value falls outside the registry's
+        //     bounds, that most likely means the registry's bounds are wrong for this pedal's
+        //     firmware, not that the caller did anything wrong (see #25 — ParameterRegistry
+        //     already flags two entries as pending hardware verification, e.g. VIR M2X). Refusing
+        //     up front, with zero writes, is the only outcome that is both honest and atomic —
+        //     clamping is not even reachable as a design option, since ParameterWriteMessage.encode
+        //     clamps internally regardless, so "write the captured value verbatim" is impossible
+        //     through the existing encoder either way.
+        for (i in ParameterId.PRESET_RANGE) {
+            val id = ParameterId(i)
+            val spec = ParameterRegistry.byIndex(i) ?: return@withLock TonexResult.Failure(
+                TonexError.ProtocolStateViolation(
+                    _connectionState.value,
+                    "parameter index $i is not in the registry (internal invariant violated)",
+                ),
+            )
+            val v = snapshot.valueOf(id)
+            if (v < spec.min || v > spec.max) {
+                return@withLock TonexResult.Failure(
+                    TonexError.ParameterValueOutOfRange(id, v, spec.min, spec.max),
+                )
+            }
+        }
+
+        // 5b. Replay. Per-parameter writes only, NEVER a whole-state write (issue #14). Ascending
+        //     wire index, so RevertIncomplete's appliedCount identifies exactly which parameters
+        //     landed.
+        var applied = 0
+        for (i in ParameterId.PRESET_RANGE) {
+            val id = ParameterId(i)
+            // Re-verify the target BEFORE every write, including the first. Per-parameter writes
+            // are NOT preset-indexed on the wire — they land on whatever preset is active on the
+            // pedal at the moment they arrive, not the preset this snapshot was captured from. If
+            // the pedal has moved (footswitch, MIDI program change, external editor) since `active`
+            // was captured above, every remaining write would corrupt a DIFFERENT preset than the
+            // one being reverted. Abort loudly; never continue. This lives here, in the replay
+            // loop, and NOT inside writeParameterLocked — setParameter deliberately targets
+            // "whatever preset is active right now" (correct for a live slider drag), and pushing
+            // this check into the shared write path would break that. Replay is the only caller
+            // with a pinned target preset, so the check belongs to replay alone. This narrows the
+            // corruption window; see TonexError.ActivePresetChangedDuringRevert's KDoc for why it
+            // cannot close it.
+            val now = _activePreset.value
+            if (now != active) {
+                return@withLock TonexResult.Failure(
+                    TonexError.ActivePresetChangedDuringRevert(
+                        intendedPreset = active,
+                        observedPreset = now,
+                        appliedCount = applied,
+                        totalCount = PresetSnapshot.PARAMETER_COUNT,
+                        nextParameter = id,
+                    ),
+                )
+            }
+            when (val r = writeParameterLocked(id, snapshot.valueOf(id))) {
+                is TonexResult.Success -> applied++
+                is TonexResult.Failure -> return@withLock TonexResult.Failure(
+                    TonexError.RevertIncomplete(
+                        presetIndex = active,
+                        appliedCount = applied,
+                        totalCount = PresetSnapshot.PARAMETER_COUNT,
+                        failedParameter = id,
+                        cause = r.error,
+                    ),
+                )
+            }
+        }
+        TonexResult.Success(Unit)
     }
 }
