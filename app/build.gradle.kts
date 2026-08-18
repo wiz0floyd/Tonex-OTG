@@ -70,6 +70,10 @@ dependencies {
     implementation(libs.androidx.material3)
     debugImplementation(libs.androidx.ui.tooling)
 
+    // S14 (issue #19): local preset-alias store, DataStore-backed.
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.kotlinx.coroutines.core)
+
     // Spike: non-visual Compose semantics-tree assertions via Robolectric, which runs as a
     // plain JVM unit test (`testDebugUnitTest`) rather than `connectedAndroidTest` — no
     // emulator/device required. See S15/issue #20's verification notes for why this is a
@@ -78,4 +82,5 @@ dependencies {
     testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.robolectric)
     testImplementation(libs.junit4)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
