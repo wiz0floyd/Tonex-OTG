@@ -56,9 +56,22 @@ data class ConnectionTimeouts(
          * open, `250`ms after line-state, `200`ms elsewhere, and the scattered `2`/`5`ms delays in
          * its RX loop are ESP32 task-watchdog and scheduling artifacts, not protocol requirements
          * — one of those delays' own upstream comment says exactly this ("make sure we don't trip
-         * the task watchdog"). This connection state machine paces itself naturally: every request
-         * awaits its response before the next is sent, so there is nothing for an artificial delay
-         * to protect against here.
+         * the task watchdog"). Most of this connection state machine paces itself naturally: every
+         * request awaits its response before the next is sent, so there is nothing for an
+         * artificial delay to protect against there.
+         *
+         * ⚠️ **The one deliberate exception: `revertActivePreset`'s replay (S9b, issue #14).** Its
+         * per-parameter writes are fire-and-forget — no response is awaited between them — so that
+         * loop issues up to [dev.tonexotg.protocol.PresetSnapshot.PARAMETER_COUNT] (109) writes
+         * back-to-back with zero pacing, the one place in this module the "paces itself naturally"
+         * reasoning above does not hold. No delay constant was added for it anyway: there is no
+         * measurement suggesting one is needed, and CLAUDE.md's stance against unmeasured magic
+         * numbers applies here as much as it did to the upstream delays this section already
+         * rejects. Whether an unpaced burst this size ever drops writes on real hardware is exactly
+         * the kind of question this environment cannot answer — no physical pedal is available here
+         * — so it is tracked as a hardware probe on the S9/S20 hardware-verification story (issue
+         * #25) rather than guessed at in code. If that probe finds drops, revisit this section
+         * first: it is the reasoning that would need to change, not just the replay loop.
          *
          * **No inter-byte reassembly timeout.** Issue #13 raises this as "a real framing concern
          * that belongs in the design" — here is the design position: **do not add it.** Reasoning:
