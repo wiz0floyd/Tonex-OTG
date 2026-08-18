@@ -205,18 +205,22 @@ class ProbeSession(
             transport1.close()
             return
         }
-        if (before < spec.min || before > spec.max) {
+        if (!before.isFinite() || before < spec.min || before > spec.max) {
             // DefaultTonexController.writeParameterLocked REJECTS (does not clamp) out-of-range
             // values, and the read path applies no range validation — so a pedal-reported value
             // outside the registered bounds would mean the test write lands, then the restore
             // write is rejected client-side before a single byte is sent. Abort before writing
-            // anything, same as the "before == null" guard above.
+            // anything, same as the "before == null" guard above. The explicit isFinite() check
+            // is required because NaN < x and NaN > x are both false — a NaN before value would
+            // otherwise slide straight through the range comparison. See issue #25,
+            // opus-rereviewer-probe25, B2 checkpoint 3/5.
             log.error(
                 "Write test: current value of $writeTestParameterEnumName ($before ${spec.unit}) is OUTSIDE " +
-                    "the registered range (${spec.min}..${spec.max} ${spec.unit}) — refusing to write, " +
-                    "because the restore write would be rejected client-side after the test write already " +
-                    "landed. This itself is a finding: this firmware reports $writeTestParameterEnumName " +
-                    "outside ParameterRegistry's bounds. Aborting; nothing was written.",
+                    "the registered range (${spec.min}..${spec.max} ${spec.unit}) or not finite — refusing to " +
+                    "write, because the restore write would be rejected client-side after the test write " +
+                    "already landed. This itself is a finding: this firmware reports " +
+                    "$writeTestParameterEnumName outside ParameterRegistry's bounds. Aborting; nothing was " +
+                    "written.",
             )
             controller1.disconnect()
             transport1.close()

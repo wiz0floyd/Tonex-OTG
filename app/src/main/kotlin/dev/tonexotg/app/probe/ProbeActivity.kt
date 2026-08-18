@@ -39,7 +39,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
@@ -73,7 +72,22 @@ class ProbeActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        scope.cancel()
+        // Deliberately NOT scope.cancel() here. This is a one-shot diagnostic Activity, not a
+        // production app: DefaultTonexController.startReader launches its reader coroutine on
+        // this same scope, and cancelling the scope from onDestroy (back press, Home + system
+        // reclaim, etc.) races runWriteTest's cycle-2 reconnect-and-restore in two ways that a
+        // withContext(NonCancellable) block inside ProbeSession cannot fix on its own: (a) a
+        // cancellation landing before that block is reached (e.g. during the preceding
+        // disconnect()'s cancelAndJoin) throws immediately, and (b) even once inside the block,
+        // controller2.connect() starts its reader via scope.launch on this same
+        // cancelled-or-cancelling scope, so the reader never runs, the Hello handshake times out,
+        // and the restore is skipped. See issue #25, opus-rereviewer-probe25, B1 checkpoint 2/5.
+        // Every operation here is already bounded by ConnectionTimeouts, so the reader and any
+        // in-flight probe work finish on their own even after the Activity is gone, and ProbeLog
+        // mirrors every entry to logcat so results survive independently of the Activity's
+        // lifecycle. This works specifically because the UsbDeviceConnection is deliberately NOT
+        // closed here either — it's only released by the explicit "Release USB connection"
+        // button — so the transport stays usable for the reader/restore to finish.
     }
 }
 
