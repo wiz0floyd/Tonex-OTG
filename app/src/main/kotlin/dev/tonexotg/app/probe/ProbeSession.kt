@@ -25,7 +25,11 @@ class ProbeSession(
     private val log: ProbeLog,
 ) {
 
-    /** The parameter this session's write test targets — see [findWriteTestCandidate]'s KDoc. */
+    /**
+     * The parameter this session's write test targets: a single mid-band EQ level. Deliberately
+     * not master volume (a global, not preset-scoped) and not anything preset-identity-related —
+     * see issue #25 §6 and [ParameterRegistry] for the full field list this was chosen from.
+     */
     val writeTestParameterEnumName: String = "EQ_MID"
 
     /**
