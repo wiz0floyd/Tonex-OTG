@@ -40,6 +40,31 @@
         </activity>
 
         <!--
+          S12 (issue #17): auto-launches when the pedal is physically attached, matched by
+          device_filter.xml's decimal VID/PID (6499/209 — see that file's own comment for why
+          decimal, not hex). USB_DEVICE_ATTACHED can only target an <activity>, never a
+          <service> — see UsbAttachTrampolineActivity's KDoc — hence this no-display trampoline
+          rather than starting a (nonexistent, pre-S13) service directly. android:exported="true"
+          is required here: the system resolves this Activity as the intent-filter's target from
+          system_server, which requires it to be visible the same way any other implicit-intent
+          target activity would be.
+        -->
+        <activity
+            android:name=".usb.connection.UsbAttachTrampolineActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="${applicationId}.usbattach">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+
+        <!--
           ⚠️ DIAGNOSTIC-ONLY (S20 hardware probe, issue #25). Not part of the app's real
           navigation — see dev.tonexotg.app.probe's KDoc. A standalone launcher activity so the
           product owner can run it directly from the device's app drawer, separate from
