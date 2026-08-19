@@ -399,6 +399,36 @@ class DefaultTonexControllerRevertTest {
         assertEquals(fake.writtenMessages().size, writesBefore, "zero writes when pre-validation rejects the snapshot")
     }
 
+    // ---- a snapshot from a foreign session is rejected, not replayed (Opus review non-blocking ---
+    // ---- gap, issue #46 PR: revert-side depth on top of the capture-side sessionId guard) --------
+
+    @Test
+    fun `a snapshot stamped with a foreign session fails NoSnapshotAvailable, zero writes`() = runTest {
+        val fake = FakeTonexTransport()
+        val store = InMemorySnapshotStore()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            snapshotStore = store,
+        )
+        connectToReady(controller, fake) // normal capture: records a real snapshot under the live session
+        // Overwrite it with an otherwise-valid snapshot stamped with an UNRELATED session -- exactly
+        // what a cross-session phantom snapshot (the capture-side race captureSnapshotLocked's own
+        // sessionId guard closes) would look like if one ever did land in the store. revertActivePreset
+        // must refuse to replay it rather than silently restoring a previous session's values onto
+        // this session's preset -- belt-and-braces on top of the capture-side fix, so this guard
+        // needs its own test or a future edit could delete it with the suite staying green.
+        store.record(PresetSnapshot(activeIndex, SessionId.create(), snapshotValues()))
+        val writesBefore = fake.writtenMessages().size
+
+        val result = controller.revertActivePreset()
+
+        val error = (result as TonexResult.Failure).error
+        val noSnapshot = assertIs<TonexError.NoSnapshotAvailable>(error)
+        assertEquals(activeIndex, noSnapshot.presetIndex)
+        assertEquals(fake.writtenMessages().size, writesBefore, "zero writes when the snapshot belongs to a foreign session")
+    }
+
     // ---- revert never emits FirstDestructiveWrite -----------------------------------------------
 
     @Test
