@@ -10,6 +10,26 @@
         android:name="android.hardware.usb.host"
         android:required="false" />
 
+    <!--
+      S13 (issue #18): UsbConnectionService's foreground-service requirements. FOREGROUND_SERVICE
+      is the general FGS permission every foreground service needs since API 28;
+      FOREGROUND_SERVICE_CONNECTED_DEVICE is the per-type permission the `connectedDevice`
+      foreground service type itself requires since API 34 (both are normal-protection,
+      auto-granted at install — no runtime request needed). WAKE_LOCK backs the service's
+      PARTIAL_WAKE_LOCK (see UsbConnectionService's KDoc, "Wakelock"). POST_NOTIFICATIONS is the
+      API 33+ runtime permission for the service's status notification to actually display —
+      declared here so the manifest is honest about what the notification needs, but this story
+      does not add any runtime request flow for it (no UI exists yet to host that prompt — S16-19
+      are gated on D2, issue #6). If it's never granted, the foreground service still starts and
+      runs (Android does not block FGS start on missing POST_NOTIFICATIONS), it just runs with no
+      visible notification — an acceptable, documented gap for this story rather than scope creep
+      into building a permission-request UI.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
@@ -63,6 +83,19 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!--
+          S13 (issue #18): keeps the USB session alive across screen-off/backgrounding. Declared
+          `connectedDevice` per the issue's guidance — see UsbConnectionService's KDoc for the
+          full prerequisite/risk discussion. `android:exported="false"`: nothing outside this app
+          ever starts this service directly; UsbAttachTrampolineActivity (a foreground context,
+          per API 31+'s background-start restriction — see UsbConnectionService's KDoc) is the
+          only starter.
+        -->
+        <service
+            android:name=".usb.connection.UsbConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!--
           ⚠️ DIAGNOSTIC-ONLY (S20 hardware probe, issue #25). Not part of the app's real
