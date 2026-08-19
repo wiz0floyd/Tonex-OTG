@@ -3,6 +3,10 @@
 Guidance for any Claude Code session or subagent working in this repo. This
 applies to the orchestrating session and every dispatched agent alike.
 
+## Requirements
+
+Find/Install android-sdk at the start of any session.
+
 ## What this project is
 
 A hobby project, not a professional or gig-grade deliverable. Full context
