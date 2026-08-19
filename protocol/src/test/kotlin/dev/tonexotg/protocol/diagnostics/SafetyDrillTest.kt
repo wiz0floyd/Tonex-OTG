@@ -355,4 +355,137 @@ class SafetyDrillTest {
         val result = drillDeferred.await()
         assertIs<TonexResult.Failure>(result)
     }
+
+    // ---- M1 (Opus review): raw captures serialize against the controller's own operations ------
+
+    @Test
+    fun `captureStateBlob given a controller does not write while the controller's own operation holds the lock`() = runTest {
+        val fake = FakeTonexTransport()
+        val tap = MessageCaptureTap(fake)
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        val connectDeferred = async { controller.connect(tap) }
+        driveToReady(fake, activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)
+        connectDeferred.await()
+        val writesBeforeLock = fake.written.size
+
+        // Simulate a controller operation (e.g. the post-preset-change snapshot capture
+        // applyStateUpdate launches) holding operationMutex via the same withOperationLock hook
+        // this drill uses -- exercising the mutex itself is what matters here, not which real
+        // controller method acquires it.
+        val lockAcquired = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val releaseLock = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val lockHolder = launch {
+            controller.withOperationLock {
+                lockAcquired.complete(Unit)
+                releaseLock.await()
+            }
+        }
+        testScheduler.runCurrent()
+        assertTrue(lockAcquired.isCompleted, "lock holder must have acquired the mutex before the drill's capture starts")
+
+        // Start the raw capture WHILE the lock is held. It must block before writing anything --
+        // if it wrote regardless, this would be exactly the M1 race (a raw request going out while
+        // a controller-owned request/response round trip is already in flight).
+        val captureDeferred = async { captureStateBlob(fake, tap, 5_000, controller) }
+        testScheduler.runCurrent()
+        assertEquals(
+            writesBeforeLock,
+            fake.written.size,
+            "captureStateBlob must not write to the transport while withOperationLock's lock is held elsewhere",
+        )
+
+        // Release the lock -- now the capture proceeds and can complete normally.
+        releaseLock.complete(Unit)
+        testScheduler.runCurrent()
+        lockHolder.join()
+        testScheduler.runCurrent()
+        assertEquals(writesBeforeLock + 1, fake.written.size, "the capture's write should now have gone out")
+
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)))
+        testScheduler.runCurrent()
+
+        val result = captureDeferred.await()
+        assertIs<TonexResult.Success<ByteArray>>(result)
+    }
+
+    @Test
+    fun `a controller operation does not proceed while a controller-scoped raw capture holds the lock`() = runTest {
+        val fake = FakeTonexTransport()
+        val tap = MessageCaptureTap(fake)
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        val connectDeferred = async { controller.connect(tap) }
+        driveToReady(fake, activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)
+        connectDeferred.await()
+        val writesBeforeCapture = fake.written.size
+
+        // Start a controller-scoped raw capture and let it acquire the lock, but never answer its
+        // request -- it now holds operationMutex indefinitely, exactly like a controller operation
+        // mid-round-trip would.
+        val captureDeferred = async { captureStateBlob(fake, tap, 5_000, controller) }
+        testScheduler.runCurrent()
+        assertEquals(writesBeforeCapture + 1, fake.written.size, "the capture's own request should have gone out")
+
+        // A real controller operation (selectPreset) attempted concurrently must not write anything
+        // of its own until the capture above releases the lock -- otherwise the two requests could
+        // be outstanding on the wire at once, exactly the hazard M1 named.
+        val selectDeferred = async { controller.selectPreset(PresetIndex(5)) }
+        testScheduler.runCurrent()
+        assertEquals(
+            writesBeforeCapture + 1,
+            fake.written.size,
+            "selectPreset must not write anything while a controller-scoped raw capture still holds the lock",
+        )
+
+        // Answer the capture's request -- it releases the lock, letting selectPreset proceed.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)))
+        testScheduler.runCurrent()
+        captureDeferred.await().let { assertIs<TonexResult.Success<ByteArray>>(it) }
+
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)))
+        testScheduler.runCurrent()
+        selectDeferred.await().let { assertIs<TonexResult.Success<Unit>>(it) }
+    }
+
+    // ---- M4 (Opus review): runRevertDrill hands the pre-edit baseline to `edit` -----------------
+
+    @Test
+    fun `runRevertDrill passes the pre-edit baseline to edit, before any write`() = runTest {
+        val fake = FakeTonexTransport()
+        val tap = MessageCaptureTap(fake)
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+        )
+        val connectDeferred = async { controller.connect(tap) }
+        driveToReady(fake, activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)
+        connectDeferred.await()
+
+        var observedBaseline: PresetBackupEntry? = null
+        val drillDeferred = async {
+            runRevertDrill(controller, tap, tap, 5_000) { beforeEntry ->
+                observedBaseline = beforeEntry
+                controller.setParameter(ParameterId(3), 0f)
+            }
+        }
+
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)))
+        testScheduler.runCurrent()
+        fake.emitMessage(presetDetailsSummaryWithParameters("Preset 0", snapshotValues()))
+        testScheduler.runCurrent()
+
+        // By the time the edit callback ran, the pre-edit baseline must already have been
+        // available to log -- M4's whole point: a caller must not need edit() or the revert to
+        // succeed before it can recover/log the baseline.
+        assertEquals("Preset 0", observedBaseline?.name)
+        assertEquals(snapshotValues().toList(), observedBaseline?.parameters?.toList())
+
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)))
+        testScheduler.runCurrent()
+        fake.emitMessage(presetDetailsSummaryWithParameters("Preset 0", snapshotValues()))
+        testScheduler.runCurrent()
+
+        drillDeferred.await()
+    }
 }
