@@ -10,6 +10,7 @@ import dev.tonexotg.protocol.TonexEvent
 import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.TonexTransport
 import dev.tonexotg.protocol.params.ParameterRegistry
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -55,6 +56,22 @@ class FakeTonexController : TonexController {
     /** What [revertActivePreset] returns; defaults to success. */
     var revertResult: TonexResult<Unit> = TonexResult.Success(Unit)
 
+    /**
+     * Test helper (opt-in, one-shot): arms the *next* [setParameter] call to signal [started] the
+     * moment it begins blocking, then suspend until [release] completes — the same
+     * in-flight-write pattern [ParameterWriteThrottlerTest] uses directly against the throttler,
+     * lifted to the controller so a view-model-level test can deterministically hold one write
+     * "in flight" while it exercises what happens to a second, still-buffered value (e.g. D3
+     * §6.3's cancellation on an external preset change). Consumed after one use; set
+     * [FakeTonexController.nextSetParameterGate] again for another gated call.
+     */
+    class SetParameterGate {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+    }
+
+    var nextSetParameterGate: SetParameterGate? = null
+
     override suspend fun connect(transport: TonexTransport): TonexResult<Unit> = TonexResult.Success(Unit)
 
     override suspend fun disconnect() {
@@ -67,7 +84,17 @@ class FakeTonexController : TonexController {
     }
 
     override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> {
+        // Record the call BEFORE gating: an "in-flight" write, per ParameterWriteThrottler's own
+        // KDoc, is one that "already left this process" - the call is already recorded/sent, and
+        // only completion (the return) is what's still pending. Gating before recording would
+        // instead model a write that hasn't been sent yet, which is a different scenario (and one
+        // cancelAll() legitimately IS allowed to drop).
         setParameterCalls.add(id to value)
+        nextSetParameterGate?.let { gate ->
+            nextSetParameterGate = null
+            gate.started.complete(Unit)
+            gate.release.await()
+        }
         val spec = ParameterRegistry.byIndex(id.index)
         if (spec != null && (value < spec.min || value > spec.max)) {
             return TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, spec.max))
@@ -98,5 +125,10 @@ class FakeTonexController : TonexController {
     /** Test helper: moves the active preset without going through [selectPreset] (simulates FR6). */
     fun setActivePresetExternally(index: PresetIndex) {
         _activePreset.value = index
+    }
+
+    /** Test helper: seeds [presets] directly, as if just harvested after reaching [ConnectionState.Ready]. */
+    fun seedPresets(presets: List<PresetInfo>) {
+        _presets.value = presets
     }
 }
