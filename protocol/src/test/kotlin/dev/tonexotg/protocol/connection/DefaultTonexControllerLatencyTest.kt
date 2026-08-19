@@ -28,6 +28,13 @@ import kotlin.test.assertIs
  * that number can only come from a real pedal (issue #26's cloud-environment limitation), which is
  * exactly why `dev.tonexotg.app.probe.ProbeSession` exists to wrap these same real controller calls
  * for a human to run.
+ *
+ * Note on units: production's [ElapsedClock.SYSTEM] reports microseconds (see its KDoc), but this
+ * file's injected clock reports `testScheduler.currentTime` directly, which is the coroutines test
+ * scheduler's own virtual-millisecond tick count. These tests only prove [measureLatency]'s
+ * `end - start` arithmetic is correct against *some* injected clock — the numbers below (75, 20,
+ * 60, ...) are scheduler ticks matching [FakeTonexTransport.writeDelayMillis], not real
+ * microseconds, regardless of the [TimedResult.elapsedMicros] field name.
  */
 class DefaultTonexControllerLatencyTest {
 
@@ -51,7 +58,7 @@ class DefaultTonexControllerLatencyTest {
 
         assertIs<TonexResult.Success<Unit>>(timed.value)
         // setParameter issues exactly one transport write (no response is awaited) -- one 75ms delay.
-        assertEquals(75L, timed.elapsedMillis)
+        assertEquals(75L, timed.elapsedMicros)
     }
 
     @Test
@@ -74,7 +81,7 @@ class DefaultTonexControllerLatencyTest {
         assertIs<TonexResult.Failure>(timed.value)
         // writeThrows fires before the injected delay, so this proves measureLatency reports a
         // real (here, near-zero) elapsed time on the failure path too, not just the happy path.
-        assertEquals(0L, timed.elapsedMillis)
+        assertEquals(0L, timed.elapsedMicros)
     }
 
     @Test
@@ -98,6 +105,6 @@ class DefaultTonexControllerLatencyTest {
         val timed = timedDeferred.await()
 
         assertIs<TonexResult.Success<Unit>>(timed.value)
-        assertEquals(60L, timed.elapsedMillis, "expected two 30ms writes (re-read request, then the state write)")
+        assertEquals(60L, timed.elapsedMicros, "expected two 30ms writes (re-read request, then the state write)")
     }
 }

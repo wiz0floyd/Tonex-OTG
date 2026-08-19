@@ -16,14 +16,18 @@ package dev.tonexotg.protocol.diagnostics
  */
 
 /**
- * A source of "now," in milliseconds, injectable so [measureLatency] can be exercised against a
+ * A source of "now," in microseconds, injectable so [measureLatency] can be exercised against a
  * virtual clock in tests (e.g. `kotlinx.coroutines.test.TestScope.currentTime`, which advances
  * deterministically with a [FakeTonexTransport]-simulated `delay()`, unlike a real wall clock
  * inside `runTest`'s auto-advanced virtual time) without ever sleeping the test thread for real.
  * Production callers use [SYSTEM], which is what actually runs on a real pedal connection.
+ *
+ * Microseconds, not milliseconds: a bulk USB transfer of a few dozen bytes plausibly completes in
+ * well under 1ms, and millisecond-truncated samples collapse to 0 and destroy the signal a burst
+ * measurement ([BurstStats]) depends on — see issue #26's adversarial review, finding S2.
  */
 fun interface ElapsedClock {
-    fun nowMillis(): Long
+    fun nowMicros(): Long
 
     companion object {
         /**
@@ -31,12 +35,12 @@ fun interface ElapsedClock {
          * duration, not wall-clock position, and must not be perturbed by a concurrent clock
          * adjustment (NTP sync, user changing the device clock) mid-measurement.
          */
-        val SYSTEM: ElapsedClock = ElapsedClock { System.nanoTime() / 1_000_000L }
+        val SYSTEM: ElapsedClock = ElapsedClock { System.nanoTime() / 1_000L }
     }
 }
 
-/** The result of one [measureLatency] call: [value] is whatever [block] returned, timed by [elapsedMillis]. */
-data class TimedResult<T>(val value: T, val elapsedMillis: Long)
+/** The result of one [measureLatency] call: [value] is whatever [block] returned, timed by [elapsedMicros]. */
+data class TimedResult<T>(val value: T, val elapsedMicros: Long)
 
 /**
  * Runs [block], returning its result paired with how long it took per [clock]. [clock] defaults to
@@ -51,14 +55,14 @@ data class TimedResult<T>(val value: T, val elapsedMillis: Long)
  * inventing a second one.
  */
 suspend fun <T> measureLatency(clock: ElapsedClock = ElapsedClock.SYSTEM, block: suspend () -> T): TimedResult<T> {
-    val start = clock.nowMillis()
+    val start = clock.nowMicros()
     val value = block()
-    val end = clock.nowMillis()
+    val end = clock.nowMicros()
     return TimedResult(value, end - start)
 }
 
 /**
- * Summary statistics over a burst of [measureLatency] samples (millis each) — issue #26's
+ * Summary statistics over a burst of [measureLatency] samples (microseconds each) — issue #26's
  * "sustained slider-drag throughput" measurement: does per-call latency grow or does work
  * queue/backlog over a rapid-fire burst of writes with no pacing between them?
  *
@@ -68,21 +72,27 @@ suspend fun <T> measureLatency(clock: ElapsedClock = ElapsedClock.SYSTEM, block:
  *
  * [growthRatio] compares the mean of the last third of the burst against the mean of the first
  * third: a ratio near 1.0 means latency held steady across the burst; growing well above 1.0 is
- * exactly the "queues/backs up under sustained load" signal issue #26 asks about. [firstThirdMeanMillis]
- * and [lastThirdMeanMillis] are reported alongside it so a human reading the log sees the actual
+ * exactly the "queues/backs up under sustained load" signal issue #26 asks about. [firstThirdMeanMicros]
+ * and [lastThirdMeanMicros] are reported alongside it so a human reading the log sees the actual
  * numbers, not just the derived ratio — the raw values are the ground truth; [growthRatio] is a
  * convenience.
+ *
+ * [growthRatio] is [Double.NaN] when the first-third mean is exactly zero (division by zero) —
+ * this is a genuine "cannot compute a ratio" state, not "no growth," and callers must not collapse
+ * it into [backlogSuspected]`== false`'s "steady" framing. See issue #26's adversarial review,
+ * finding S1: `ProbeSession` reports this as its own distinct "ratio undefined" state rather than
+ * folding it into the "no backlog signal" message.
  */
 data class BurstStats(
     val count: Int,
-    val minMillis: Long,
-    val maxMillis: Long,
-    val meanMillis: Double,
-    val p50Millis: Long,
-    val p90Millis: Long,
-    val p99Millis: Long,
-    val firstThirdMeanMillis: Double,
-    val lastThirdMeanMillis: Double,
+    val minMicros: Long,
+    val maxMicros: Long,
+    val meanMicros: Double,
+    val p50Micros: Long,
+    val p90Micros: Long,
+    val p99Micros: Long,
+    val firstThirdMeanMicros: Double,
+    val lastThirdMeanMicros: Double,
     val growthRatio: Double,
 ) {
     /**
@@ -91,7 +101,9 @@ data class BurstStats(
      * distinction [dev.tonexotg.protocol.connection.ConnectionTimeouts.DEFAULT]'s own KDoc draws
      * for its timing constants. [GROWTH_RATIO_FLAG_THRESHOLD] just decides whether the log calls
      * this out as a finding; the raw [growthRatio] and per-sample numbers are always logged
-     * regardless, so a human is never dependent on this flag's threshold being "right."
+     * regardless, so a human is never dependent on this flag's threshold being "right." `false`
+     * when [growthRatio] is non-finite (see class KDoc) — that case is a distinct "undefined," not
+     * a positive "no backlog" result, and callers must report it as such rather than via this flag.
      */
     val backlogSuspected: Boolean get() = growthRatio.isFinite() && growthRatio >= GROWTH_RATIO_FLAG_THRESHOLD
 
@@ -99,25 +111,25 @@ data class BurstStats(
         /** See [backlogSuspected]'s KDoc — a diagnostic-log threshold, not a measured or protocol value. */
         const val GROWTH_RATIO_FLAG_THRESHOLD: Double = 1.5
 
-        /** @throws IllegalArgumentException if [samplesMillis] is empty — there is no meaningful summary of zero samples. */
-        fun of(samplesMillis: List<Long>): BurstStats {
-            require(samplesMillis.isNotEmpty()) { "BurstStats.of: samplesMillis must not be empty" }
-            val sorted = samplesMillis.sorted()
+        /** @throws IllegalArgumentException if [samplesMicros] is empty — there is no meaningful summary of zero samples. */
+        fun of(samplesMicros: List<Long>): BurstStats {
+            require(samplesMicros.isNotEmpty()) { "BurstStats.of: samplesMicros must not be empty" }
+            val sorted = samplesMicros.sorted()
             val thirdSize = maxOf(1, sorted.size / 3)
-            val firstThird = samplesMillis.take(thirdSize)
-            val lastThird = samplesMillis.takeLast(thirdSize)
+            val firstThird = samplesMicros.take(thirdSize)
+            val lastThird = samplesMicros.takeLast(thirdSize)
             val firstThirdMean = firstThird.average()
             val lastThirdMean = lastThird.average()
             return BurstStats(
                 count = sorted.size,
-                minMillis = sorted.first(),
-                maxMillis = sorted.last(),
-                meanMillis = samplesMillis.average(),
-                p50Millis = percentile(sorted, 50),
-                p90Millis = percentile(sorted, 90),
-                p99Millis = percentile(sorted, 99),
-                firstThirdMeanMillis = firstThirdMean,
-                lastThirdMeanMillis = lastThirdMean,
+                minMicros = sorted.first(),
+                maxMicros = sorted.last(),
+                meanMicros = samplesMicros.average(),
+                p50Micros = percentile(sorted, 50),
+                p90Micros = percentile(sorted, 90),
+                p99Micros = percentile(sorted, 99),
+                firstThirdMeanMicros = firstThirdMean,
+                lastThirdMeanMicros = lastThirdMean,
                 growthRatio = if (firstThirdMean > 0.0) lastThirdMean / firstThirdMean else Double.NaN,
             )
         }

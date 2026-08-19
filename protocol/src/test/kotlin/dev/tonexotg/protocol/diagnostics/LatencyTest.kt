@@ -30,7 +30,7 @@ class LatencyTest {
         }
 
         assertEquals("the value", result.value)
-        assertEquals(42L, result.elapsedMillis)
+        assertEquals(42L, result.elapsedMicros)
     }
 
     @Test
@@ -38,7 +38,7 @@ class LatencyTest {
         val result = measureLatency { 7 }
 
         assertEquals(7, result.value)
-        assertTrue(result.elapsedMillis >= 0, "elapsed time must never be negative")
+        assertTrue(result.elapsedMicros >= 0, "elapsed time must never be negative")
     }
 
     @Test
@@ -59,12 +59,12 @@ class LatencyTest {
         val stats = BurstStats.of(listOf(50L))
 
         assertEquals(1, stats.count)
-        assertEquals(50L, stats.minMillis)
-        assertEquals(50L, stats.maxMillis)
-        assertEquals(50.0, stats.meanMillis)
-        assertEquals(50L, stats.p50Millis)
-        assertEquals(50L, stats.p90Millis)
-        assertEquals(50L, stats.p99Millis)
+        assertEquals(50L, stats.minMicros)
+        assertEquals(50L, stats.maxMicros)
+        assertEquals(50.0, stats.meanMicros)
+        assertEquals(50L, stats.p50Micros)
+        assertEquals(50L, stats.p90Micros)
+        assertEquals(50L, stats.p99Micros)
     }
 
     @Test
@@ -81,12 +81,12 @@ class LatencyTest {
         val stats = BurstStats.of(samples)
 
         assertEquals(10, stats.count)
-        assertEquals(10L, stats.minMillis)
-        assertEquals(100L, stats.maxMillis)
-        assertEquals(55.0, stats.meanMillis)
-        assertEquals(50L, stats.p50Millis)
-        assertEquals(90L, stats.p90Millis)
-        assertEquals(100L, stats.p99Millis)
+        assertEquals(10L, stats.minMicros)
+        assertEquals(100L, stats.maxMicros)
+        assertEquals(55.0, stats.meanMicros)
+        assertEquals(50L, stats.p50Micros)
+        assertEquals(90L, stats.p90Micros)
+        assertEquals(100L, stats.p99Micros)
     }
 
     @Test
@@ -94,11 +94,11 @@ class LatencyTest {
         val ascending = BurstStats.of((1..10).map { it * 10L })
         val shuffled = BurstStats.of(listOf(30L, 100L, 10L, 70L, 50L, 20L, 90L, 40L, 80L, 60L))
 
-        assertEquals(ascending.minMillis, shuffled.minMillis)
-        assertEquals(ascending.maxMillis, shuffled.maxMillis)
-        assertEquals(ascending.p50Millis, shuffled.p50Millis)
-        assertEquals(ascending.p90Millis, shuffled.p90Millis)
-        assertEquals(ascending.p99Millis, shuffled.p99Millis)
+        assertEquals(ascending.minMicros, shuffled.minMicros)
+        assertEquals(ascending.maxMicros, shuffled.maxMicros)
+        assertEquals(ascending.p50Micros, shuffled.p50Micros)
+        assertEquals(ascending.p90Micros, shuffled.p90Micros)
+        assertEquals(ascending.p99Micros, shuffled.p99Micros)
     }
 
     @Test
@@ -108,8 +108,8 @@ class LatencyTest {
 
         val stats = BurstStats.of(samples)
 
-        assertEquals(20.0, stats.firstThirdMeanMillis)
-        assertEquals(80.0, stats.lastThirdMeanMillis)
+        assertEquals(20.0, stats.firstThirdMeanMicros)
+        assertEquals(80.0, stats.lastThirdMeanMicros)
         assertEquals(4.0, stats.growthRatio)
         assertTrue(stats.backlogSuspected, "a 4x growth ratio must be flagged")
     }

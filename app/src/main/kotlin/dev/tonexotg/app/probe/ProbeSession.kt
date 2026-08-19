@@ -17,6 +17,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
+private const val MICROS_PER_MILLI = 1_000.0
+
 /**
  * ⚠️ DIAGNOSTIC-ONLY. Orchestrates the S20 hardware probe (issue #25) against a real pedal: the
  * read-only pass (§1-5 of the issue's brief) and, separately and only on explicit confirmation,
@@ -422,9 +424,28 @@ class ProbeSession(
             return
         }
 
-        measurePresetChangeLatency(controller, originalActive)
-        measureParameterWriteLatency(controller, id, spec)
-        measureSliderDragBurst(controller, id, spec)
+        // Wrapped in NonCancellable: each sub-measurement below changes pedal state (preset,
+        // parameter value) and then restores it, exactly like runWriteTest's cycle 2 -- see that
+        // function's KDoc for why a plain cancellation unwind here (ProbeActivity's scope dying on
+        // back press or system reclaim mid-measurement) would silently skip a restore and leave the
+        // pedal on the wrong preset or an extreme parameter value. See issue #26's adversarial
+        // review, finding S3.
+        withContext(NonCancellable) {
+            // Suppress LoggingTonexTransport's per-write hex-dump logging for the timed calls only
+            // -- that string building plus ProbeLog's list-copy append are systematic overhead
+            // sitting inside the very window being measured, and specifically bias the burst's
+            // growth-ratio signal upward as the log grows. Connect/disconnect traffic above and
+            // below this block is still logged normally. See issue #26's adversarial review,
+            // finding S4.
+            transport.quiet = true
+            try {
+                measurePresetChangeLatency(controller, originalActive)
+                measureParameterWriteLatency(controller, id, spec)
+                measureSliderDragBurst(controller, id, spec)
+            } finally {
+                transport.quiet = false
+            }
+        }
 
         controller.disconnect()
         transport.close()
@@ -449,13 +470,14 @@ class ProbeSession(
     }
 
     private fun logPresetChangeResult(timed: TimedResult<TonexResult<Unit>>, from: Int, to: Int) {
+        val ms = timed.elapsedMicros / MICROS_PER_MILLI
         when (val result = timed.value) {
             is TonexResult.Success -> log.finding(
-                "Preset-change latency (preset $from -> $to): ${timed.elapsedMillis} ms (selectPreset() call to " +
+                "Preset-change latency (preset $from -> $to): ${"%.3f".format(ms)} ms (selectPreset() call to " +
                     "completion — informational only, no pass/fail target; see issue #26).",
             )
             is TonexResult.Failure -> log.error(
-                "Preset-change latency (preset $from -> $to): selectPreset() FAILED after ${timed.elapsedMillis} ms: " +
+                "Preset-change latency (preset $from -> $to): selectPreset() FAILED after ${"%.3f".format(ms)} ms: " +
                     "${result.error.message}",
             )
         }
@@ -488,16 +510,17 @@ class ProbeSession(
     }
 
     private fun logParamWriteResult(timed: TimedResult<TonexResult<Unit>>, from: Float, to: Float, unit: String) {
+        val ms = timed.elapsedMicros / MICROS_PER_MILLI
         when (val result = timed.value) {
             is TonexResult.Success -> log.finding(
-                "Parameter-write latency ($writeTestParameterEnumName $from -> $to $unit): ${timed.elapsedMillis} ms " +
+                "Parameter-write latency ($writeTestParameterEnumName $from -> $to $unit): ${"%.3f".format(ms)} ms " +
                     "(setParameter() call to completion. This is a fire-and-forget transport write — no pedal " +
                     "acknowledgement is awaited, so this measures 'accepted by the transport', not a confirmed " +
                     "pedal-applied round trip. Informational only, no pass/fail target; see issue #26).",
             )
             is TonexResult.Failure -> log.error(
                 "Parameter-write latency ($writeTestParameterEnumName $from -> $to $unit): setParameter() FAILED " +
-                    "after ${timed.elapsedMillis} ms: ${result.error.message}",
+                    "after ${"%.3f".format(ms)} ms: ${result.error.message}",
             )
         }
     }
@@ -532,16 +555,22 @@ class ProbeSession(
         val samples = mutableListOf<Long>()
         var completedCalls = 0
         for (i in 0 until SLIDER_DRAG_STEPS) {
-            val value = spec.min + (spec.max - spec.min) * i / (SLIDER_DRAG_STEPS - 1)
+            // .coerceIn guards against the final step landing fractionally outside [spec.min,
+            // spec.max] by float rounding (i / (SLIDER_DRAG_STEPS - 1) need not hit exactly 1.0 at
+            // the last step) -- writeParameterLocked REJECTS an out-of-range value rather than
+            // clamping it, which would otherwise abort the burst on a spurious failure at the very
+            // last call. See issue #26's adversarial review, LOW nits.
+            val value = (spec.min + (spec.max - spec.min) * i / (SLIDER_DRAG_STEPS - 1)).coerceIn(spec.min, spec.max)
             val timed = measureLatency { controller.setParameter(id, value) }
+            val ms = timed.elapsedMicros / MICROS_PER_MILLI
             when (val result = timed.value) {
                 is TonexResult.Success -> {
-                    samples += timed.elapsedMillis
+                    samples += timed.elapsedMicros
                     completedCalls++
                 }
                 is TonexResult.Failure -> {
                     log.error(
-                        "Slider-drag burst: call ${i + 1}/$SLIDER_DRAG_STEPS FAILED after ${timed.elapsedMillis} ms: " +
+                        "Slider-drag burst: call ${i + 1}/$SLIDER_DRAG_STEPS FAILED after ${"%.3f".format(ms)} ms: " +
                             "${result.error.message}. Aborting the rest of the burst rather than continuing through " +
                             "further failures.",
                     )
@@ -553,20 +582,31 @@ class ProbeSession(
 
         if (samples.isNotEmpty()) {
             val stats = BurstStats.of(samples)
-            val backlogNote = if (stats.backlogSuspected) {
-                "LATENCY GREW SUBSTANTIALLY across the burst (growth ratio ${"%.2f".format(stats.growthRatio)}x) — " +
-                    "consistent with writes queuing or backing up under sustained, unpaced load."
-            } else {
-                "latency held roughly steady across the burst (growth ratio ${"%.2f".format(stats.growthRatio)}x) — " +
-                    "no backlog signal."
+            fun msLong(micros: Long) = "${"%.3f".format(micros / MICROS_PER_MILLI)}ms"
+            fun msDouble(micros: Double) = "${"%.3f".format(micros / MICROS_PER_MILLI)}ms"
+            val backlogNote = when {
+                !stats.growthRatio.isFinite() -> {
+                    // The first-third mean was exactly 0 -- growthRatio is undefined (0/0-shaped),
+                    // NOT evidence of steady latency. Reporting this as "no backlog signal" would
+                    // claim the opposite of what an undefined ratio actually means. See issue #26's
+                    // adversarial review, finding S1.
+                    "growth ratio is UNDEFINED (first-third mean measured ${msDouble(stats.firstThirdMeanMicros)}, " +
+                        "last-third mean ${msDouble(stats.lastThirdMeanMicros)}) — too fast to compute a ratio " +
+                        "from, not evidence either way of backlog."
+                }
+                stats.backlogSuspected -> "LATENCY GREW SUBSTANTIALLY across the burst (growth ratio " +
+                    "${"%.2f".format(stats.growthRatio)}x) — consistent with writes queuing or backing up under " +
+                    "sustained, unpaced load."
+                else -> "latency held roughly steady across the burst (growth ratio " +
+                    "${"%.2f".format(stats.growthRatio)}x) — no backlog signal."
             }
             log.finding(
                 "Slider-drag burst ($writeTestParameterEnumName): $SLIDER_DRAG_STEPS calls planned, " +
-                    "$completedCalls attempted, ${samples.size} succeeded. min=${stats.minMillis}ms mean=${"%.1f".format(stats.meanMillis)}ms " +
-                    "p50=${stats.p50Millis}ms p90=${stats.p90Millis}ms p99=${stats.p99Millis}ms max=${stats.maxMillis}ms. " +
-                    "First-third mean ${"%.1f".format(stats.firstThirdMeanMillis)}ms vs last-third mean " +
-                    "${"%.1f".format(stats.lastThirdMeanMillis)}ms. $backlogNote Informational only, no pass/fail " +
-                    "target; see issue #26.",
+                    "$completedCalls attempted, ${samples.size} succeeded. min=${msLong(stats.minMicros)} " +
+                    "mean=${msDouble(stats.meanMicros)} p50=${msLong(stats.p50Micros)} p90=${msLong(stats.p90Micros)} " +
+                    "p99=${msLong(stats.p99Micros)} max=${msLong(stats.maxMicros)}. First-third mean " +
+                    "${msDouble(stats.firstThirdMeanMicros)} vs last-third mean ${msDouble(stats.lastThirdMeanMicros)}. " +
+                    "$backlogNote Informational only, no pass/fail target; see issue #26.",
             )
         } else {
             log.error("Slider-drag burst: every call failed — no successful samples to summarize.")
