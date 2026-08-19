@@ -121,6 +121,26 @@ Not every change needs the same scrutiny. Scale it to what's at stake:
   fix compiles and passes its own tests, not that it actually closes the
   gap the original review found. Don't treat "tests pass now" as
   equivalent to "reviewed."
+- **Before filing something as "needs hardware verification," check whether
+  upstream source or data already captured this session already resolves
+  it.** A "needs real hardware" label is easy to reach for and easy to
+  leave unquestioned by every session after the one that wrote it — verify
+  it's actually true before adding more hardware-dependent work to the
+  pile. Two S6 parameter-table discrepancies (`CABINET_TYPE`'s ordering,
+  `VIR_MIC_2_X`'s max) had both sat marked "verify against real hardware
+  (S20)" for the whole project, when reading `Builty/TonexOneController`'s
+  actual source settled both outright — one from the enum definition and
+  its real, tested usage outweighing a stray wrong comment; the other from
+  upstream's own table declaring the value deliberately, with nothing
+  suggesting a typo. Separately, S8's four state-blob offsets got marked
+  "structurally compatible, not byte-level confirmed" after a hardware
+  probe run — but the exact `GetState` response needed to confirm them
+  byte-by-byte was already sitting in that same run's log; hand-decoding it
+  (HDLC unstuff, CRC-verify, parse the header, index the four offsets)
+  closed it without any new hardware pass or new write-path code. Check
+  upstream and re-read what you already have before scheduling a hardware
+  session, an editor cross-check, or new code to produce evidence you can
+  get right now.
 - **Findings that can't be resolved without hardware** (this project has no
   physical pedal in the cloud environment) should not be silently pinned as
   correct or silently dropped. Un-pin the code (a skipped/pending test with
