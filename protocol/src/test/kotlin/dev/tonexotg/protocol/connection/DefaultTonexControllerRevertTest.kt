@@ -274,6 +274,99 @@ class DefaultTonexControllerRevertTest {
         )
     }
 
+    // ---- issue #45: reselecting the aborted preset and retrying is now safe ---------------------
+
+    @Test
+    fun `after an aborted revert, reselecting the same preset keeps the original snapshot intact and a retry succeeds`() = runTest {
+        val fake = FakeTonexTransport()
+        val store = InMemorySnapshotStore()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            snapshotStore = store,
+        )
+        val originalValues = snapshotValues()
+        connectToReady(controller, fake) // activeSlot=A, a=0,b=1,c=2 -> activeIndex == PresetIndex(0); captures originalValues
+        val writesBefore = fake.written.size
+        val changeoverAt = 40
+        val newActive = PresetIndex(5)
+
+        // Abort the revert mid-replay, exactly as in the ActivePresetChangedDuringRevert test above:
+        // an external event moves the pedal's active preset to 5 partway through restoring preset 0.
+        fake.writeBehavior = { bytes ->
+            if (fake.written.size - writesBefore == changeoverAt) {
+                fake.emitMessage(
+                    stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 0, b = newActive.value, c = 2)),
+                )
+                testScheduler.runCurrent()
+            }
+            bytes.size
+        }
+        val aborted = controller.revertActivePreset()
+        assertIs<TonexError.ActivePresetChangedDuringRevert>((aborted as TonexResult.Failure).error)
+        fake.writeBehavior = { it.size } // clear the induced side effect for the reselect below
+
+        // Preset 0 is now left half-reverted (40 of 109 values restored). Its ORIGINAL snapshot is
+        // still exactly what it was on first arrival -- the abort itself never touched the store.
+        assertSnapshotValuesEqual(originalValues, store.snapshotFor(activeIndex), "preset 0's snapshot right after the abort")
+
+        // The abort's own external preset-change (0 -> 5, detected mid-replay) is ITSELF preset 5's
+        // first arrival this session (applyStateUpdate, unconditionally, per issue #14) -- it queues
+        // a first-arrival capture for preset 5 the moment operationMutex frees up, i.e. the instant
+        // revertActivePreset() above returns. Drain it before doing anything else below, or it would
+        // race the reselect for the same lock (and this test would hang on the reselect's own
+        // request never being written until the capture's own request times out).
+        testScheduler.runCurrent()
+        val fiveValues = alteredSnapshotValues(offset = 6)
+        fake.emitMessage(presetDetailsSummaryWithParameters("Preset 5", fiveValues))
+        testScheduler.runCurrent()
+        assertSnapshotValuesEqual(fiveValues, store.snapshotFor(newActive), "preset 5's own first-arrival snapshot, captured mid-recovery")
+
+        // The recovery a user would naturally reach for: reselect preset 0 and try again. The pedal
+        // is currently active on slot B (preset 5); preset 0 is still assigned to slot A -- nothing
+        // in this scenario ever unassigned it -- so selectPreset takes its "already assigned to
+        // another footswitch slot" branch and merely flips the active slot back to A.
+        val selectDeferred = async { controller.selectPreset(activeIndex) }
+        testScheduler.runCurrent()
+        // The mandatory re-read reports the pedal's current state: active on slot B (preset 5),
+        // preset 0 still sitting on slot A untouched.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 0, b = newActive.value, c = 2)))
+        testScheduler.runCurrent()
+        assertIs<TonexResult.Success<Unit>>(selectDeferred.await())
+        val writesBeforeConfirmation = fake.writtenMessages().size
+
+        // The pedal's confirming push: slot A (still holding preset 0, unchanged throughout) is
+        // active again -- slot assignments untouched, only the active-slot byte flipped.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = newActive.value, c = 2)))
+        testScheduler.runCurrent()
+        assertEquals(activeIndex, controller.activePreset.value)
+
+        // The re-arrival launches exactly one re-read of preset 0's now half-reverted live state --
+        // answer it with something that visibly differs from the original snapshot, to prove that
+        // if the retention guard were broken, the assertion below would catch it.
+        val newWrites = fake.writtenMessages().drop(writesBeforeConfirmation)
+        assertEquals(1, newWrites.size, "the re-arrival should trigger exactly one re-read request")
+        val halfRevertedLookingValues = alteredSnapshotValues(offset = 4)
+        fake.emitMessage(presetDetailsSummaryWithParameters("Preset 0, mid-recovery", halfRevertedLookingValues))
+        testScheduler.runCurrent()
+
+        // The core assertion (issue #45/#46): reselecting the preset did NOT overwrite its original,
+        // still-good snapshot with the half-reverted state's fresh read.
+        assertSnapshotValuesEqual(originalValues, store.snapshotFor(activeIndex), "preset 0's snapshot after reselecting it")
+
+        // And the obvious recovery now genuinely works: a second revert restores the true originals.
+        val retryWritesBefore = fake.writtenMessages().size
+        val retryResult = controller.revertActivePreset()
+        assertIs<TonexResult.Success<Unit>>(retryResult)
+        val retryWrites = fake.writtenMessages().drop(retryWritesBefore)
+        assertEquals(109, retryWrites.size)
+        for ((i, msg) in retryWrites.withIndex()) {
+            val decoded = SingleParameterPayloadCodec.decode(msg.payload)
+            assertIs<TonexResult.Success<SingleParameterPayload>>(decoded)
+            assertEquals(originalValues[i], decoded.value.value, 1e-3f, "write $i should restore the ORIGINAL snapshot")
+        }
+    }
+
     // ---- pre-validation: out-of-range snapshot value refuses the WHOLE revert, zero writes ------
 
     @Test
@@ -285,10 +378,16 @@ class DefaultTonexControllerRevertTest {
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
             snapshotStore = store,
         )
-        connectToReady(controller, fake, store = store) // captureValues = null: this test injects its own
+        connectToReady(controller, fake) // normal capture: records a real snapshot under the live session
+        // Overwrite it with an out-of-range snapshot, but stamped with the REAL live SessionId (not
+        // an unrelated SessionId.create()) -- since revertActivePreset now rejects a snapshot whose
+        // sessionId doesn't match the current session (Opus review should-fix #2, issue #46 PR),
+        // this test's own injected snapshot must carry a genuine one to still reach the
+        // pre-validation logic it's actually testing.
+        val liveSessionId = requireNotNull(store.snapshotFor(activeIndex)).sessionId
         val badValues = snapshotValues()
         badValues[2] = 500f // NOISE_GATE_THRESHOLD's range is -100..0
-        store.record(PresetSnapshot(activeIndex, SessionId.create(), badValues))
+        store.record(PresetSnapshot(activeIndex, liveSessionId, badValues))
         val writesBefore = fake.writtenMessages().size
 
         val result = controller.revertActivePreset()
@@ -298,6 +397,36 @@ class DefaultTonexControllerRevertTest {
         assertEquals(ParameterId(2), outOfRange.id)
         assertEquals(500f, outOfRange.value)
         assertEquals(fake.writtenMessages().size, writesBefore, "zero writes when pre-validation rejects the snapshot")
+    }
+
+    // ---- a snapshot from a foreign session is rejected, not replayed (Opus review non-blocking ---
+    // ---- gap, issue #46 PR: revert-side depth on top of the capture-side sessionId guard) --------
+
+    @Test
+    fun `a snapshot stamped with a foreign session fails NoSnapshotAvailable, zero writes`() = runTest {
+        val fake = FakeTonexTransport()
+        val store = InMemorySnapshotStore()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            snapshotStore = store,
+        )
+        connectToReady(controller, fake) // normal capture: records a real snapshot under the live session
+        // Overwrite it with an otherwise-valid snapshot stamped with an UNRELATED session -- exactly
+        // what a cross-session phantom snapshot (the capture-side race captureSnapshotLocked's own
+        // sessionId guard closes) would look like if one ever did land in the store. revertActivePreset
+        // must refuse to replay it rather than silently restoring a previous session's values onto
+        // this session's preset -- belt-and-braces on top of the capture-side fix, so this guard
+        // needs its own test or a future edit could delete it with the suite staying green.
+        store.record(PresetSnapshot(activeIndex, SessionId.create(), snapshotValues()))
+        val writesBefore = fake.writtenMessages().size
+
+        val result = controller.revertActivePreset()
+
+        val error = (result as TonexResult.Failure).error
+        val noSnapshot = assertIs<TonexError.NoSnapshotAvailable>(error)
+        assertEquals(activeIndex, noSnapshot.presetIndex)
+        assertEquals(fake.writtenMessages().size, writesBefore, "zero writes when the snapshot belongs to a foreign session")
     }
 
     // ---- revert never emits FirstDestructiveWrite -----------------------------------------------

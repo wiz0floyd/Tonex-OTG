@@ -17,6 +17,7 @@ import dev.tonexotg.protocol.state.StateBlobOffsets
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.test.TestScope
+import kotlin.test.assertEquals
 
 /**
  * Message fixture builders shared by [DefaultTonexController]'s test suite — build the exact
@@ -93,6 +94,29 @@ fun presetDetailsSummaryWithParameters(name: String, values: FloatArray): ByteAr
 fun snapshotValues(): FloatArray = FloatArray(PresetSnapshot.PARAMETER_COUNT) { i ->
     val spec = requireNotNull(ParameterRegistry.byIndex(i)) { "no registry entry for preset index $i" }
     spec.min + (spec.max - spec.min) * (i % 9) / 9f
+}
+
+/**
+ * 109 distinct, in-range values offset from [snapshotValues] by [offset] (default modulus base
+ * shifted, mod 9 as above) so the two arrays never collide for any preset index — used by the
+ * issue #45/#46 retention tests to represent "a second, different set of live values read off the
+ * pedal," e.g. a preset re-arrived at after external edits or a half-reverted replay.
+ */
+fun alteredSnapshotValues(offset: Int): FloatArray = FloatArray(PresetSnapshot.PARAMETER_COUNT) { i ->
+    val spec = requireNotNull(ParameterRegistry.byIndex(i)) { "no registry entry for preset index $i" }
+    spec.min + (spec.max - spec.min) * ((i + offset) % 9) / 9f
+}
+
+/**
+ * Asserts that [actual] (a recorded [PresetSnapshot], or `null`) holds exactly [expected]'s 109
+ * PRESET-scoped values — the issue #45/#46 retention tests' core assertion: that a snapshot was
+ * (or was not) overwritten by a later capture.
+ */
+fun assertSnapshotValuesEqual(expected: FloatArray, actual: PresetSnapshot?, label: String) {
+    val snapshot = requireNotNull(actual) { "$label: expected a snapshot to be present, found none" }
+    for (i in ParameterId.PRESET_RANGE) {
+        assertEquals(expected[i], snapshot.valueOf(ParameterId(i)), 1e-3f, "$label, ParameterId($i)")
+    }
 }
 
 /**

@@ -239,16 +239,28 @@ class DefaultTonexController(
      * call. An implausible push is dropped: the generation was already minted by [PedalState.create],
      * so nothing stale stays authorized even though this function does nothing further with it.
      *
-     * ## S9b: re-snapshot on every active-preset change
+     * ## S9b/S9c: re-read on every active-preset change, first-arrival-wins retention (issue #46)
      *
      * Whenever the active preset changes — self-initiated *or* external alike, per issue #14
      * ("re-snapshot whenever the active preset changes, including changes made externally") — the
      * outgoing preset's [parameterValues] entries are dropped synchronously (before anything can
-     * observe them against the new active preset), and a fresh capture is launched. This sits
-     * **outside** the self/external `if`/`else` above, deliberately: a self-initiated change
-     * equally invalidates the previous preset's snapshot.
+     * observe them against the new active preset), and a fresh read of the incoming preset's live
+     * values is launched. This sits **outside** the self/external `if`/`else` above, deliberately:
+     * a self-initiated change equally invalidates the previous preset's displayed values.
      *
-     * The capture is [scope].[launch]ed, never called inline: this function runs on the reader
+     * That launched read always refreshes [parameterValues] with what the pedal reports *right
+     * now* — but per issue #46's resolved design question, it only **records** a new revert
+     * snapshot in [snapshotStore] the first time this session that [idx] is arrived at;
+     * [captureSnapshotLocked] itself carries that first-arrival-wins guard (see its KDoc), not this
+     * function — do not duplicate the check here. The product-owner-decided policy (issue #46): a
+     * preset's snapshot is captured once per preset per session, on first arrival only, so
+     * `revertActivePreset()` means "undo everything I did to this preset this session," and
+     * "reselect the preset and retry" is honest advice again after an aborted/partial revert
+     * ([TonexError.ActivePresetChangedDuringRevert]). Accepted tradeoff: a snapshot can go stale
+     * against changes this module can't see (another editor, a MIDI-driven change) made *after*
+     * the first in-session capture — not a bug to work around, per issue #46's decision.
+     *
+     * The read is [scope].[launch]ed, never called inline: this function runs on the reader
      * coroutine, and [captureSnapshotLocked] suspends on a round trip through that same reader —
      * calling it inline would have the reader wait on itself, a guaranteed hang (and this function
      * is not even a `suspend fun`, so it would not compile that way). The launched coroutine may
@@ -256,7 +268,7 @@ class DefaultTonexController(
      * *reader* never blocks, it has already returned from this function.
      *
      * `session !== s` mirrors [onTransportEnded]'s `endedReaderJob` guard (PR #43 finding 4):
-     * without it, a queued capture dispatched after a teardown/reconnect could run against a fresh
+     * without it, a queued read dispatched after a teardown/reconnect could run against a fresh
      * connection. [captureSnapshotLocked]'s own liveness/session checks are a second line of
      * defence; keep both.
      */
@@ -640,11 +652,28 @@ class DefaultTonexController(
     // ---- snapshot capture (S9b / §E) -----------------------------------------------------------
 
     /**
-     * Captures a [PresetSnapshot] of preset [index]'s 109 parameter values and records it in
-     * [snapshotStore] — the write-safety net's read half (issue #14). Requests
-     * [PresetDetailsKind.SUMMARY] (byte-identical to [harvestPresetNames]' own request), **not**
-     * `FULL` — see [PresetParameterExtractor]'s KDoc for why `FULL` is never the right request
-     * here.
+     * Reads preset [index]'s 109 live parameter values off the pedal, always publishes them to
+     * [parameterValues] via [applyCapturedValues], and — first-arrival-wins (issue #46) — records
+     * them into [snapshotStore] as the preset's revert snapshot **only if [index] has no snapshot
+     * yet this session**. Requests [PresetDetailsKind.SUMMARY] (byte-identical to
+     * [harvestPresetNames]' own request), **not** `FULL` — see [PresetParameterExtractor]'s KDoc
+     * for why `FULL` is never the right request here.
+     *
+     * ## First-arrival-wins retention (issue #46)
+     * [SnapshotStore.record] itself still unconditionally replaces any existing entry — that stays
+     * true and is exactly right for "this is the first time *this session* we've seen this preset."
+     * The retention *policy* lives here, one call site up: step 6 below only reaches `record` when
+     * [SnapshotStore.snapshotFor] for [index] is `null` **or belongs to a different session** —
+     * checked as `snapshotFor(index)?.sessionId !== s`, not mere presence, so a snapshot that
+     * outlives its own session (see step 6's own comment for the concurrent-teardown race that
+     * makes this reachable) gets replaced rather than permanently pinned. Re-arriving at a preset
+     * already snapshotted *this session* — including returning to it after edits, or after an
+     * aborted/partial [revertActivePreset] ([TonexError.ActivePresetChangedDuringRevert]) — refreshes
+     * the *displayed* values (below) but leaves the *retained* snapshot exactly as it was on first
+     * arrival. This is the product-owner-decided policy; see issue #46 for the alternatives
+     * considered and why this one was chosen, and for the accepted staleness tradeoff (a retained
+     * snapshot cannot see changes an external editor/footswitch/MIDI makes to the pedal after that
+     * first capture).
      *
      * ## Caller contract
      * The caller MUST already hold [operationMutex]. `Mutex` is not reentrant, so this function
@@ -652,12 +681,13 @@ class DefaultTonexController(
      * launched path in [applyStateUpdate] acquires the lock *around* the call.
      *
      * ## Failure semantics — best-effort, never fatal, never partial
-     * A failed capture records **nothing** in [snapshotStore] — every failure path below returns
-     * before [SnapshotStore.record] is ever reached, and [PresetParameterExtractor] structurally
-     * cannot return a partially-populated array. The user-visible consequence is that
-     * [revertActivePreset] returns [TonexError.NoSnapshotAvailable] — not a gap, that error's own
-     * KDoc anticipates exactly this case. Both callers of this function (`connect` and
-     * `applyStateUpdate`) therefore discard the result; do not make a capture failure fatal to
+     * A failed read records **nothing** in [snapshotStore] and publishes nothing to
+     * [parameterValues] — every failure path below returns before either happens, and
+     * [PresetParameterExtractor] structurally cannot return a partially-populated array. The
+     * user-visible consequence, when no snapshot exists yet for [index] and its first read fails,
+     * is that [revertActivePreset] returns [TonexError.NoSnapshotAvailable] — not a gap, that
+     * error's own KDoc anticipates exactly this case. Both callers of this function (`connect` and
+     * `applyStateUpdate`) therefore discard the result; do not make a read failure fatal to
      * [connect] (a pedal that answers the name harvest but not the parameter read still gives a
      * fully usable app minus the revert affordance), and do not add a retry loop here (reject-and-
      * explain beats patch-and-hope).
@@ -710,11 +740,28 @@ class DefaultTonexController(
             )
         }
 
-        // 6. Publish, then record — in that order. PresetSnapshot's constructor copies `values`, so
-        //    handing it the same array applyCapturedValues just read from is safe; applyCapturedValues
-        //    itself builds a Map<ParameterId, Float> of boxed floats and does not retain the array.
+        // 6. Publish the live read unconditionally, then record it as the revert snapshot ONLY if
+        //    this preset has no snapshot yet from THIS session (first-arrival-wins, issue #46).
+        //    PresetSnapshot's constructor copies `values`, so handing it the same array
+        //    applyCapturedValues just read from is safe; applyCapturedValues itself builds a
+        //    Map<ParameterId, Float> of boxed floats and does not retain the array.
+        //
+        //    Comparing sessionId (not just presence) closes a cross-session phantom-snapshot race
+        //    (Opus review, issue #46 PR): onTransportEnded's teardown runs on `scope` WITHOUT
+        //    operationMutex (see its own KDoc), so it can call `session = null` then
+        //    `snapshotStore.clear()` concurrently with a capture that already passed step 5 above on
+        //    another thread of a caller-supplied multithreaded `scope`. A presence-only check
+        //    (`snapshotFor(index) == null`) would let that capture record into the just-cleared store
+        //    a snapshot stamped with the DEAD session's SessionId — and unlike the old unconditional
+        //    `record`, nothing would ever overwrite it: connect() never calls clear(), so this
+        //    phantom would silently outlive the session boundary and revertActivePreset would replay
+        //    a previous session's values onto the current session's preset. Comparing sessionId is
+        //    behaviorally identical within one session (anything recorded this session carries
+        //    sessionId === s, so re-arrival still skips) and self-heals across a session boundary.
         applyCapturedValues(values)
-        snapshotStore.record(PresetSnapshot(index, s, values))
+        if (snapshotStore.snapshotFor(index)?.sessionId !== s) {
+            snapshotStore.record(PresetSnapshot(index, s, values))
+        }
         return TonexResult.Success(Unit)
     }
 
@@ -1006,8 +1053,19 @@ class DefaultTonexController(
         val active = _activePreset.value ?: return@withLock TonexResult.Failure(
             TonexError.ProtocolStateViolation(_connectionState.value, "the active preset is not known yet"),
         )
-        // 4. A snapshot must exist for it.
-        val snapshot = snapshotStore.snapshotFor(active)
+        // 4. A snapshot must exist for it, AND must belong to the current session — [PresetSnapshot]'s
+        //    own KDoc is explicit that a cross-session revert "is not a supported operation." This is
+        //    belt-and-braces on top of captureSnapshotLocked's own sessionId-scoped retention guard
+        //    (issue #46 PR, Opus review should-fix #2): if a phantom snapshot from a dead session
+        //    ever did make it into the store, replaying 109 stale values onto the CURRENT session's
+        //    preset would be exactly the corruption class this safety net exists to prevent, so this
+        //    checks rather than trusts. Reuses [TonexError.NoSnapshotAvailable] rather than a new
+        //    typed error — its message ("no snapshot has been captured for this preset during this
+        //    session") is already precisely true of a snapshot stamped with a different session.
+        val s = session ?: return@withLock TonexResult.Failure(
+            TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+        )
+        val snapshot = snapshotStore.snapshotFor(active)?.takeIf { it.sessionId === s }
             ?: return@withLock TonexResult.Failure(TonexError.NoSnapshotAvailable(active))
 
         // 5a. Pre-validate the WHOLE snapshot before issuing a single write. A value that the
