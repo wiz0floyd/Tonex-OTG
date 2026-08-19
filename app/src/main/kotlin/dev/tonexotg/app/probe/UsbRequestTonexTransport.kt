@@ -60,6 +60,20 @@ import kotlinx.coroutines.withContext
  * explicit here rather than assumed) and against [inFlightWrite] itself, which only [write] and
  * [loopThread] ever touch and which is never read by both at once thanks to that ordering.
  *
+ * ## A known limitation: a cancelled write can rarely misattribute its completion to the next write
+ *
+ * [write]'s `CancellationException` handler cancels [outRequest] without waiting for [loopThread]
+ * to reap the discarded URB. If a following [write] call takes [writeMutex] and sets a new
+ * [PendingWrite] into [inFlightWrite] before that reap happens, [loopThread] completes the *new*
+ * write's [CompletableDeferred] when it drains the *old*, cancelled URB — producing one spuriously
+ * near-zero latency sample and reporting a write successful before its transfer actually completed.
+ * Deliberately not closed with code: doing so properly needs per-URB identity matching (a
+ * generation counter, since the completion API gives no token), which is the kind of elaborate
+ * automatic-recovery machinery this project's CLAUDE.md says not to build for a diagnostic-only
+ * class. The precondition is a cancelled write — i.e. `DefaultTonexController.writeFramed`'s own
+ * transport-write timeout firing — which already makes that run's numbers suspect on its own. See
+ * PR #60 review.
+ *
  * ## A genuine limitation versus [UsbTonexTransport]: no short-write detection on OUT transfers
  *
  * [UsbTonexTransport.write] returns [UsbDeviceConnection.bulkTransfer]'s actual return value, which
@@ -205,12 +219,15 @@ class UsbRequestTonexTransport(
             val queued = try {
                 outRequest.queue(buffer)
             } catch (t: IllegalStateException) {
-                // A close() racing this call already tore down outRequest's connection -- AOSP's
-                // UsbRequest.queue() throws ISE("invalid connection") in that case rather than
-                // returning false. Surface it as this class's own IOException like every other
-                // failure path here. See PR #60 review.
+                // AOSP's UsbRequest.queue() throws ISE rather than returning false for two distinct
+                // reasons: a close() racing this call ("invalid connection"), or -- reachable
+                // because the CancellationException handler below cancels outRequest without
+                // waiting for loopThread to reap it -- a still-queued prior request ("this request
+                // is currently queued"). Passing t.message through (rather than asserting a single
+                // cause) reports whichever one actually happened instead of always blaming a close
+                // race. See PR #60 review.
                 inFlightWrite.set(null)
-                throw IOException("UsbRequestTonexTransport.write: transport closed concurrently", t)
+                throw IOException("UsbRequestTonexTransport.write: OUT queue() rejected (${t.message})", t)
             }
             if (!queued) {
                 inFlightWrite.set(null)
