@@ -102,7 +102,9 @@ interface SnapshotStore {
      * This method itself is unconditional — it always replaces. The retention *policy* of when to
      * call it is the caller's responsibility, not this store's:
      * [dev.tonexotg.protocol.connection.DefaultTonexController] calls it first-arrival-wins (issue
-     * #46) — once per preset per session, guarded by `snapshotFor(index) == null` at the call site
+     * #46) — once per preset per session, guarded by `snapshotFor(index)?.sessionId !== <the current
+     * session>` at the call site (not mere presence — see that call site's own KDoc for the
+     * cross-session phantom-snapshot race a presence-only check would leave open)
      * — precisely so an already-snapshotted preset's original values survive later edits, external
      * changes, and re-arrivals (including returning to a preset after an aborted/partial revert;
      * see [TonexError.ActivePresetChangedDuringRevert]'s KDoc). A stale-forever snapshot is the

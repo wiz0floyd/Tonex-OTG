@@ -661,15 +661,19 @@ class DefaultTonexController(
      *
      * ## First-arrival-wins retention (issue #46)
      * [SnapshotStore.record] itself still unconditionally replaces any existing entry — that stays
-     * true and is exactly right for "this is the first time this session we've seen this preset."
+     * true and is exactly right for "this is the first time *this session* we've seen this preset."
      * The retention *policy* lives here, one call site up: step 6 below only reaches `record` when
-     * [SnapshotStore.snapshotFor] is `null` for [index]. Re-arriving at an already-snapshotted
-     * preset — including returning to it after edits, or after an aborted/partial
-     * [revertActivePreset] ([TonexError.ActivePresetChangedDuringRevert]) — refreshes the *displayed*
-     * values (below) but leaves the *retained* snapshot exactly as it was on first arrival. This is
-     * the product-owner-decided policy; see issue #46 for the alternatives considered and why this
-     * one was chosen, and for the accepted staleness tradeoff (a retained snapshot cannot see
-     * changes an external editor/footswitch/MIDI makes to the pedal after that first capture).
+     * [SnapshotStore.snapshotFor] for [index] is `null` **or belongs to a different session** —
+     * checked as `snapshotFor(index)?.sessionId !== s`, not mere presence, so a snapshot that
+     * outlives its own session (see step 6's own comment for the concurrent-teardown race that
+     * makes this reachable) gets replaced rather than permanently pinned. Re-arriving at a preset
+     * already snapshotted *this session* — including returning to it after edits, or after an
+     * aborted/partial [revertActivePreset] ([TonexError.ActivePresetChangedDuringRevert]) — refreshes
+     * the *displayed* values (below) but leaves the *retained* snapshot exactly as it was on first
+     * arrival. This is the product-owner-decided policy; see issue #46 for the alternatives
+     * considered and why this one was chosen, and for the accepted staleness tradeoff (a retained
+     * snapshot cannot see changes an external editor/footswitch/MIDI makes to the pedal after that
+     * first capture).
      *
      * ## Caller contract
      * The caller MUST already hold [operationMutex]. `Mutex` is not reentrant, so this function
@@ -737,12 +741,25 @@ class DefaultTonexController(
         }
 
         // 6. Publish the live read unconditionally, then record it as the revert snapshot ONLY if
-        //    this preset has no snapshot yet this session (first-arrival-wins, issue #46).
+        //    this preset has no snapshot yet from THIS session (first-arrival-wins, issue #46).
         //    PresetSnapshot's constructor copies `values`, so handing it the same array
         //    applyCapturedValues just read from is safe; applyCapturedValues itself builds a
         //    Map<ParameterId, Float> of boxed floats and does not retain the array.
+        //
+        //    Comparing sessionId (not just presence) closes a cross-session phantom-snapshot race
+        //    (Opus review, issue #46 PR): onTransportEnded's teardown runs on `scope` WITHOUT
+        //    operationMutex (see its own KDoc), so it can call `session = null` then
+        //    `snapshotStore.clear()` concurrently with a capture that already passed step 5 above on
+        //    another thread of a caller-supplied multithreaded `scope`. A presence-only check
+        //    (`snapshotFor(index) == null`) would let that capture record into the just-cleared store
+        //    a snapshot stamped with the DEAD session's SessionId — and unlike the old unconditional
+        //    `record`, nothing would ever overwrite it: connect() never calls clear(), so this
+        //    phantom would silently outlive the session boundary and revertActivePreset would replay
+        //    a previous session's values onto the current session's preset. Comparing sessionId is
+        //    behaviorally identical within one session (anything recorded this session carries
+        //    sessionId === s, so re-arrival still skips) and self-heals across a session boundary.
         applyCapturedValues(values)
-        if (snapshotStore.snapshotFor(index) == null) {
+        if (snapshotStore.snapshotFor(index)?.sessionId !== s) {
             snapshotStore.record(PresetSnapshot(index, s, values))
         }
         return TonexResult.Success(Unit)
@@ -1036,8 +1053,19 @@ class DefaultTonexController(
         val active = _activePreset.value ?: return@withLock TonexResult.Failure(
             TonexError.ProtocolStateViolation(_connectionState.value, "the active preset is not known yet"),
         )
-        // 4. A snapshot must exist for it.
-        val snapshot = snapshotStore.snapshotFor(active)
+        // 4. A snapshot must exist for it, AND must belong to the current session — [PresetSnapshot]'s
+        //    own KDoc is explicit that a cross-session revert "is not a supported operation." This is
+        //    belt-and-braces on top of captureSnapshotLocked's own sessionId-scoped retention guard
+        //    (issue #46 PR, Opus review should-fix #2): if a phantom snapshot from a dead session
+        //    ever did make it into the store, replaying 109 stale values onto the CURRENT session's
+        //    preset would be exactly the corruption class this safety net exists to prevent, so this
+        //    checks rather than trusts. Reuses [TonexError.NoSnapshotAvailable] rather than a new
+        //    typed error — its message ("no snapshot has been captured for this preset during this
+        //    session") is already precisely true of a snapshot stamped with a different session.
+        val s = session ?: return@withLock TonexResult.Failure(
+            TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+        )
+        val snapshot = snapshotStore.snapshotFor(active)?.takeIf { it.sessionId === s }
             ?: return@withLock TonexResult.Failure(TonexError.NoSnapshotAvailable(active))
 
         // 5a. Pre-validate the WHOLE snapshot before issuing a single write. A value that the

@@ -378,10 +378,16 @@ class DefaultTonexControllerRevertTest {
             capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
             snapshotStore = store,
         )
-        connectToReady(controller, fake, store = store) // captureValues = null: this test injects its own
+        connectToReady(controller, fake) // normal capture: records a real snapshot under the live session
+        // Overwrite it with an out-of-range snapshot, but stamped with the REAL live SessionId (not
+        // an unrelated SessionId.create()) -- since revertActivePreset now rejects a snapshot whose
+        // sessionId doesn't match the current session (Opus review should-fix #2, issue #46 PR),
+        // this test's own injected snapshot must carry a genuine one to still reach the
+        // pre-validation logic it's actually testing.
+        val liveSessionId = requireNotNull(store.snapshotFor(activeIndex)).sessionId
         val badValues = snapshotValues()
         badValues[2] = 500f // NOISE_GATE_THRESHOLD's range is -100..0
-        store.record(PresetSnapshot(activeIndex, SessionId.create(), badValues))
+        store.record(PresetSnapshot(activeIndex, liveSessionId, badValues))
         val writesBefore = fake.writtenMessages().size
 
         val result = controller.revertActivePreset()
