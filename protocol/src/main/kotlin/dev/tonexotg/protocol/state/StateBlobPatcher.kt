@@ -172,14 +172,21 @@ object StateBlobPatcher {
      *   is an internal-invariant violation caught by `require` (not a runtime
      *   [TonexResult.Failure]), because [FootswitchSnapshot]'s own constructor already guarantees
      *   completeness structurally; a caller reaching this function at all can only have gotten a
-     *   complete map.
+     *   complete map. Unlike [patchSlotAssignment]/[selectPreset]'s bare `preset: PresetIndex`
+     *   parameter, there is deliberately no separate out-of-range re-check on the map's values
+     *   here: [PresetIndex]'s `@JvmInline` erasure gap (see its KDoc) only opens at a JVM method
+     *   boundary where the value class itself is the raw parameter type; boxed inside a `Map`
+     *   value position, a `PresetIndex` cannot exist with an out-of-range `.value` without its own
+     *   constructor's `init { require(...) }` having already run, so there is no equivalent gap
+     *   for this entry point to re-check.
      * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
      *   freshness contract, the *most recent* such read this session has produced. See
      *   [patchSlotAssignment]'s KDoc for the identical freshness/single-use contract.
      * @param currentSession the session the caller believes is live right now; compared against
      *   [PedalState.sessionId] by reference. See [TonexError.StaleSessionState].
-     * @return the patched bytes, or a [TonexResult.Failure] — never throws for an out-of-range,
-     *   stale, or implausible input; see [prepareForPatch] for the exhaustive list of rejections.
+     * @return the patched bytes, or a [TonexResult.Failure] — never throws except for the
+     *   completeness `require` above; see [prepareForPatch] for the exhaustive list of rejections
+     *   (session provenance, read freshness, length, and shape).
      */
     fun restoreSlotAssignments(
         state: PedalState,
@@ -188,16 +195,6 @@ object StateBlobPatcher {
     ): TonexResult<ByteArray> {
         require(assignments.keys == PresetSlot.entries.toSet()) {
             "restoreSlotAssignments requires an assignment for every slot (${PresetSlot.entries}), got ${assignments.keys}"
-        }
-
-        // Defense-in-depth against @JvmInline erasure (see PresetIndex's KDoc) for all three
-        // values, mirroring prepareForPatch's own single-preset check (step 6) — done here, BEFORE
-        // prepareForPatch's generation-consuming step 7, so an invalid value is rejected without
-        // spending the session's read generation on a patch that was never going to succeed.
-        for (preset in assignments.values) {
-            if (preset.value !in PresetIndex.VALID_RANGE) {
-                return TonexResult.Failure(TonexError.InvalidPresetIndex(preset.value))
-            }
         }
 
         val prepared = prepareForPatch(state, currentSession, preset = null)

@@ -66,4 +66,25 @@ class TonexErrorTest {
                 TonexError.RevertIncomplete(PresetIndex(0), 1, 109, ParameterId(1), cause),
         )
     }
+
+    // ---- issue #36: NoFootswitchSnapshotAvailable ------------------------------------------------
+
+    @Test
+    fun `NoFootswitchSnapshotAvailable message explains restore is refused because nothing was captured`() {
+        val error = TonexError.NoFootswitchSnapshotAvailable
+
+        assertTrue(
+            error.message.contains("footswitch", ignoreCase = true),
+            "message should mention footswitches: ${error.message}",
+        )
+        assertTrue(
+            error.message.contains("restore", ignoreCase = true),
+            "message should say restore is refused: ${error.message}",
+        )
+    }
+
+    @Test
+    fun `NoFootswitchSnapshotAvailable is a singleton, equal to itself`() {
+        assertTrue(TonexError.NoFootswitchSnapshotAvailable == TonexError.NoFootswitchSnapshotAvailable)
+    }
 }
