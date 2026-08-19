@@ -262,14 +262,34 @@ class UsbConnectionManager internal constructor(
 
     companion object {
         /**
-         * `0` -- neither `RECEIVER_EXPORTED` nor `RECEIVER_NOT_EXPORTED`. Correct specifically
-         * because [start]'s receiver only ever handles `ACTION_USB_DEVICE_ATTACHED`/
-         * `ACTION_USB_DEVICE_DETACHED`, both system-protected broadcasts -- see this class's KDoc.
-         * Do not reuse this constant for any receiver that also handles an app-defined action
-         * (like [UsbTonexDeviceOpener]'s `ACTION_USB_PERMISSION`, which must use
-         * `RECEIVER_NOT_EXPORTED`).
+         * **Corrected in S13 (issue #18)** -- this was `0` (neither `RECEIVER_EXPORTED` nor
+         * `RECEIVER_NOT_EXPORTED`) under the reasoning that "a receiver registering only for
+         * system broadcasts shouldn't specify a flag." That reasoning is real, but it describes
+         * the *raw platform* `Context.registerReceiver(receiver, filter, flags)` overload, not
+         * this call site: [ContextCompat.registerReceiver] is `androidx.core`'s own compat
+         * wrapper around it, and its bytecode (confirmed by decompiling the actual
+         * `androidx.core:core:1.16.0` AAR this session, not assumed) throws
+         * `IllegalArgumentException("One of either RECEIVER_EXPORTED or RECEIVER_NOT_EXPORTED is
+         * required")` **unconditionally** whenever neither bit is set in `flags` -- there is no
+         * branch anywhere in that method that special-cases a system-protected-broadcast-only
+         * filter the way the platform docs' exception implies. Passing `0` here meant [start]
+         * would throw the instant it ever ran, on every API level, real hardware included -- not
+         * a Robolectric-only artifact. This was never caught earlier because
+         * `UsbConnectionManagerRobolectricTest` (S12) never actually calls [start] at all; it
+         * drives [onDeviceAttached]/[onDeviceDetached] directly. S13's own
+         * `UsbConnectionServiceRobolectricTest`, which does call [start] (via [UsbConnectionService]),
+         * is what surfaced this.
+         *
+         * Now [ContextCompat.RECEIVER_EXPORTED]: for [start]'s own receiver specifically (only
+         * ever handling `ACTION_USB_DEVICE_ATTACHED`/`ACTION_USB_DEVICE_DETACHED`, both
+         * system-protected broadcasts nothing but the platform can ever send -- see this class's
+         * KDoc), whether it's exported or not carries no actual security difference: no
+         * third-party app can spoof either action regardless. Do not reuse this constant for any
+         * receiver that also handles an app-defined action (like [UsbTonexDeviceOpener]'s
+         * `ACTION_USB_PERMISSION`, which correctly uses `RECEIVER_NOT_EXPORTED` -- a real
+         * app-defined action *can* be spoofed by another app if exported).
          */
-        private const val SYSTEM_BROADCAST_RECEIVER_FLAGS = 0
+        private const val SYSTEM_BROADCAST_RECEIVER_FLAGS = ContextCompat.RECEIVER_EXPORTED
 
         @Volatile
         private var instance: UsbConnectionManager? = null
