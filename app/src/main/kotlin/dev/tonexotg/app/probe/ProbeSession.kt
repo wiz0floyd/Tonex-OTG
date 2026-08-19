@@ -50,7 +50,7 @@ class ProbeSession(
         outEndpoint: UsbEndpoint,
     ): PresetIndex? {
         log.info("=== Read-only diagnostic pass starting ===")
-        val transport = UsbTonexTransport(connection, inEndpoint, outEndpoint)
+        val transport = LoggingTonexTransport(UsbTonexTransport(connection, inEndpoint, outEndpoint), log, "read-only")
         val controller = DefaultTonexController(
             scope = scope,
             capabilities = FirmwareCapabilities.NONE_CONFIRMED,
@@ -168,7 +168,7 @@ class ProbeSession(
         val id = spec.id
 
         // ---- Cycle 1: reconnect, read current value, write a distinguishable test value ------
-        val transport1 = UsbTonexTransport(connection, inEndpoint, outEndpoint)
+        val transport1 = LoggingTonexTransport(UsbTonexTransport(connection, inEndpoint, outEndpoint), log, "write-cycle1")
         val controller1 = DefaultTonexController(
             scope = scope,
             // Deliberate probe override, NOT a claim that firmware support is confirmed — this
@@ -263,7 +263,7 @@ class ProbeSession(
         // trigger this in the first place — this NonCancellable guard is the backstop for the
         // other triggers: back press, Home + system reclaim, etc.)
         withContext(NonCancellable) {
-            val transport2 = UsbTonexTransport(connection, inEndpoint, outEndpoint)
+            val transport2 = LoggingTonexTransport(UsbTonexTransport(connection, inEndpoint, outEndpoint), log, "write-cycle2")
             val controller2 = DefaultTonexController(
                 scope = scope,
                 capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
