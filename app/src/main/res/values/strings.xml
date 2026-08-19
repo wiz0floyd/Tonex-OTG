@@ -1,3 +1,16 @@
 <resources>
     <string name="app_name">Tonex-OTG</string>
+
+    <!--
+      S13 (issue #18): UsbConnectionService's persistent notification. See that class's KDoc for
+      why this notification exists at all (connectedDevice foreground-service-type requirement)
+      and why it always reflects UsbConnectionManager.state rather than a static "running" label.
+    -->
+    <string name="usb_connection_channel_name">USB connection</string>
+    <string name="usb_connection_channel_description">Shows the ToneX One\'s live USB connection status while Tonex-OTG is keeping the link alive</string>
+
+    <string name="usb_connection_notification_disconnected">No ToneX One connected</string>
+    <string name="usb_connection_notification_connecting">Connecting to ToneX One…</string>
+    <string name="usb_connection_notification_connected">Connected to ToneX One</string>
+    <string name="usb_connection_notification_failed">Connection failed: %1$s</string>
 </resources>
