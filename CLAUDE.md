@@ -71,7 +71,9 @@ accordingly:
   schedule the reminder as part of dispatching the work, not as an
   afterthought once someone asks for it.
 
-## Agent model selection
+## On sub agents 
+
+Give sub agents a descriptive name when setting them up. Each sub agent must only write to its own work tree. read only agents may enter another agents working directory when collaborating or reviewing. e.g., when a sonnet or haiku agent asks an opus architecture agent to validate a decision, the opus agent should enter their directory to see the lines of code in question.
 
 Match model cost to task risk and reasoning load, not uniformly:
 
