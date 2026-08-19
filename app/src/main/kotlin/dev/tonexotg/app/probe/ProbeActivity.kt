@@ -1,6 +1,5 @@
 package dev.tonexotg.app.probe
 
-import android.content.Context
 import android.content.Intent
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
@@ -38,9 +37,6 @@ import androidx.core.content.FileProvider
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.PresetIndex
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,12 +61,28 @@ class ProbeActivity : ComponentActivity() {
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /**
+     * Activity-scoped, not `remember { ProbeLog() }` inside the composable (issue #69): the file
+     * sink has to be attached in [onCreate], before the first composition, so a log file exists
+     * "from the moment the screen opens" per the issue rather than from first recomposition.
+     * `android:configChanges` on this Activity (see the manifest) means `onCreate` genuinely
+     * means "this Activity instance/process started", not "every rotation".
+     */
+    private val log = ProbeLog()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Real-time file sink + crash capture (issue #69), wired before any probe action can
+        // run: the product owner currently has no way to pull logcat from a real device, so this
+        // file is the actual retrieval path if anything goes wrong, including a crash.
+        val logFile = ProbeLogFile.create(applicationContext)
+        log.attachFileSink(logFile)
+        installProbeCrashHandler(logFile)
+        log.info("Diagnostic log file opened: ${logFile.file.absolutePath}")
         setContent {
             TonexTheme {
                 Surface {
-                    ProbeScreen(scope)
+                    ProbeScreen(scope, log, logFile.file)
                 }
             }
         }
@@ -97,23 +109,6 @@ class ProbeActivity : ComponentActivity() {
     }
 }
 
-/**
- * Writes [text] to a fresh timestamped file under `probe-logs/` in the app's external files dir
- * and returns it. That subdirectory name must match `probe_log_file_paths.xml`'s
- * `external-files-path` entry, which is what makes [FileProvider.getUriForFile] willing to hand
- * out a `content://` Uri for a file in it.
- *
- * Exists because issue #25's full read/write test logs (raw descriptor hex dumps plus every
- * chunk of a multi-KB preset read) overflow `ClipboardManager`'s Binder transaction size limit —
- * the "Copy log to clipboard" button this replaced would throw or silently truncate on those
- * runs.
- */
-private fun writeLogFile(context: Context, text: String): File {
-    val dir = File(context.getExternalFilesDir(null), "probe-logs").apply { mkdirs() }
-    val timestamp = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
-    return File(dir, "tonex-probe-$timestamp.log").apply { writeText(text) }
-}
-
 private class UsbConnectionHandles(
     val connection: UsbDeviceConnection,
     val usbInterface: UsbInterface,
@@ -123,9 +118,8 @@ private class UsbConnectionHandles(
 )
 
 @Composable
-private fun ProbeScreen(scope: CoroutineScope) {
+private fun ProbeScreen(scope: CoroutineScope, log: ProbeLog, logFile: File) {
     val context = LocalContext.current
-    val log = remember { ProbeLog() }
     val entries by log.entries.collectAsState()
     val probeSession = remember { ProbeSession(scope, log) }
 
@@ -255,11 +249,12 @@ private fun ProbeScreen(scope: CoroutineScope) {
                             val ok = probeSession.runSafetyBackup(it.connection, it.inEndpoint, it.outEndpoint)
                             if (ok) {
                                 // L7 (Opus review): the backup only really exists once it has left
-                                // in-memory state. Persist it to disk automatically here, rather
-                                // than waiting for the user to remember "Save & share log" -- that
-                                // is what actually unlocks the two write drills below.
-                                val file = writeLogFile(context, log.render())
-                                log.info("S22 backup persisted to disk: ${file.absolutePath}")
+                                // in-memory state. Since issue #69, every ProbeLog entry
+                                // runSafetyBackup produced above is already durably flushed to
+                                // logFile in real time -- no separate write needed (and no
+                                // second, divergent copy of the same log) to unlock the two
+                                // write drills below.
+                                log.info("S22 backup persisted to disk: $logFile")
                                 s22BackupPersisted = true
                             } else {
                                 s22BackupPersisted = false
@@ -295,9 +290,11 @@ private fun ProbeScreen(scope: CoroutineScope) {
 
         OutlinedButton(
             onClick = {
-                val file = writeLogFile(context, log.render())
-                log.info("Log saved to ${file.absolutePath}")
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.probelogprovider", file)
+                // Issue #69: share the already-current real-time log file directly instead of
+                // writing a fresh render()-based copy -- avoids two divergent copies of the same
+                // log, and this file has been kept current (flushed) since the screen opened.
+                log.info("Log shared: $logFile")
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.probelogprovider", logFile)
                 context.startActivity(
                     Intent.createChooser(
                         Intent(Intent.ACTION_SEND).apply {
