@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  protocol:
+    name: protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANDROID_HOME: ''
+      ANDROID_SDK_ROOT: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      # Enforcement, not decoration: ubuntu-latest ships an Android SDK, so this job has to
+      # actively remove it for :protocol's SDK-free guarantee (#15) to be tested. Merely omitting
+      # an SDK setup step proves nothing on a runner that already has one sitting at
+      # /usr/local/lib/android with ANDROID_HOME pre-set.
+      - run: sudo mv /usr/local/lib/android /usr/local/lib/android.hidden || true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: chmod +x gradlew
+
+      # --no-daemon: a Gradle daemon is reused across invocations and a build reads the
+      # *daemon's* environment, not the client's — so unsetting ANDROID_HOME/ANDROID_SDK_ROOT for
+      # this one step is not reliable if an earlier step already warmed a daemon. This job is
+      # ~20s of work; the daemon buys nothing here. If a future AGP makes configuration itself
+      # demand the SDK, the fix is NOT to add an SDK to this job — it's to make :protocol
+      # resolvable standalone (composite build / --configure-on-demand).
+      - run: env -u ANDROID_HOME -u ANDROID_SDK_ROOT ./gradlew :protocol:test --no-daemon --stacktrace
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # 21, not 17 — see app/build.gradle.kts jvmToolchain(21)
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: chmod +x gradlew
+
+      # No explicit `sdkmanager` step: AGP 8.13.x auto-downloads the missing compileSdk 36
+      # platform/build-tools at build time as long as SDK licences are already accepted, which
+      # GitHub's Android-ready ubuntu-latest image does by default. Add an explicit sdkmanager
+      # step here only if this step's build log shows that auto-download failing.
+      #
+      # --continue: run lint and tests both to completion so one failing doesn't mask the other.
+      - run: ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --continue --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: lint-report-${{ github.run_number }}
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tonex-otg-debug-apk-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
