@@ -101,6 +101,8 @@ class FakeTonexController(
     override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = TonexResult.Success(Unit)
 
     override suspend fun revertActivePreset(): TonexResult<Unit> = TonexResult.Success(Unit)
+
+    override suspend fun restoreFootswitches(): TonexResult<Unit> = TonexResult.Success(Unit)
 }
 
 /**
