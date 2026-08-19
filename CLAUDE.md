@@ -190,8 +190,37 @@ Scope of that grant, and its one deliberate exception:
 - Name branches for the story they implement (e.g. `s8-state-blob-patching`),
   not just an opaque worktree ID, when the work corresponds to a real
   project story — it's how the next session finds unfinished work.
-- No pull request gets opened or merged without being asked. Verified,
-  pushed branches are the deliverable; merging is a separate, explicit step.
+- Opening a PR is a routine step, not something to ask permission for — see
+  "PR workflow" below. Merging follows Standing merge authority above
+  (autonomous once reviewed, green, and tested; escalate only per that
+  section's exceptions).
+
+## PR workflow
+
+The pattern of pushing a branch and writing status/review as issue comments
+(used through S20/S21) skips the two things PRs are actually for:
+line-anchored review comments, and a single mergeable unit with its own
+diff and check state. Follow this instead, matching how a non-agentic team
+would run it:
+
+1. Implementer finishes the change on their own branch and runs the
+   project's own verification (build, tests, lint) themselves first.
+2. Once verification is green, implementer opens the PR against `main` —
+   this is routine, not something to ask permission for. Put the
+   what/how/verification writeup in the PR description, not a fresh issue
+   comment.
+3. Reviewer (Opus, for anything in scope of "Review rigor" above) reviews
+   the PR's diff and posts findings as PR review comments anchored to the
+   actual lines, not as a wall of prose on the issue.
+4. Fixes for review findings land as new commits pushed to the same PR
+   branch. Re-run verification before pushing.
+5. The originating issue stays for scope, acceptance criteria, and
+   product-owner decisions (e.g. a recalibration comment); the PR carries
+   implementation and review, and closes the issue on merge (`Fixes #N` /
+   `Closes #N` in the PR description).
+6. Merge once review comments are resolved and checks are green, per
+   Standing merge authority above — no separate ask needed for reviewed,
+   tested work.
 
 ## Agent and session isolation
 

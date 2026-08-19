@@ -17,6 +17,11 @@ import kotlinx.coroutines.flow.onEach
  * `context` field (added for the same "which call site, from the log alone" reason) narrows
  * which of several structurally-similar checks actually failed once this wrapper's captured
  * bytes and that field are read together.
+ *
+ * [quiet], when `true`, skips both the hex-dump string building and the [ProbeLog] append entirely
+ * — for S21 (issue #26) latency measurements, where those are systematic, monotonically-increasing
+ * overhead sitting inside the very window being timed (`ProbeLog.append`'s list copy grows with
+ * every prior entry). See issue #26's adversarial review, finding S4.
  */
 class LoggingTonexTransport(
     private val delegate: TonexTransport,
@@ -24,13 +29,36 @@ class LoggingTonexTransport(
     private val tag: String,
 ) : TonexTransport {
 
+    /**
+     * Mutable rather than a constructor-only flag: callers toggle this around just the specific
+     * calls whose overhead must not be measured (e.g. [ProbeSession.runLatencyMeasurements]'s
+     * timed calls), while still getting normal hex-dump logging for the surrounding
+     * connect/disconnect traffic, which is exactly what a human would want to see if a measurement
+     * run fails to connect at all. Suppresses BOTH [write] and [incoming]'s logging — the flow
+     * side matters just as much as writes, since a read landing during a "quiet" window still goes
+     * through the same [ProbeLog.append] the flag exists to keep out of the measured window.
+     *
+     * `@Volatile`: written from the toggling caller's thread/coroutine context and read from
+     * [write]'s caller and separately from [incoming]'s long-lived `onEach` collector, with no
+     * other synchronization between those sites. A stale read wouldn't corrupt anything, but it
+     * would silently let a hex-dump append slip back into a timed window — exactly the bias this
+     * flag exists to eliminate — so this is made correct by construction rather than "usually
+     * correct" via incidental dispatcher-handoff publication. See PR #60 review.
+     */
+    @Volatile
+    var quiet: Boolean = false
+
     override suspend fun write(bytes: ByteArray): Int {
-        log.info("[$tag] WRITE ${bytes.size} byte(s):\n${UsbDeviceOpener.hexDump(bytes)}")
+        if (!quiet) {
+            log.info("[$tag] WRITE ${bytes.size} byte(s):\n${UsbDeviceOpener.hexDump(bytes)}")
+        }
         return delegate.write(bytes)
     }
 
     override fun incoming(): Flow<ByteArray> = delegate.incoming().onEach { bytes ->
-        log.info("[$tag] READ ${bytes.size} byte(s):\n${UsbDeviceOpener.hexDump(bytes)}")
+        if (!quiet) {
+            log.info("[$tag] READ ${bytes.size} byte(s):\n${UsbDeviceOpener.hexDump(bytes)}")
+        }
     }
 
     override fun close() = delegate.close()
