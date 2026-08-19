@@ -83,4 +83,8 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.junit4)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    // S14 (issue #19): PresetAliasStoreTest uses Turbine for Flow assertions, matching
+    // :protocol's convention for testing Flow-returning APIs.
+    testImplementation(libs.turbine)
 }
