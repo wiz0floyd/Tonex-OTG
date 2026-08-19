@@ -1,10 +1,10 @@
 package dev.tonexotg.protocol.diagnostics
 
 import dev.tonexotg.protocol.PresetIndex
-import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.TonexTransport
+import dev.tonexotg.protocol.connection.DefaultTonexController
 import dev.tonexotg.protocol.framing.HdlcFrame
 import dev.tonexotg.protocol.message.PresetDetailsKind
 import dev.tonexotg.protocol.message.PresetNameExtractor
@@ -52,11 +52,19 @@ import kotlinx.coroutines.CancellationException
  * buffer (e.g. left over from the connection handshake) can never be mistaken for the response to
  * *this* request.
  *
- * ## Caller contract
- * Must not be called concurrently with a [dev.tonexotg.protocol.TonexController] operation on the
- * same connection — both write to the same physical transport, and interleaving would race two
- * writes onto the wire. Every function in this file that calls this one already respects that
- * sequencing; a caller building a new drill on top of it must preserve it too.
+ * ## Caller contract — and how [controller] closes the race the old contract only documented
+ * Must not race a [dev.tonexotg.protocol.TonexController] operation's own request/response
+ * correlation on the same connection — both this function and, e.g.,
+ * [dev.tonexotg.protocol.connection.DefaultTonexController]'s internally-launched post-preset-
+ * change snapshot capture correlate responses by message type only, so either can consume the
+ * response meant for the other (Opus review of issue #27, finding M1). Pass the live
+ * [dev.tonexotg.protocol.connection.DefaultTonexController] as [controller] and this function
+ * acquires [dev.tonexotg.protocol.connection.DefaultTonexController.withOperationLock] around its
+ * whole write-then-await round trip, serializing it against every one of that controller's own
+ * locked operations, including that launched capture — see [DefaultTonexController.withOperationLock]'s
+ * own KDoc for the full mechanism. [controller] is `null` only in tests exercising this function
+ * with no live controller at all (nothing to race against then); every real caller in this file
+ * passes one.
  *
  * ## Rejects an implausibly short payload rather than diffing garbage
  * Every other consumer of a raw state blob in this codebase ([dev.tonexotg.protocol.PedalState.create],
@@ -71,21 +79,25 @@ suspend fun captureStateBlob(
     transport: TonexTransport,
     tap: MessageCaptureTap,
     timeoutMillis: Long,
+    controller: DefaultTonexController? = null,
 ): TonexResult<ByteArray> {
-    tap.drain()
-    writeRawFramed(transport, RequestStateMessage.encode()).let { if (it is TonexResult.Failure) return it }
-    val message = tap.awaitMessage(timeoutMillis) { it is TonexMessage.StateUpdate }
-        ?: return TonexResult.Failure(TonexError.Timeout("diagnostics-state-read", timeoutMillis))
-    val payload = (message as TonexMessage.StateUpdate).payload
-    if (payload.size < StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE) {
-        return TonexResult.Failure(
-            TonexError.BlobTooShortToPatch(
-                minimumSize = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE,
-                actualSize = payload.size,
-            ),
-        )
+    suspend fun roundTrip(): TonexResult<ByteArray> {
+        tap.drain()
+        writeRawFramed(transport, RequestStateMessage.encode()).let { if (it is TonexResult.Failure) return it }
+        val message = tap.awaitMessage(timeoutMillis) { it is TonexMessage.StateUpdate }
+            ?: return TonexResult.Failure(TonexError.Timeout("diagnostics-state-read", timeoutMillis))
+        val payload = (message as TonexMessage.StateUpdate).payload
+        if (payload.size < StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE) {
+            return TonexResult.Failure(
+                TonexError.BlobTooShortToPatch(
+                    minimumSize = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE,
+                    actualSize = payload.size,
+                ),
+            )
+        }
+        return TonexResult.Success(payload)
     }
-    return TonexResult.Success(payload)
+    return controller?.withOperationLock { roundTrip() } ?: roundTrip()
 }
 
 /** One preset's name and 109 parameter values, as captured by [capturePresetDetails]. */
@@ -105,30 +117,35 @@ data class PresetBackupEntry(
  * same mechanism [dev.tonexotg.protocol.connection.DefaultTonexController]'s own handshake already
  * uses to harvest all 20 preset names without ever touching what's active).
  *
- * Same [MessageCaptureTap.drain]-first and non-concurrency caller contract as [captureStateBlob].
+ * Same [MessageCaptureTap.drain]-first caller contract as [captureStateBlob], including the same
+ * [controller]-serializes-against-M1 mechanism — see that function's KDoc.
  */
 suspend fun capturePresetDetails(
     transport: TonexTransport,
     tap: MessageCaptureTap,
     index: PresetIndex,
     timeoutMillis: Long,
+    controller: DefaultTonexController? = null,
 ): TonexResult<PresetBackupEntry> {
-    tap.drain()
-    writeRawFramed(transport, RequestPresetDetailsMessage.encode(index, PresetDetailsKind.SUMMARY))
-        .let { if (it is TonexResult.Failure) return it }
-    val message = tap.awaitMessage(timeoutMillis) { it is TonexMessage.PresetDetails && !it.full }
-        ?: return TonexResult.Failure(TonexError.Timeout("diagnostics-preset-details-${index.value}", timeoutMillis))
-    val payload = (message as TonexMessage.PresetDetails).payload
+    suspend fun roundTrip(): TonexResult<PresetBackupEntry> {
+        tap.drain()
+        writeRawFramed(transport, RequestPresetDetailsMessage.encode(index, PresetDetailsKind.SUMMARY))
+            .let { if (it is TonexResult.Failure) return it }
+        val message = tap.awaitMessage(timeoutMillis) { it is TonexMessage.PresetDetails && !it.full }
+            ?: return TonexResult.Failure(TonexError.Timeout("diagnostics-preset-details-${index.value}", timeoutMillis))
+        val payload = (message as TonexMessage.PresetDetails).payload
 
-    val name = when (val r = PresetNameExtractor.extract(payload)) {
-        is TonexResult.Success -> r.value
-        is TonexResult.Failure -> return TonexResult.Failure(r.error)
+        val name = when (val r = PresetNameExtractor.extract(payload)) {
+            is TonexResult.Success -> r.value
+            is TonexResult.Failure -> return TonexResult.Failure(r.error)
+        }
+        val parameters = when (val r = PresetParameterExtractor.extract(payload)) {
+            is TonexResult.Success -> r.value
+            is TonexResult.Failure -> return TonexResult.Failure(r.error)
+        }
+        return TonexResult.Success(PresetBackupEntry(index, name, parameters))
     }
-    val parameters = when (val r = PresetParameterExtractor.extract(payload)) {
-        is TonexResult.Success -> r.value
-        is TonexResult.Failure -> return TonexResult.Failure(r.error)
-    }
-    return TonexResult.Success(PresetBackupEntry(index, name, parameters))
+    return controller?.withOperationLock { roundTrip() } ?: roundTrip()
 }
 
 /** A full backup: the raw state blob plus every one of the pedal's 20 onboard presets. */
@@ -147,14 +164,15 @@ suspend fun captureFullBackup(
     transport: TonexTransport,
     tap: MessageCaptureTap,
     timeoutMillis: Long,
+    controller: DefaultTonexController? = null,
 ): TonexResult<FullBackup> {
-    val blob = when (val r = captureStateBlob(transport, tap, timeoutMillis)) {
+    val blob = when (val r = captureStateBlob(transport, tap, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }
     val entries = mutableListOf<PresetBackupEntry>()
     for (i in PresetIndex.VALID_RANGE) {
-        when (val r = capturePresetDetails(transport, tap, PresetIndex(i), timeoutMillis)) {
+        when (val r = capturePresetDetails(transport, tap, PresetIndex(i), timeoutMillis, controller)) {
             is TonexResult.Success -> entries.add(r.value)
             is TonexResult.Failure -> return r
         }
@@ -206,13 +224,13 @@ data class PresetChangeDrillResult(
  *   failing to run.
  */
 suspend fun runPresetChangeByteDiffDrill(
-    controller: TonexController,
+    controller: DefaultTonexController,
     transport: TonexTransport,
     tap: MessageCaptureTap,
     targetPreset: PresetIndex,
     timeoutMillis: Long,
 ): TonexResult<PresetChangeDrillResult> {
-    val before = when (val r = captureStateBlob(transport, tap, timeoutMillis)) {
+    val before = when (val r = captureStateBlob(transport, tap, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }
@@ -246,7 +264,7 @@ suspend fun runPresetChangeByteDiffDrill(
         is TonexResult.Failure -> return r
     }
 
-    val after = when (val r = captureStateBlob(transport, tap, timeoutMillis)) {
+    val after = when (val r = captureStateBlob(transport, tap, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }
@@ -293,34 +311,39 @@ private const val PARAMETER_TOLERANCE = 1e-3f
  * same "accepted by the transport is not the same as confirmed applied" distinction
  * `ProbeSession.runWriteTest` already draws for its own single-parameter write test.
  *
- * @param edit the caller's edit sequence — must return [TonexResult.Success] for the drill to
- *   proceed to the revert step; a failure here aborts the drill (nothing to revert).
+ * @param edit the caller's edit sequence, invoked with the just-captured pre-edit baseline
+ *   ([PresetBackupEntry.parameters]) so the caller can log it before issuing a single write — an
+ *   Opus review of issue #27 (M4) pointed out that without this, a caller has no way to record the
+ *   one piece of data that would let a human recover manually if [edit] or the revert call right
+ *   after it fails outright (this function returns [TonexResult.Failure] in either case, carrying
+ *   no baseline of its own). Must return [TonexResult.Success] for the drill to proceed to the
+ *   revert step; a failure here aborts the drill (nothing to revert).
  * @return [TonexResult.Failure] if any capture, [edit], or the revert call itself fails outright;
  *   see [runPresetChangeByteDiffDrill]'s KDoc for the same "failure vs. a completed-but-failed-
  *   audit result" distinction.
  */
 suspend fun runRevertDrill(
-    controller: TonexController,
+    controller: DefaultTonexController,
     transport: TonexTransport,
     tap: MessageCaptureTap,
     timeoutMillis: Long,
-    edit: suspend () -> TonexResult<Unit>,
+    edit: suspend (beforeEntry: PresetBackupEntry) -> TonexResult<Unit>,
 ): TonexResult<RevertDrillResult> {
     val active = controller.activePreset.value
         ?: return TonexResult.Failure(
             TonexError.ProtocolStateViolation(controller.connectionState.value, "revert drill: active preset is not known"),
         )
 
-    val beforeBlob = when (val r = captureStateBlob(transport, tap, timeoutMillis)) {
+    val beforeBlob = when (val r = captureStateBlob(transport, tap, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }
-    val beforeEntry = when (val r = capturePresetDetails(transport, tap, active, timeoutMillis)) {
+    val beforeEntry = when (val r = capturePresetDetails(transport, tap, active, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }
 
-    when (val r = edit()) {
+    when (val r = edit(beforeEntry)) {
         is TonexResult.Success -> Unit
         is TonexResult.Failure -> return r
     }
@@ -330,11 +353,11 @@ suspend fun runRevertDrill(
         is TonexResult.Failure -> return r
     }
 
-    val afterEntry = when (val r = capturePresetDetails(transport, tap, active, timeoutMillis)) {
+    val afterEntry = when (val r = capturePresetDetails(transport, tap, active, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }
-    val afterBlob = when (val r = captureStateBlob(transport, tap, timeoutMillis)) {
+    val afterBlob = when (val r = captureStateBlob(transport, tap, timeoutMillis, controller)) {
         is TonexResult.Success -> r.value
         is TonexResult.Failure -> return r
     }

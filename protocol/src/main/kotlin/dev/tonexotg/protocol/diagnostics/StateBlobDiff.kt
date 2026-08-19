@@ -206,10 +206,14 @@ data class PresetChangeAudit(
      * more dangerous half of this drill to leave unevidenced.
      */
     fun describe(before: ByteArray, after: ByteArray): String {
+        // N1 (Opus review of f0efacc): NamedStateBlobFields.nameFor() already returns a
+        // fully-formed "E <offset>, <name>" string (or null for an unnamed offset) -- prepending
+        // another "E $it" here used to double the offset in the output ("E 11 (E 11, current
+        // slot)"). Fall back to a bare "E <offset>" only when there is genuinely no name.
         fun nameOffsets(offsets: Set<Int>) = if (offsets.isEmpty()) {
             "none"
         } else {
-            offsets.sorted().joinToString { "E $it (${NamedStateBlobFields.nameFor(before.size - it, before.size) ?: "?"})" }
+            offsets.sorted().joinToString { NamedStateBlobFields.nameFor(before.size - it, before.size) ?: "E $it" }
         }
         val out = StringBuilder()
         out.append(if (passed) "PASSED" else "FAILED").append(" — ")
@@ -223,6 +227,26 @@ data class PresetChangeAudit(
         }
         if (unexpectedIndices.isNotEmpty()) {
             out.append("\n  UNEXPECTED: byte(s) changed OUTSIDE all four sanctioned offsets — STOP AND ESCALATE")
+        }
+        if (!passed) {
+            // N2 (Opus review of f0efacc): a FAILED audit is not automatically evidence of pedal
+            // corruption. This class only ever sees [before]/[after] -- it cannot tell "something
+            // wrote outside its documented scope" apart from "a human touched the pedal (a
+            // footswitch press, the front panel, the IK editor) in the narrow window between the
+            // two captures this audit diffed." The latter is a real, reachable false alarm: e.g.
+            // dev.tonexotg.protocol.diagnostics.runPresetChangeByteDiffDrill computes its expected
+            // offset(s) from the drill's OWN pre-write `before` blob, but
+            // dev.tonexotg.protocol.connection.DefaultTonexController.selectPreset does its own
+            // MANDATORY fresh re-read internally and branches off THAT read -- if the pedal's
+            // active slot moved in between (e.g. a footswitch press mid-drill), selectPreset can
+            // legitimately take a different branch than this audit predicted. Named here rather
+            // than left implicit, so "STOP AND ESCALATE" doesn't send someone chasing a bug that
+            // was actually just a footswitch press.
+            out.append(
+                "\n  Before escalating: rule out a benign external preset/state change during the drill (a " +
+                    "footswitch press, the front panel, the IK editor) in the window between this audit's two " +
+                    "captures -- see this method's own KDoc for a concrete way that can happen.",
+            )
         }
         out.append("\n").append(diff.formatDifferences(before, after))
         return out.toString()

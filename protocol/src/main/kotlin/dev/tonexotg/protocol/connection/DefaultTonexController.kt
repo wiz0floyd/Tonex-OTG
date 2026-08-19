@@ -1290,4 +1290,37 @@ class DefaultTonexController(
         }
         TonexResult.Success(Unit)
     }
+
+    /**
+     * ⚠️ DIAGNOSTIC-ONLY HOOK (issue #27 / S22, Opus review finding M1). Runs [block] while
+     * holding the same [operationMutex] that [connect]/[selectPreset]/[setParameter]/
+     * [revertActivePreset]/[restoreFootswitches] already serialize themselves against.
+     *
+     * ## Why this exists
+     * `dev.tonexotg.protocol.diagnostics.SafetyDrill`'s raw, transport-level captures
+     * (`RequestStateMessage`/`RequestPresetDetailsMessage`, sent directly over the transport
+     * because this controller intentionally exposes no method for either — see that package's
+     * KDoc) sit entirely outside this controller's own request/response bookkeeping. Without this
+     * hook, one of those raw captures can race the post-preset-change snapshot capture
+     * [applyStateUpdate] launches asynchronously on [scope] (`scope.launch { operationMutex.withLock
+     * { captureSnapshotLocked(idx) } }`): both issue a `RequestPresetDetailsMessage` and both
+     * correlate the response by message type only (`requestAndAwait`'s predicate here,
+     * `MessageCaptureTap.awaitMessage`'s predicate there) — no per-request id exists to tell the
+     * two apart, so either one can consume the response meant for the other. Acquiring the same
+     * mutex for the drill's raw round trip closes that: whichever caller (this controller's own
+     * launched capture, or the drill via this hook) gets the lock first completes its full
+     * request-then-await round trip before the other can even issue its write.
+     *
+     * ## Not part of [dev.tonexotg.protocol.TonexController]
+     * Deliberately not surfaced on the public interface the UI layer consumes — an ordinary
+     * caller has no reason to hold this lock directly, and exposing it there would invite far
+     * more dangerous misuse than a diagnostics-only drill reaching into this concrete class.
+     *
+     * ## [block] must never call back into this controller's own locked operations
+     * [Mutex] is not reentrant: [block] calling [connect], [selectPreset], [setParameter],
+     * [revertActivePreset], or [restoreFootswitches] — all of which acquire [operationMutex]
+     * themselves — would deadlock this controller. [block] must only ever issue raw, read-only
+     * requests directly over the transport (exactly what `SafetyDrill`'s capture functions do).
+     */
+    suspend fun <T> withOperationLock(block: suspend () -> T): T = operationMutex.withLock { block() }
 }
