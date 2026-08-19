@@ -112,6 +112,8 @@ class FakeTonexController : TonexController {
         return revertResult
     }
 
+    override suspend fun restoreFootswitches(): TonexResult<Unit> = TonexResult.Success(Unit)
+
     /** Test helper: sets [id]'s live value directly, as if it had just been read from the pedal. */
     fun seedParameterValue(id: ParameterId, value: Float) {
         _parameterValues.value = _parameterValues.value + (id to value)
