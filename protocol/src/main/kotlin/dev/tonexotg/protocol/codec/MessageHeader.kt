@@ -87,28 +87,32 @@ sealed class MessageType {
 }
 
 /**
- * The fixed four-field envelope every Tonex message opens with, immediately after the `B9 03`
- * prefix (see [MessageHeaderCodec]).
+ * The envelope every Tonex message opens with, immediately after the `B9 03` prefix (see
+ * [MessageHeaderCodec]). **Field count is direction-dependent** — see [MessageHeaderCodec]'s class
+ * KDoc for the confirmed evidence: [encode] always writes all four fields (the real, confirmed
+ * outbound shape); [decode] only ever reads three off the wire and always sets [unknownB] to
+ * `null`, since a real inbound frame has no fourth header field at all.
  *
  * @property type the message's [MessageType], decoded from the header's first varint.
  * @property declaredSize the header's second varint. This **is** an exact byte count: the number
  *   of bytes in [DecodedMessage.payload] always equals this value — [MessageHeaderCodec.decode]
- *   rejects the frame otherwise. (An earlier version of this codec treated `size` as merely a
- *   lower bound, based on a three-varint reading of the header that mis-attributed [unknownB] to
- *   the payload; that reading was confirmed wrong against upstream source and has been corrected.
- *   See [MessageHeaderCodec] for the full story and the five confirmed data points behind it.)
- * @property unknownA the header's third varint. Its meaning is **not documented upstream**.
- *   Observed value across every known message: `11`, with no variation seen yet.
- * @property unknownB the header's fourth varint. Its meaning is **not documented upstream**.
- *   Observed values: `1` for a hello request, `3` for every other message type seen so far —
- *   consistent with, but not confirmed as, a "is this the first message of the session" flag.
- *   Named positionally rather than guessing at that or any other meaning.
+ *   rejects the frame otherwise.
+ * @property unknownA the header's third varint — present in both directions. Its meaning is **not
+ *   documented upstream**. Observed value across every known outbound message: `11`, with no
+ *   variation seen yet; for a decoded inbound header this is the single field upstream's own
+ *   `usb_tonex_one_parse` calls `header.unknown`.
+ * @property unknownB the header's fourth varint, **outbound only**. `null` for any [MessageHeader]
+ *   produced by [MessageHeaderCodec.decode] — there is no fourth field to decode. Non-null and
+ *   required by [MessageHeaderCodec.encode], which always produces the 4-field outbound shape.
+ *   Observed outbound values: `1` for a hello request, `3` for every other message type seen so
+ *   far — consistent with, but not confirmed as, a "is this the first message of the session"
+ *   flag. Named positionally rather than guessing at that or any other meaning.
  */
 data class MessageHeader(
     val type: MessageType,
     val declaredSize: Long,
     val unknownA: Long,
-    val unknownB: Long,
+    val unknownB: Long?,
 )
 
 /**
@@ -136,44 +140,64 @@ class DecodedMessage(val header: MessageHeader, val payload: ByteArray) {
 /**
  * Codec for the fixed header every Tonex message opens with.
  *
- * ## Wire format
+ * ## Wire format is direction-dependent — [encode] emits 4 fields, [decode] reads 3
  *
  * ```
- * B9 03 <type: varint> <size: varint> <unknownA: varint> <unknownB: varint> <payload...>
+ * outbound (host -> pedal), [encode]:  B9 03 <type> <size> <unknownA> <unknownB> <payload...>
+ * inbound  (pedal -> host), [decode]:  B9 03 <type> <size> <unknown>            <payload...>
  * ```
  *
- * The two literal bytes `B9 03` are followed by **four** [TonexVarint]-encoded integers — `type`,
- * `size`, and two further fields whose meaning is not documented upstream (see
- * [MessageHeader.unknownA] / [MessageHeader.unknownB]) — and then exactly `size` bytes of payload.
+ * This asymmetry is a **confirmed protocol fact**, not a guess, and this codec previously got it
+ * wrong in both directions at different times — see "History" below before touching either side
+ * of this again.
  *
- * This is a correction to this codec's original three-varint reading (issue #9's initial writeup
- * of "type, size, and one opaque field"). Testing a four-varint model against every complete
- * message literal in upstream `usb_tonex_one.c` confirms it exactly, `size` included — it is a
- * precise body-length match once the fourth field is accounted for as part of the header rather
- * than folded into the payload:
+ * **Outbound (`encode`) — 4 fields, confirmed against 5 literal request/message arrays in
+ * upstream `usb_tonex_one.c`** (lines 204, 224, 246, 272, 347 — see [encode]'s own KDoc for the
+ * full table). These are byte-for-byte literals from a real, working ESP32 host-controller
+ * project, not derived or guessed.
  *
- * | Source | type | size | unknownA | unknownB | body length |
- * |---|---|---|---|---|---|
- * | `usb_tonex_one.c:204` (hello) | `0x0000` | `4` | `11` | `1` | `4` |
- * | `usb_tonex_one.c:224` (request state) | `0x0000` | `6` | `11` | `3` | `6` |
- * | `usb_tonex_one.c:246` (preset details) | `0x0300` | `6` | `11` | `3` | `6` |
- * | `usb_tonex_one.c:347` | `0x030D` | `5` | `11` | `3` | `5` |
- * | `usb_tonex_one.c:272` (header-only template) | `0x0309` | `10` | `11` | `3` | `0` (body appended at runtime) |
+ * **Inbound (`decode`) — 3 fields, confirmed against `usb_tonex_one_parse()`**, the actual
+ * function that same upstream project uses to parse bytes *received from* a real pedal
+ * (`usb_tonex_one.c`, function starting near line 1014):
+ * ```c
+ * uint8_t index = 2;
+ * uint16_t type = tonex_common_parse_value(FramedBuffer, &index);
+ * ...
+ * header.size = tonex_common_parse_value(FramedBuffer, &index);
+ * header.unknown = tonex_common_parse_value(FramedBuffer, &index);   // ONE field, not two
+ * ...
+ * if ((out_len - index) != header.size) { ESP_LOGE(TAG, "Invalid message size"); ... }
+ * ```
+ * Three `parse_value` calls total (`type`, `size`, `unknown`) before the size check — never a
+ * fourth. Also matches this same function's own `if (out_len < 5)` minimum-length guard: 2 prefix
+ * bytes + 3 single-byte-minimum fields = 5, not 6.
  *
- * The last row is a header upstream constructs and then appends a body to at runtime, not a
- * complete message — decoding it as-is (`size = 10`, zero bytes following) correctly fails this
- * codec's size validation below; that is expected, not a counterexample.
+ * And now confirmed a third way, empirically: a real ToneX One's Hello-ack response, captured
+ * byte-identical across two independent hardware connections (issue #25), decodes cleanly under
+ * this 3-field model (`size=43` exactly matches 43 remaining bytes) and is "1 byte short" under
+ * the old 4-field model applied to `decode`.
+ *
+ * ### History — why this needed re-litigating instead of trusting the last correction
+ * Issue #9's original writeup described three fields (matching what's now confirmed correct for
+ * inbound). Commit `03a1b3f` "corrected" this to four fields — but that correction tested its
+ * model *only* against the five outbound literals above, never against `usb_tonex_one_parse`
+ * itself, and predated any real hardware. It was a real fix for `encode` and an unverified,
+ * silently-wrong extrapolation onto `decode`. `ConnectionTestFixtures` then built every simulated
+ * inbound pedal response using that same wrong 4-field shape, so every `DefaultTonexController`
+ * test round-tripped through the identical (wrong) model on both ends and passed 100% — the exact
+ * "self-consistent round-trip hides a real wire-format bug" trap this project's own CLAUDE.md
+ * already names from the S7 finding. Real hardware (issue #25) is what finally caught it.
  *
  * ## Validation
  *
  * [decode] rejects:
- * - a buffer shorter than the minimum possible header (`B9 03` + 4 single-byte literal varints
- *   = 6 bytes) — [TonexError.MalformedFrame];
+ * - a buffer shorter than the minimum possible header (`B9 03` + 3 single-byte literal varints
+ *   = 5 bytes) — [TonexError.MalformedFrame];
  * - a buffer whose first two bytes are not exactly `B9 03` — [TonexError.MalformedFrame];
  * - a `size` field that does not exactly equal the number of bytes remaining after the header —
- *   [TonexError.UnexpectedBlobShape]. `size` is an exact body length (see the table above), so
- *   both too few bytes (truncation) and too many (trailing garbage / a framing bug upstream)
- *   are rejected the same way.
+ *   [TonexError.UnexpectedBlobShape]. `size` is an exact body length, so both too few bytes
+ *   (truncation) and too many (trailing garbage / a framing bug upstream) are rejected the same
+ *   way.
  *
  * A truncated varint *within* the header (e.g. a `0x82` marker with no data bytes following) is
  * also rejected, as a [TonexError.MalformedFrame] surfaced from [TonexVarint.decode] — never a
@@ -184,13 +208,20 @@ object MessageHeaderCodec {
     private const val PREFIX_0: Int = 0xB9
     private const val PREFIX_1: Int = 0x03
 
-    /** `B9 03` + the smallest possible encoding (1 byte each) of the four header varints. */
-    private const val MIN_FRAME_LENGTH = 6
+    /**
+     * `B9 03` + the smallest possible encoding (1 byte each) of the three header varints
+     * [decode] actually reads (`type`, `size`, `unknown`) — matches upstream's own
+     * `usb_tonex_one_parse`'s `if (out_len < 5)` minimum-length guard exactly. See the class
+     * KDoc's "inbound" section for why this is 3 fields, not 4.
+     */
+    private const val MIN_FRAME_LENGTH = 5
 
     /**
-     * Decodes a full message (header + payload) from [bytes]. See the class KDoc for the
-     * validation rules applied. On success, [DecodedMessage.payload] is exactly
-     * [MessageHeader.declaredSize] bytes long.
+     * Decodes a full inbound message (header + payload) from [bytes]. See the class KDoc for the
+     * validation rules applied and why this reads a 3-field header (`type`, `size`, `unknown`),
+     * not the 4-field shape [encode] writes. On success, [DecodedMessage.payload] is exactly
+     * [MessageHeader.declaredSize] bytes long, and [DecodedMessage.header]'s [MessageHeader.unknownB]
+     * is always `null`.
      */
     fun decode(bytes: ByteArray): TonexResult<DecodedMessage> {
         if (bytes.size < MIN_FRAME_LENGTH) {
@@ -225,6 +256,87 @@ object MessageHeaderCodec {
         }
         cursor += size.bytesConsumed
 
+        // Inbound frames carry exactly one further field after `size` (upstream's `header.unknown`)
+        // -- NOT two. See class KDoc's "inbound" section for the confirmed evidence; a 4th field
+        // here was this codec's own bug, silently masked by self-consistent round-trip tests until
+        // real hardware (issue #25) caught it.
+        val unknown = when (val result = decodeIntField(bytes, cursor, "unknown")) {
+            is TonexResult.Failure -> return result
+            is TonexResult.Success -> result.value
+        }
+        cursor += unknown.bytesConsumed
+
+        val remaining = bytes.size - cursor
+        if (size.value != remaining.toLong()) {
+            return TonexResult.Failure(
+                TonexError.UnexpectedBlobShape(
+                    context = "message header body (MessageHeaderCodec.decode)",
+                    expectedSize = size.value.toInt(),
+                    actualSize = remaining,
+                ),
+            )
+        }
+        val payload = bytes.copyOfRange(cursor, bytes.size)
+
+        val header = MessageHeader(
+            type = MessageType.fromWireId(type.value),
+            declaredSize = size.value,
+            unknownA = unknown.value,
+            unknownB = null,
+        )
+        return TonexResult.Success(DecodedMessage(header, payload))
+    }
+
+    /**
+     * `B9 03` + the smallest possible encoding (1 byte each) of the four header varints
+     * [decodeOutbound] reads (`type`, `size`, `unknownA`, `unknownB`).
+     */
+    private const val MIN_OUTBOUND_FRAME_LENGTH = 6
+
+    /**
+     * Decodes a frame this app itself produced via [encode] — the 4-field outbound shape — back
+     * into a [DecodedMessage]. **Not for real inbound pedal responses**; use [decode] for those.
+     *
+     * Exists because [encode]'s output sometimes needs to be read back: test suites that capture
+     * what [DefaultTonexController][dev.tonexotg.protocol.connection.DefaultTonexController]
+     * actually wrote and assert on it (`FakeTonexTransport.writtenMessages()`), and diagnostic
+     * tooling that wants to interpret captured outbound wire traffic (the S20 probe harness's
+     * write-side logging) both need to parse the *outbound* shape specifically — [decode] would
+     * misread it, for the same reason it would misread any 4-field frame.
+     */
+    fun decodeOutbound(bytes: ByteArray): TonexResult<DecodedMessage> {
+        if (bytes.size < MIN_OUTBOUND_FRAME_LENGTH) {
+            return TonexResult.Failure(
+                TonexError.MalformedFrame(
+                    "message header (outbound): frame is ${bytes.size} byte(s), need at least $MIN_OUTBOUND_FRAME_LENGTH",
+                ),
+            )
+        }
+
+        val b0 = bytes[0].toInt() and 0xFF
+        val b1 = bytes[1].toInt() and 0xFF
+        if (b0 != PREFIX_0 || b1 != PREFIX_1) {
+            return TonexResult.Failure(
+                TonexError.MalformedFrame(
+                    "message header (outbound): expected prefix B9 03, got %02X %02X".format(b0, b1),
+                ),
+            )
+        }
+
+        var cursor = 2
+
+        val type = when (val result = decodeIntField(bytes, cursor, "type")) {
+            is TonexResult.Failure -> return result
+            is TonexResult.Success -> result.value
+        }
+        cursor += type.bytesConsumed
+
+        val size = when (val result = decodeIntField(bytes, cursor, "size")) {
+            is TonexResult.Failure -> return result
+            is TonexResult.Success -> result.value
+        }
+        cursor += size.bytesConsumed
+
         val unknownA = when (val result = decodeIntField(bytes, cursor, "unknownA")) {
             is TonexResult.Failure -> return result
             is TonexResult.Success -> result.value
@@ -241,7 +353,7 @@ object MessageHeaderCodec {
         if (size.value != remaining.toLong()) {
             return TonexResult.Failure(
                 TonexError.UnexpectedBlobShape(
-                    context = "message header body (MessageHeaderCodec.decode)",
+                    context = "message header body (MessageHeaderCodec.decodeOutbound)",
                     expectedSize = size.value.toInt(),
                     actualSize = remaining,
                 ),
@@ -293,13 +405,19 @@ object MessageHeaderCodec {
      * are capped at [TonexVarint.MAX_INT_VALUE] by the same `require` [encodeInt] uses.
      */
     fun encode(header: MessageHeader, payload: ByteArray): ByteArray {
+        val unknownB = checkNotNull(header.unknownB) {
+            "MessageHeaderCodec.encode: header.unknownB is null. encode() always produces the " +
+                "4-field outbound wire shape (see class KDoc), so unknownB is required here -- a " +
+                "null header.unknownB means this header came from decode() (the 3-field inbound " +
+                "shape) and should never be fed back into encode()."
+        }
         val out = ArrayList<Byte>(2 + 8 + payload.size)
         out.add(PREFIX_0.toByte())
         out.add(PREFIX_1.toByte())
         out.addAll(encodeTypeField(header.type.wireId).asIterable())
         out.addAll(encodeSizeField(header.declaredSize).asIterable())
         out.addAll(encodeUnknownAField(header.unknownA).asIterable())
-        out.addAll(TonexVarint.encodeInt(header.unknownB).asIterable())
+        out.addAll(TonexVarint.encodeInt(unknownB).asIterable())
         out.addAll(payload.asIterable())
         return out.toByteArray()
     }

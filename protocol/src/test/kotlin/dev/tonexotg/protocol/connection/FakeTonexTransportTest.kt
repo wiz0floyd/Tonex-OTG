@@ -5,6 +5,7 @@ import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.codec.MessageType
 import dev.tonexotg.protocol.framing.decodeFrames
+import dev.tonexotg.protocol.message.HelloMessage
 import dev.tonexotg.protocol.message.PresetNameExtractor
 import dev.tonexotg.protocol.message.SingleParameterPayload
 import dev.tonexotg.protocol.message.SingleParameterPayloadCodec
@@ -97,13 +98,16 @@ class FakeTonexTransportTest {
 
     @Test
     fun `writtenMessages decodes captured writes back to DecodedMessage`() = runTest {
+        // A genuine outbound message (HelloMessage.encode(), the real 4-field shape) - not
+        // helloResponse(), which is now the *inbound* 3-field fixture and would no longer decode
+        // via writtenMessages()'s decodeOutbound() call. See MessageHeaderCodec's class KDoc.
         val fake = FakeTonexTransport()
-        fake.write(dev.tonexotg.protocol.framing.HdlcFrame.encode(helloResponse()))
+        fake.write(dev.tonexotg.protocol.framing.HdlcFrame.encode(HelloMessage.encode()))
 
         val decoded = fake.writtenMessages()
 
         assertEquals(1, decoded.size)
-        assertEquals(MessageType.Hello, decoded[0].header.type)
+        assertEquals(MessageType.Unknown(0), decoded[0].header.type)
     }
 
     // ---- fixture builders decode correctly -----------------------------------------------------

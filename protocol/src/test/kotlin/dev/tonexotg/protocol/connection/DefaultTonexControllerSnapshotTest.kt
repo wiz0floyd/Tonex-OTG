@@ -12,8 +12,6 @@ import dev.tonexotg.protocol.SessionId
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexEvent
 import dev.tonexotg.protocol.TonexResult
-import dev.tonexotg.protocol.codec.MessageHeader
-import dev.tonexotg.protocol.codec.MessageHeaderCodec
 import dev.tonexotg.protocol.codec.MessageType
 import dev.tonexotg.protocol.message.FirmwareCapabilities
 import dev.tonexotg.protocol.message.PresetNameExtractor
@@ -415,12 +413,6 @@ class DefaultTonexControllerSnapshotTest {
         // Corrupt the first parameter's marker byte (right after PresetParameterExtractor.marker()).
         block[PresetParameterExtractor.marker().size] = 0x00
         val payload = PresetNameExtractor.marker() + nameField + block
-        val header = MessageHeader(
-            type = MessageType.PresetDetailsSummary,
-            declaredSize = payload.size.toLong(),
-            unknownA = 11L,
-            unknownB = 3L,
-        )
-        return MessageHeaderCodec.encode(header, payload)
+        return encodeInboundFrame(MessageType.PresetDetailsSummary, unknown = 11L, payload = payload)
     }
 }

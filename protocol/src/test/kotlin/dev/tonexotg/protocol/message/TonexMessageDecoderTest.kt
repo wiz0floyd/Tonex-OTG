@@ -11,8 +11,10 @@ import kotlin.test.assertTrue
 
 class TonexMessageDecoderTest {
 
+    // unknownB = null matches what MessageHeaderCodec.decode() always produces for a real inbound
+    // header (only 3 wire fields) -- see MessageHeaderCodec's class KDoc.
     private fun decoded(type: MessageType, payload: ByteArray): DecodedMessage =
-        DecodedMessage(MessageHeader(type, payload.size.toLong(), unknownA = 11, unknownB = 3), payload)
+        DecodedMessage(MessageHeader(type, payload.size.toLong(), unknownA = 11, unknownB = null), payload)
 
     // ---- all five catalogued message types ----------------------------------------------------------
 

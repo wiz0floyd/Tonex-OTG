@@ -78,7 +78,11 @@ class FakeTonexTransport : TonexTransport {
 
     /**
      * Decodes every captured [write] call back into a [DecodedMessage] via
-     * [HdlcFrame.decode] + [MessageHeaderCodec.decode], in call order.
+     * [HdlcFrame.decode] + [MessageHeaderCodec.decodeOutbound], in call order.
+     *
+     * Uses `decodeOutbound`, not `decode`: a captured [write] is always something this app itself
+     * encoded via [MessageHeaderCodec.encode] (the 4-field outbound shape) — never a real inbound
+     * pedal response, which `decode` (3-field) is for. See [MessageHeaderCodec]'s class KDoc.
      *
      * Fails loudly (via [kotlin.test.fail]) if any captured write does not round-trip as a valid
      * framed message — a test relying on this should never have to debug a silently-empty list.
@@ -88,7 +92,7 @@ class FakeTonexTransport : TonexTransport {
             is TonexResult.Success -> r.value
             is TonexResult.Failure -> kotlin.test.fail("captured write did not decode as a valid HDLC frame: ${r.error.message}")
         }
-        when (val r = MessageHeaderCodec.decode(unframed)) {
+        when (val r = MessageHeaderCodec.decodeOutbound(unframed)) {
             is TonexResult.Success -> r.value
             is TonexResult.Failure -> kotlin.test.fail("captured write did not decode as a valid message header: ${r.error.message}")
         }
