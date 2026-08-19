@@ -411,6 +411,29 @@ sealed class TonexError {
     }
 
     /**
+     * [TonexController.restoreFootswitches] was called but the three footswitch slot assignments
+     * (A/B/C) were never successfully captured this session.
+     *
+     * Per issue #36's own acceptance criteria, this must be a loud, typed refusal rather than a
+     * silent no-op: a caller offering a "restore my footswitches" affordance needs to be able to
+     * tell the difference between "nothing to restore because nothing changed" (not this case)
+     * and "there is nothing captured to restore *to*" (this case) — e.g. because the handshake's
+     * state blob failed to decode as a plausible slot region ([ImplausibleStateBlobShape] /
+     * [BlobTooShortToPatch] internally), or because [TonexController.restoreFootswitches] was
+     * called before a connection ever reached [ConnectionState.Ready].
+     *
+     * A permanent member of the error taxonomy, not a placeholder: a session whose handshake blob
+     * failed to decode legitimately has no footswitch snapshot, and restore must still refuse
+     * loudly rather than guessing at what A/B/C used to be.
+     */
+    data object NoFootswitchSnapshotAvailable : TonexError() {
+        override val message: String
+            get() = "No footswitch slot assignments were captured this session (before any write " +
+                "could have changed them) — refusing to restore, because there is nothing captured " +
+                "to restore to"
+    }
+
+    /**
      * A value handed to [TonexController.setParameter] fell outside its [ParameterSpec.min]..[ParameterSpec.max].
      *
      * [TonexController.setParameter]'s contract is explicit that "out-of-range values are rejected
