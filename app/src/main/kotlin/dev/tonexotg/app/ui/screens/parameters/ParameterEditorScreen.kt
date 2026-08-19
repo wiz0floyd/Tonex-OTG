@@ -1,0 +1,364 @@
+package dev.tonexotg.app.ui.screens.parameters
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import dev.tonexotg.app.ui.components.DestructiveActionConfirmationDialog
+import dev.tonexotg.app.ui.components.ParameterControl
+import dev.tonexotg.app.ui.components.ParameterNumericEntrySheet
+import dev.tonexotg.app.ui.components.ParameterSelectChipRow
+import dev.tonexotg.app.ui.components.ParameterStepper
+import dev.tonexotg.app.ui.components.ParameterSwitch
+import dev.tonexotg.app.ui.theme.TonexTheme
+import dev.tonexotg.app.ui.theme.minTouchTarget
+import dev.tonexotg.protocol.ParameterId
+
+/**
+ * The Parameter Editor screen (S17, issue #22) — quick tier, then a persistent app bar, a
+ * "Master Volume" bottom dock, and the full-tier accordion, all as D3 §1.3 requires: "one
+ * continuous scrolling screen," not two separate routes or tabs.
+ *
+ * Takes an already-constructed [ParameterEditorViewModel] rather than constructing one itself or
+ * reading a `NavController` — per this story's guardrail, this file does not touch
+ * `MainActivity.kt` or build any navigation graph; a future navigation story wires a real
+ * `TonexController`/scope into a [ParameterEditorViewModel] and hosts this composable.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ParameterEditorScreen(viewModel: ParameterEditorViewModel, modifier: Modifier = Modifier) {
+    val uiState by viewModel.uiState.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    val externalMessage = uiState.externalPresetChangeMessage
+    LaunchedEffect(externalMessage) {
+        if (externalMessage != null) {
+            snackbarHostState.showSnackbar(externalMessage, duration = SnackbarDuration.Short)
+            viewModel.onExternalPresetChangeMessageShown()
+        }
+    }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = uiState.presetName.ifBlank { "Parameter Editor" },
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                },
+            )
+        },
+        bottomBar = {
+            uiState.masterVolume?.let { row ->
+                MasterVolumeDock(
+                    row = row,
+                    onValueChange = { viewModel.onRangeDrag(row.id, it) },
+                    onValueTextClick = { viewModel.onNumericEntryOpen(row.id) },
+                )
+            }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { contentPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .padding(contentPadding)
+                .fillMaxSize()
+                .testTag("parameterEditor.scrollList"),
+            contentPadding = PaddingValues(TonexTheme.spacing.space3),
+            verticalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space4),
+        ) {
+            items(uiState.quickTier, key = { "quick.${it.row.id.index}" }) { card ->
+                QuickTierCardView(
+                    card = card,
+                    onValueChange = { viewModel.onRangeDrag(card.row.id, it) },
+                    onValueTextClick = { viewModel.onNumericEntryOpen(card.row.id) },
+                )
+            }
+
+            item(key = "allParametersHeader") {
+                Text(
+                    text = "All Parameters",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+
+            items(uiState.categories, key = { "category.${it.title}" }) { category ->
+                CategoryAccordion(
+                    category = category,
+                    expanded = category.title in uiState.expandedCategories,
+                    onToggle = { viewModel.onCategoryToggle(category.title) },
+                    onRangeChange = viewModel::onRangeDrag,
+                    onValueTextClick = viewModel::onNumericEntryOpen,
+                    onSwitchToggle = viewModel::onSwitchToggle,
+                    onStepperChange = viewModel::onStepperChange,
+                    onModelSelect = viewModel::onModelSelect,
+                )
+            }
+
+            item(key = "revertSection") {
+                RevertSection(onRevertClick = viewModel::onRevertRequested)
+            }
+        }
+    }
+
+    uiState.numericEntryTarget?.let { row ->
+        ParameterNumericEntrySheet(
+            parameterName = row.label,
+            initialValue = row.value,
+            valueRange = row.range,
+            unit = row.unit.ifBlank { null },
+            decimalPlaces = row.decimalPlaces,
+            onDismiss = viewModel::onNumericEntryDismiss,
+            onSet = viewModel::onNumericEntrySet,
+        )
+    }
+
+    if (uiState.firstWriteWarningVisible) {
+        FirstDestructiveWriteNotice(presetName = uiState.presetName, onDismiss = viewModel::onFirstWriteWarningDismiss)
+    }
+
+    if (uiState.revertConfirmVisible) {
+        DestructiveActionConfirmationDialog(
+            title = "Revert to snapshot?",
+            message = "This immediately rewrites all 109 parameters of ${uiState.presetName} back to " +
+                "their values from when it became active. The pedal auto-saves — this can't be undone either.",
+            confirmLabel = "Revert Anyway",
+            onConfirm = viewModel::onRevertConfirmed,
+            onCancel = viewModel::onRevertCancelled,
+        )
+    }
+
+    uiState.revertError?.let { message ->
+        AlertDialog(
+            onDismissRequest = viewModel::onRevertErrorDismissed,
+            confirmButton = {
+                TextButton(onClick = viewModel::onRevertErrorDismissed) { Text("OK") }
+            },
+            title = { Text("Revert failed") },
+            text = { Text(message) },
+        )
+    }
+}
+
+@Composable
+private fun QuickTierCardView(card: QuickTierCardUiState, onValueChange: (Float) -> Unit, onValueTextClick: () -> Unit) {
+    Column(modifier = Modifier.testTag("quickTier.card.${card.row.id.index}")) {
+        ParameterControl(
+            label = card.row.label,
+            value = card.row.value,
+            valueRange = card.row.range,
+            valueText = card.row.valueText,
+            onValueChange = onValueChange,
+            abbreviation = card.row.abbreviation,
+            onValueTextClick = onValueTextClick,
+        )
+        card.resolvedCaption?.let { caption ->
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.labelSmall,
+                color = TonexTheme.extendedColors.onSurfaceTertiary,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MasterVolumeDock(row: ParameterRow.Range, onValueChange: (Float) -> Unit, onValueTextClick: () -> Unit) {
+    // D1 §2.1 `surface.raised-1` (top app bar / bottom bar token) — global scope reads as chrome,
+    // not as belonging to whichever preset is open (D3 §1.1).
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        ParameterControl(
+            label = "Master Volume",
+            value = row.value,
+            valueRange = row.range,
+            valueText = row.valueText,
+            onValueChange = onValueChange,
+            abbreviation = row.abbreviation,
+            onValueTextClick = onValueTextClick,
+            modifier = Modifier
+                .padding(TonexTheme.spacing.space3)
+                .testTag("masterVolume.dock"),
+        )
+    }
+}
+
+@Composable
+private fun CategoryAccordion(
+    category: CategoryUiState,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRangeChange: (ParameterId, Float) -> Unit,
+    onValueTextClick: (ParameterId) -> Unit,
+    onSwitchToggle: (ParameterId, Boolean) -> Unit,
+    onStepperChange: (ParameterId, Int) -> Unit,
+    onModelSelect: (ParameterId, Int) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .minTouchTarget(TonexTheme.touchTargets.secondary)
+                .clickable(onClick = onToggle)
+                .testTag("category.header.${category.title}"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(text = category.title, style = MaterialTheme.typography.headlineSmall)
+            Text(text = if (expanded) "−" else "+", style = MaterialTheme.typography.headlineSmall)
+        }
+
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = TonexTheme.spacing.space2, top = TonexTheme.spacing.space2)
+                    .testTag("category.body.${category.title}"),
+                verticalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space3),
+            ) {
+                when (category) {
+                    is CategoryUiState.Flat ->
+                        category.rows.forEach { row ->
+                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                        }
+
+                    is CategoryUiState.Banked -> {
+                        category.alwaysOnRows.forEach { row ->
+                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                        }
+                        ParameterSelectChipRow(
+                            options = category.selector.options,
+                            selected = category.selector.selectedIndex,
+                            onSelect = { onModelSelect(category.selector.id, it) },
+                            label = category.selector.optionLabel,
+                            modifier = Modifier.testTag("modelSelector.${category.title}"),
+                        )
+                        // D3 §2.1: only the selected model's rows are ever composed here — every
+                        // other model's rows are absent, not grayed or collapsed.
+                        category.modelRows.forEach { row ->
+                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ParameterRowView(
+    row: ParameterRow,
+    onRangeChange: (ParameterId, Float) -> Unit,
+    onValueTextClick: (ParameterId) -> Unit,
+    onSwitchToggle: (ParameterId, Boolean) -> Unit,
+    onStepperChange: (ParameterId, Int) -> Unit,
+) {
+    when (row) {
+        is ParameterRow.Range -> ParameterControl(
+            label = row.label,
+            value = row.value,
+            valueRange = row.range,
+            valueText = row.valueText,
+            onValueChange = { onRangeChange(row.id, it) },
+            abbreviation = row.abbreviation,
+            onValueTextClick = { onValueTextClick(row.id) },
+            modifier = Modifier.testTag("paramRow.range.${row.id.index}"),
+        )
+
+        is ParameterRow.Switch -> ParameterSwitch(
+            label = row.label,
+            checked = row.checked,
+            onCheckedChange = { onSwitchToggle(row.id, it) },
+            abbreviation = row.abbreviation,
+            modifier = Modifier.testTag("paramRow.switch.${row.id.index}"),
+        )
+
+        is ParameterRow.Stepper -> ParameterStepper(
+            label = row.label,
+            value = row.value,
+            range = row.range,
+            onValueChange = { onStepperChange(row.id, it) },
+            abbreviation = row.abbreviation,
+            modifier = Modifier.testTag("paramRow.stepper.${row.id.index}"),
+        )
+    }
+}
+
+@Composable
+private fun FirstDestructiveWriteNotice(presetName: String, onDismiss: () -> Unit) {
+    // D3 §5.2: a single "Got it" button, no Cancel — dismissing the dialog *is* proceeding,
+    // because the write it describes has already happened. Structurally different from
+    // DestructiveActionConfirmationDialog (two buttons, inverted hierarchy, gates an action that
+    // has not happened yet), so this is its own small dialog rather than a forced reuse.
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .minTouchTarget(TonexTheme.touchTargets.secondary)
+                    .testTag("firstWriteNotice.gotIt"),
+            ) {
+                Text("Got it")
+            }
+        },
+        title = { Text("Heads up") },
+        text = {
+            Text(
+                "Tonex-OTG writes every change straight to the pedal as you make it. There's no undo " +
+                    "on the pedal itself. A snapshot of $presetName was taken the moment it became " +
+                    "active. You can revert to it any time from Settings — until then, experiment freely.",
+            )
+        },
+    )
+}
+
+@Composable
+private fun RevertSection(onRevertClick: () -> Unit) {
+    // D3 §5.1 places this entry point in Settings (S18, not yet built) — see
+    // ParameterEditorViewModel's KDoc for why it lives here, at the very bottom of the screen,
+    // for now.
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = TonexTheme.spacing.space5),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        OutlinedButton(
+            onClick = onRevertClick,
+            modifier = Modifier
+                .minTouchTarget(TonexTheme.touchTargets.secondary)
+                .testTag("parameterEditor.revertButton"),
+        ) {
+            Text("Revert…")
+        }
+    }
+}
