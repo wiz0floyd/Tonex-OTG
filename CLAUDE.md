@@ -56,6 +56,16 @@ accordingly:
   can't tell which without checking. (This is not hypothetical: on this
   project, re-running the suite after two agents died turned out to
   contradict what one of them believed about its own test failures.)
+- **Auto-schedule a check-in nudge whenever background work is in flight.**
+  Any time this session dispatches agents that keep working without the
+  user watching, or is itself waiting out a usage-limit reset, schedule a
+  self wake-up by default — 5 hours out — using whatever scheduling tool is
+  available (e.g. `send_later` / `ScheduleWakeup`), without waiting to be
+  asked for it. Re-arm it at each check-in until the outstanding work is
+  actually merged or the user explicitly says to stop. Don't assume you, or
+  the user, will be there to notice when something needs attention;
+  schedule the reminder as part of dispatching the work, not as an
+  afterthought once someone asks for it.
 
 ## Agent model selection
 
@@ -140,6 +150,34 @@ Scope of that grant, and its one deliberate exception:
   project story — it's how the next session finds unfinished work.
 - No pull request gets opened or merged without being asked. Verified,
   pushed branches are the deliverable; merging is a separate, explicit step.
+
+## Agent and session isolation
+
+Every concurrent agent or session must work in its own dedicated git
+worktree (or an equivalent fully separate clone) before touching any
+file — never let two agents share a single working directory, even
+briefly. This is not optional tidiness: it caused a real mess in this
+project. Five dev agents were once dispatched without worktree isolation,
+shared one directory, and ended up checking out each other's branches
+mid-task; one agent's in-progress commit landed on a completely unrelated
+branch and was only caught because it hadn't been pushed yet. Untangling
+it cost an entire orchestration session that should have gone to actual
+story work.
+
+- When dispatching an agent that will write to the repo (orchestrator or
+  subagent), either use the harness's own worktree-isolation option if one
+  is available, or manually `git worktree add <dedicated-path> <branch>`
+  and tell the agent its exclusive path before it does anything else.
+  Never rely on an agent to "just checkout its own branch" in a directory
+  another agent might also be touching.
+- A shared read-only checkout (research, grepping, reading files) is fine.
+  The rule is about concurrent *writes* — anything that runs `git
+  checkout`, `git commit`, or edits tracked files needs its own worktree.
+- If a collision is ever discovered anyway (stray files, a commit on the
+  wrong branch), don't guess: check `git log <branch>..<other-branch>` and
+  `git show` on the suspect commit before deciding what to keep, move, or
+  undo, and prefer `git reset --soft` over `--hard` so nothing is lost
+  while sorting it out.
 
 ## Repo structure
 
