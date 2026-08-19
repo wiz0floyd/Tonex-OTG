@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -35,6 +37,12 @@ import dev.tonexotg.app.ui.theme.minTouchTarget
  *
  * The whole row meets [dev.tonexotg.app.ui.theme.TonexTouchTargets.min] (64dp) per D1 §4.2 — a
  * preset switch is the single most performance-critical action in the app.
+ *
+ * @param onEditAlias when non-null, renders a separate edit affordance (its own
+ *   [dev.tonexotg.app.ui.theme.TonexTouchTargets.secondary] touch target, so it can never
+ *   register as the row's own [onClick]) that invokes this callback — S16's inline alias-editing
+ *   entry point. `null` (the default) renders no edit affordance at all, which is what every
+ *   pre-S16 caller/preview of this component already expects.
  */
 @Composable
 fun PresetRow(
@@ -44,6 +52,7 @@ fun PresetRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    onEditAlias: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(10.dp)
     val borderColor = if (isActive) MaterialTheme.colorScheme.primary else Color.Transparent
@@ -107,6 +116,23 @@ fun PresetRow(
                 color = MaterialTheme.colorScheme.primary,
             )
         }
+
+        if (onEditAlias != null) {
+            Box(
+                modifier = Modifier
+                    .minTouchTarget(TonexTheme.touchTargets.secondary)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onEditAlias)
+                    .semantics { contentDescription = "Edit name for preset $index" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "✎",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TonexTheme.extendedColors.onSurfaceTertiary,
+                )
+            }
+        }
     }
 }
 
@@ -134,6 +160,22 @@ private fun PresetRowInactivePreview() {
             name = "DJENT TIGHT",
             isActive = false,
             onClick = {},
+            modifier = Modifier.padding(16.dp),
+        )
+    }
+}
+
+@Preview(name = "Preset row — with edit-alias affordance (S16)", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun PresetRowEditableAliasPreview() {
+    TonexTheme {
+        PresetRow(
+            index = "07",
+            name = "Set Opener",
+            isActive = true,
+            onClick = {},
+            subtitle = "from pedal: PRESET 07",
+            onEditAlias = {},
             modifier = Modifier.padding(16.dp),
         )
     }
