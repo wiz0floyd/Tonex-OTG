@@ -207,6 +207,16 @@ would run it:
 
 1. Implementer finishes the change on their own branch and runs the
    project's own verification (build, tests, lint) themselves first.
+   **Lint specifically, not just tests:** `./gradlew :app:lintDebug` (in
+   addition to `:app:testDebugUnitTest`/`:protocol:test`) — this is not a
+   hypothetical omission. `:app:lintDebug` was red on `main` for the entire
+   span of S11-S13 (`ContextCompat.registerReceiver`'s flags argument,
+   `[WrongConstant]`) because every implementer across all three stories,
+   and the Opus reviewer across four separate review passes, ran the test
+   suite but never lint. It was the exact tool that would have caught the
+   real crash bug (unconditional `IllegalArgumentException` on every API
+   level) that S13 instead found the hard way by decompiling an AAR
+   mid-story. Green tests are not a substitute for green lint; run both.
 2. Once verification is green, implementer opens the PR against `main` —
    this is routine, not something to ask permission for. Put the
    what/how/verification writeup in the PR description, not a fresh issue
