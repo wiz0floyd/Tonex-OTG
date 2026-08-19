@@ -38,6 +38,9 @@ class ProbeSession(
      */
     val writeTestParameterEnumName: String = "EQ_MID"
 
+    /** S21 (issue #26): how many back-to-back writes [runLatencyMeasurements]'s slider-drag burst fires. Mirrors [SLIDER_DRAG_STEPS]. */
+    val sliderDragSteps: Int = SLIDER_DRAG_STEPS
+
     /**
      * Runs the read-only diagnostic pass: connects with [FirmwareCapabilities.NONE_CONFIRMED]
      * (the conservative default this codebase's own KDoc calls for before a capability is

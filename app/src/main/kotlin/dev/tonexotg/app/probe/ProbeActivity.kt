@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -132,6 +134,8 @@ private fun ProbeScreen(scope: CoroutineScope) {
     var activePreset by remember { mutableStateOf<PresetIndex?>(null) }
     var busy by remember { mutableStateOf(false) }
     var showWriteTestDialog by remember { mutableStateOf(false) }
+    var showLatencyDialog by remember { mutableStateOf(false) }
+    var latencyTransportKind by remember { mutableStateOf(TransportKind.BULK_TRANSFER) }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -205,6 +209,27 @@ private fun ProbeScreen(scope: CoroutineScope) {
             onClick = { showWriteTestDialog = true },
         ) {
             Text("Single-parameter write test (writes to your pedal)")
+        }
+
+        Text("S21 Latency measurements (issue #26) — informational only, no pass/fail target", style = MaterialTheme.typography.titleSmall)
+
+        Text("Transport for the latency run:", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TransportKind.entries.forEach { kind ->
+                FilterChip(
+                    enabled = !busy,
+                    selected = latencyTransportKind == kind,
+                    onClick = { latencyTransportKind = kind },
+                    label = { Text(kind.label) },
+                )
+            }
+        }
+
+        Button(
+            enabled = !busy && readOnlyPassDone && handles != null,
+            onClick = { showLatencyDialog = true },
+        ) {
+            Text("Run latency measurements (writes to your pedal)")
         }
 
         OutlinedButton(
@@ -303,6 +328,46 @@ private fun ProbeScreen(scope: CoroutineScope) {
             },
             dismissButton = {
                 OutlinedButton(onClick = { showWriteTestDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showLatencyDialog) {
+        AlertDialog(
+            onDismissRequest = { showLatencyDialog = false },
+            title = { Text("This will write to your pedal") },
+            text = {
+                Text(
+                    "This measures issue #26's latency numbers using transport: ${latencyTransportKind.label}. " +
+                        "It switches the active preset and back, writes ${probeSession.writeTestParameterEnumName} " +
+                        "to a test value and restores it, then fires ${probeSession.sliderDragSteps} rapid-fire " +
+                        "parameter writes with no pacing (a simulated slider drag) and restores the original value " +
+                        "afterward. Purely informational — there is no pass/fail target, per the product owner's " +
+                        "issue #26 comment. As with the single-parameter write test, back up this preset's " +
+                        "settings first if you have any way to.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showLatencyDialog = false
+                    busy = true
+                    scope.launch {
+                        try {
+                            handles?.let {
+                                probeSession.runLatencyMeasurements(it.connection, it.inEndpoint, it.outEndpoint, latencyTransportKind)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            log.error("Latency measurements crashed: ${t::class.simpleName}: ${t.message}")
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }) { Text("I understand, run the latency measurements") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showLatencyDialog = false }) { Text("Cancel") }
             },
         )
     }
