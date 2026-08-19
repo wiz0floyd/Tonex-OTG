@@ -19,10 +19,20 @@
           Placeholder scaffold only (S10 / issue #15). Real screens land in S15-S19 once the
           design gate is signed off; this Activity exists solely to prove the AGP/Compose
           wiring assembles and runs.
+
+          android:taskAffinity is explicit (and distinct from ProbeActivity's below) because both
+          activities declare their own MAIN/LAUNCHER intent-filter, giving each its own icon in
+          the app drawer — with neither activity overriding taskAffinity, both default to the
+          SAME value (the application's package name), which puts them in the same task. That
+          made the two launcher icons unreliable: opening one and then the other could resurface
+          whichever task already existed instead of actually starting the newly-tapped Activity,
+          so both icons could appear to open the same (first-launched) screen. Distinct
+          affinities give each launcher icon its own task, so each reliably opens its own Activity.
         -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:taskAffinity="${applicationId}.main">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -34,11 +44,15 @@
           navigation — see dev.tonexotg.app.probe's KDoc. A standalone launcher activity so the
           product owner can run it directly from the device's app drawer, separate from
           MainActivity, without any of this being wired into real screens (S16-S19).
+
+          android:taskAffinity is distinct from MainActivity's — see MainActivity's own comment
+          above for why an explicit, distinct affinity is required on every launcher activity.
         -->
         <activity
             android:name=".probe.ProbeActivity"
             android:label="Tonex Probe (Diagnostic)"
             android:exported="true"
+            android:taskAffinity="${applicationId}.probe"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
             <!--
               configChanges above keeps a rotation (or keyboard/UI-mode change) from destroying
