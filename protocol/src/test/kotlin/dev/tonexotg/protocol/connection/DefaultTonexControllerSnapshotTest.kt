@@ -16,6 +16,8 @@ import dev.tonexotg.protocol.codec.MessageType
 import dev.tonexotg.protocol.message.FirmwareCapabilities
 import dev.tonexotg.protocol.message.PresetNameExtractor
 import dev.tonexotg.protocol.message.PresetParameterExtractor
+import dev.tonexotg.protocol.message.SingleParameterPayload
+import dev.tonexotg.protocol.message.SingleParameterPayloadCodec
 import dev.tonexotg.protocol.params.ParameterRegistry
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
@@ -299,6 +301,69 @@ class DefaultTonexControllerSnapshotTest {
         assertIs<TonexResult.Success<Unit>>(revertResult)
         assertEquals(originalValue, controller.parameterValues.value.getValue(ParameterId(2)), 1e-3f)
         assertFalse(controller.parameterValues.value.getValue(ParameterId(2)) == changedValue)
+    }
+
+    // ---- first-arrival-wins retention (issue #46's own bug-report scenario, verbatim) ------------
+
+    @Test
+    fun `select preset 3, tweak, switch to preset 7, switch back - preset 3's snapshot still holds the original values`() = runTest {
+        val fake = FakeTonexTransport()
+        val store = InMemorySnapshotStore()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            snapshotStore = store,
+        )
+        val connectDeferred = async { controller.connect(fake) }
+        val originalValues = snapshotValues()
+        // Start on preset 3 (slot A); preset 7 lives on slot B.
+        driveToReady(fake, activeSlot = PresetSlot.A, a = 3, b = 7, c = 19, captureValues = originalValues)
+        connectDeferred.await()
+        assertEquals(PresetIndex(3), controller.activePreset.value)
+        assertSnapshotValuesEqual(originalValues, store.snapshotFor(PresetIndex(3)), "preset 3's first-arrival snapshot")
+
+        // Tweak preset 3's parameters -- still on preset 3, no active-preset change yet.
+        val spec5 = requireNotNull(ParameterRegistry.byIndex(5))
+        controller.setParameter(ParameterId(5), spec5.min)
+        assertEquals(spec5.min, controller.parameterValues.value.getValue(ParameterId(5)), 1e-3f)
+
+        // Switch to preset 7 -- its FIRST arrival this session, so it gets its own snapshot recorded.
+        val sevenValues = alteredSnapshotValues(offset = 3)
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 3, b = 7, c = 19)))
+        testScheduler.runCurrent()
+        fake.emitMessage(presetDetailsSummaryWithParameters("Preset 7", sevenValues))
+        testScheduler.runCurrent()
+        assertEquals(PresetIndex(7), controller.activePreset.value)
+        assertSnapshotValuesEqual(sevenValues, store.snapshotFor(PresetIndex(7)), "preset 7's first-arrival snapshot")
+
+        // Switch back to preset 3. The pedal auto-saved the earlier tweak, so its live read now
+        // reports the TWEAKED state, not the original -- exactly the shape of the real bug report.
+        val tweakedValues = originalValues.copyOf().also { it[5] = spec5.min }
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 3, b = 7, c = 19)))
+        testScheduler.runCurrent()
+        fake.emitMessage(presetDetailsSummaryWithParameters("Preset 3 again", tweakedValues))
+        testScheduler.runCurrent()
+        assertEquals(PresetIndex(3), controller.activePreset.value)
+
+        // The DISPLAYED values reflect what the pedal just reported (the tweak) -- the live read
+        // still happens on every arrival, only the retained snapshot does not.
+        assertEquals(spec5.min, controller.parameterValues.value.getValue(ParameterId(5)), 1e-3f)
+
+        // The core assertion: preset 3's RETAINED snapshot is still the ORIGINAL, pre-tweak values
+        // captured on first arrival -- not overwritten by the re-arrival's fresh (tweaked) read.
+        assertSnapshotValuesEqual(originalValues, store.snapshotFor(PresetIndex(3)), "preset 3's snapshot after returning to it")
+
+        // And therefore revertActivePreset() restores the ORIGINAL values, not the tweaked ones.
+        val writesBefore = fake.writtenMessages().size
+        val result = controller.revertActivePreset()
+        assertIs<TonexResult.Success<Unit>>(result)
+        val newWrites = fake.writtenMessages().drop(writesBefore)
+        assertEquals(109, newWrites.size)
+        for ((i, msg) in newWrites.withIndex()) {
+            val decoded = SingleParameterPayloadCodec.decode(msg.payload)
+            assertIs<TonexResult.Success<SingleParameterPayload>>(decoded)
+            assertEquals(originalValues[i], decoded.value.value, 1e-3f, "write $i should restore the ORIGINAL pre-tweak value")
+        }
     }
 
     // ---- helpers --------------------------------------------------------------------------------
