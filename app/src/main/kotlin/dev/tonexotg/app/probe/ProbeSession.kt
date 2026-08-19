@@ -5,16 +5,27 @@ import android.hardware.usb.UsbEndpoint
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.ParameterSpec
 import dev.tonexotg.protocol.PresetIndex
+import dev.tonexotg.protocol.TonexController
+import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.connection.ConnectionTimeouts
 import dev.tonexotg.protocol.connection.DefaultTonexController
 import dev.tonexotg.protocol.diagnostics.BurstStats
+import dev.tonexotg.protocol.diagnostics.MessageCaptureTap
+import dev.tonexotg.protocol.diagnostics.PresetBackupEntry
+import dev.tonexotg.protocol.diagnostics.StateBlobDiff
 import dev.tonexotg.protocol.diagnostics.TimedResult
+import dev.tonexotg.protocol.diagnostics.captureFullBackup
+import dev.tonexotg.protocol.diagnostics.captureStateBlob
 import dev.tonexotg.protocol.diagnostics.measureLatency
+import dev.tonexotg.protocol.diagnostics.runPresetChangeByteDiffDrill
+import dev.tonexotg.protocol.diagnostics.runRevertDrill
 import dev.tonexotg.protocol.message.FirmwareCapabilities
 import dev.tonexotg.protocol.params.ParameterRegistry
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MICROS_PER_MILLI = 1_000.0
@@ -629,6 +640,387 @@ class ProbeSession(
                     "still hold a burst value, NOT the original ($before ${spec.unit}) — please restore it manually.",
             )
         }
+    }
+
+    // ==== S22 (issue #27): first-write safety drill ==============================================
+    //
+    // Every drill below follows runWriteTest's own paranoia: real-controller writes only (never a
+    // synthesized payload), a mandatory fresh read-back rather than trusting "the transport
+    // accepted the write," and NonCancellable protection around any window where a mid-flight
+    // Activity teardown could leave an edit half-applied with no log trace. The actual byte-diff
+    // and drill-sequencing logic lives in `:protocol`'s `dev.tonexotg.protocol.diagnostics`
+    // package (unit-tested there against FakeTonexTransport, no hardware needed) — this class only
+    // wires it to a real USB connection and narrates the result into [log].
+    //
+    // Uses [UsbRequestTonexTransport], not [UsbTonexTransport] — an Opus review of issue #27
+    // suggested it as a better fit for this harness: it serializes its own concurrent [write]
+    // callers behind a real [kotlinx.coroutines.sync.Mutex] (see its own KDoc), one more layer of
+    // defence underneath the M1 fix below, which is what actually closes the race this matters
+    // for.
+
+    /** Generous, diagnostic-only budget for every raw request a S22 drill issues. Not tuned against
+     * real hardware round-trip times (that is S21's job for the timing constants actually used in
+     * production) — this harness can afford to simply wait a long time. */
+    private val drillTimeoutMillis = 5_000L
+
+    /**
+     * Subscribes to [controller]'s [TonexController.connectionState] for as long as this session
+     * runs and logs every transition with a timestamp (via [ProbeLog], which stamps every entry
+     * automatically) — issue #27 §5's "log every ConnectionState transition throughout a session"
+     * soak-test support. Deliberately just this: no foreground service, no reconnect logic, no
+     * simulated gig/rehearsal timing (S13 is a separate, un-built story, and the product owner has
+     * since descoped §5 to "log what happened," not "survive a gig" — see issue #27's comments).
+     * The soak test itself is a human running this probe for an extended session, backgrounding
+     * the app, turning the screen off, and replugging the cable — this just makes sure the saved
+     * log actually shows what the connection did while that happened.
+     */
+    private fun launchConnectionHealthLog(controller: TonexController, tag: String): Job = scope.launch {
+        controller.connectionState.collect { state ->
+            log.info("[connection-health:$tag] connectionState -> $state")
+        }
+    }
+
+    /**
+     * Issue #27 §1 — captures the pedal's full state blob (raw hex) and all 20 presets'
+     * names/parameters, before any write. Read-only throughout; never calls anything that writes
+     * to the pedal. This is the mandatory first step before running either write drill below —
+     * [ProbeActivity]'s UI enforces that ordering (the write-drill buttons only enable after this
+     * one has completed successfully AND the log has actually been saved to disk — issue #27
+     * review, L7: the backup only really exists once it has left in-memory state).
+     *
+     * ## H2 (Opus review): teardown runs in `finally`, unconditionally
+     * A cancelled or crashed backup pass must still stop the health-log collector, disconnect, and
+     * close the transport — the straight-line-only teardown the old wiring had would leak this
+     * session's reader thread into the NEXT drill's connection, corrupting ITS reads (see
+     * [UsbTonexTransport]'s own KDoc on why a leaked reader thread is not cosmetic).
+     *
+     * @return `true` iff the backup completed successfully.
+     */
+    suspend fun runSafetyBackup(
+        connection: UsbDeviceConnection,
+        inEndpoint: UsbEndpoint,
+        outEndpoint: UsbEndpoint,
+    ): Boolean {
+        log.warn("=== S22 safety drill: full backup starting (issue #27 §1 — read-only) ===")
+        val transport = LoggingTonexTransport(UsbRequestTonexTransport(connection, inEndpoint, outEndpoint), log, "s22-backup")
+        val tap = MessageCaptureTap(transport)
+        val controller = DefaultTonexController(
+            scope = scope,
+            capabilities = FirmwareCapabilities.NONE_CONFIRMED,
+            timeouts = ConnectionTimeouts.DEFAULT,
+        )
+        val healthJob = launchConnectionHealthLog(controller, "s22-backup")
+        try {
+            val connectResult = controller.connect(tap)
+            if (connectResult is TonexResult.Failure) {
+                log.error("Backup: connect() failed: ${connectResult.error.message}")
+                return false
+            }
+
+            return when (val result = captureFullBackup(tap, tap, drillTimeoutMillis, controller)) {
+                is TonexResult.Success -> {
+                    val backup = result.value
+                    log.finding(
+                        "S22 backup: full state blob (${backup.stateBlob.size} bytes):\n" +
+                            UsbDeviceOpener.hexDump(backup.stateBlob),
+                    )
+                    for (entry in backup.presets) {
+                        log.info(
+                            "S22 backup: preset ${entry.index.value} \"${entry.name}\": " +
+                                entry.parameters.joinToString(prefix = "[", postfix = "]") { "%.4f".format(it) },
+                        )
+                    }
+                    log.finding(
+                        "S22 backup COMPLETE: state blob + ${backup.presets.size}/20 presets captured, before any " +
+                            "write this session. Save this log now (Save & share log) before running either write drill.",
+                    )
+                    true
+                }
+                is TonexResult.Failure -> {
+                    log.error("S22 backup FAILED: ${result.error.message}. Do not proceed to a write drill without a successful backup.")
+                    false
+                }
+            }
+        } finally {
+            healthJob.cancel()
+            runCatching { controller.disconnect() }
+                .onFailure { log.error("S22 backup: disconnect() failed during teardown: ${it.message}") }
+            runCatching { transport.close() }
+                .onFailure { log.error("S22 backup: transport.close() failed during teardown: ${it.message}") }
+        }
+    }
+
+    /**
+     * Issue #27 §2/§3 — the preset-change byte-diff drill: capture the full state blob, change the
+     * active preset via the real [dev.tonexotg.protocol.TonexController.selectPreset] (never a
+     * synthesized write), capture the blob again, and byte-diff the two arrays completely. See
+     * [dev.tonexotg.protocol.diagnostics.PresetChangeAudit]'s KDoc for why a clean result answers
+     * three separate parts of issue #27 at once (only slot bytes changed, no global drifted,
+     * `DIRECT_MONITOR`/stomp-AB unchanged) — this is not three checks, it is one exhaustive diff.
+     *
+     * Selects a different target preset (the next index, wrapping), runs the drill, then attempts
+     * to restore the pedal's original active preset.
+     *
+     * ## H1 (Opus review): NonCancellable covers the write onward, not just the restore
+     * The old wiring wrapped only the restore attempt in [NonCancellable] and claimed that matched
+     * `runWriteTest`'s own reasoning — it didn't: `runWriteTest` wraps everything from immediately
+     * after ITS write through its own restore, because [runPresetChangeByteDiffDrill] itself
+     * suspends for up to [drillTimeoutMillis] inside its "after" capture, AFTER
+     * `selectPreset(target)`'s write has already landed. Cancelling in that window (back press,
+     * Home + system reclaim) with the old code would unwind by `CancellationException` before ever
+     * reaching the restore, stranding the pedal on the drill's target preset with no log trace.
+     * Here the whole drill call is inside [NonCancellable], matching `runWriteTest`'s actual shape.
+     *
+     * ## M5 (Opus review): the restore is independently re-verified, not just sent
+     * This drill already holds a live [MessageCaptureTap]; a third raw capture plus a byte-diff
+     * against the pre-drill [PresetChangeDrillResult.before] blob is a few lines and proves the
+     * pedal genuinely returned to its pre-drill state, rather than leaving the drill's final state
+     * as an unverified "sent" claim — for a story whose whole point is "prove the app cannot
+     * corrupt the pedal," that is worth the extra round trip.
+     */
+    suspend fun runPresetChangeSafetyDrill(
+        connection: UsbDeviceConnection,
+        inEndpoint: UsbEndpoint,
+        outEndpoint: UsbEndpoint,
+    ) {
+        log.warn(
+            "=== S22 safety drill: preset-change byte-diff drill starting (issue #27 §2/§3 — " +
+                "THIS WILL CHANGE THE PEDAL'S ACTIVE PRESET) ===",
+        )
+        val transport = LoggingTonexTransport(UsbRequestTonexTransport(connection, inEndpoint, outEndpoint), log, "s22-preset-diff")
+        val tap = MessageCaptureTap(transport)
+        val controller = DefaultTonexController(
+            scope = scope,
+            capabilities = FirmwareCapabilities.NONE_CONFIRMED,
+            timeouts = ConnectionTimeouts.DEFAULT,
+        )
+        val healthJob = launchConnectionHealthLog(controller, "s22-preset-diff")
+        try {
+            val connectResult = controller.connect(tap)
+            if (connectResult is TonexResult.Failure) {
+                log.error("Preset-change drill: connect() failed: ${connectResult.error.message}")
+                return
+            }
+
+            val original = controller.activePreset.value
+            if (original == null) {
+                log.error("Preset-change drill: active preset is not known after connect() — aborting, nothing was written.")
+                return
+            }
+            val target = PresetIndex((original.value + 1) % (PresetIndex.VALID_RANGE.last + 1))
+
+            // H1: from here (immediately before the drill's own selectPreset write) through the
+            // restore attempt and its verification below, cancellation must not unwind silently.
+            withContext(NonCancellable) {
+                when (val drillResult = runPresetChangeByteDiffDrill(controller, tap, tap, target, drillTimeoutMillis)) {
+                    is TonexResult.Success -> {
+                        val (_, before, after, audit) = drillResult.value
+                        // B2 (Opus review): describe() is logged on BOTH the pass and fail path — a
+                        // PASS with zero numbers is exactly the "no side effects detected: true"
+                        // report issue #27's own ground-truth comment pre-declared unacceptable
+                        // (B1). This is the single highest-value line this drill can log, per the
+                        // Opus review's own answer to the open question about old->new byte
+                        // reporting.
+                        if (audit.passed) {
+                            log.finding(
+                                "Preset-change byte-diff drill PASSED (preset ${original.value} -> " +
+                                    "${target.value}):\n${audit.describe(before, after)}",
+                            )
+                        } else {
+                            log.error(
+                                "Preset-change byte-diff drill FAILED (preset ${original.value} -> " +
+                                    "${target.value}). STOP AND ESCALATE per issue #27 §3:\n" +
+                                    audit.describe(before, after),
+                            )
+                        }
+
+                        log.info("Restoring original active preset ${original.value}...")
+                        when (val restore = controller.selectPreset(original)) {
+                            is TonexResult.Success -> {
+                                // M5: independently re-verify the restore rather than trusting
+                                // "accepted by the transport."
+                                when (val restoreCapture = captureStateBlob(tap, tap, drillTimeoutMillis, controller)) {
+                                    is TonexResult.Success -> {
+                                        val restoreDiff = StateBlobDiff.of(before, restoreCapture.value)
+                                        if (restoreDiff.identical) {
+                                            log.info(
+                                                "Restore VERIFIED: an independent re-read confirms the state blob " +
+                                                    "is now byte-identical to the pre-drill capture.",
+                                            )
+                                        } else {
+                                            log.error(
+                                                "Restore was sent, but an independent re-read shows the state blob " +
+                                                    "is NOT identical to the pre-drill capture — STOP AND ESCALATE:\n" +
+                                                    restoreDiff.formatDifferences(before, restoreCapture.value),
+                                            )
+                                        }
+                                    }
+                                    is TonexResult.Failure -> log.error(
+                                        "Restore was sent but could not be independently re-verified: " +
+                                            "${restoreCapture.error.message}. Please check the pedal's active " +
+                                            "preset manually.",
+                                    )
+                                }
+                            }
+                            is TonexResult.Failure -> log.error(
+                                "Restore FAILED: ${restore.error.message}. The pedal may still be on preset " +
+                                    "${target.value} — please switch back to preset ${original.value} manually.",
+                            )
+                        }
+                    }
+                    is TonexResult.Failure -> log.error(
+                        "Preset-change byte-diff drill did not complete: ${drillResult.error.message}. If the " +
+                            "active preset changed, it was not restored — check the pedal manually.",
+                    )
+                }
+            }
+        } finally {
+            healthJob.cancel()
+            runCatching { controller.disconnect() }
+                .onFailure { log.error("Preset-change drill: disconnect() failed during teardown: ${it.message}") }
+            runCatching { transport.close() }
+                .onFailure { log.error("Preset-change drill: transport.close() failed during teardown: ${it.message}") }
+        }
+        log.warn("=== Preset-change byte-diff drill complete ===")
+    }
+
+    /** Preset-scoped, non-identity parameters edited by [runRevertSafetyDrill] — same selection
+     * reasoning as [writeTestParameterEnumName]: deliberately not master volume, not anything
+     * preset-identity-related. Three, not one, per issue #27 §4's "edit several parameters." */
+    val revertDrillParameterEnumNames = listOf("EQ_MID", "EQ_BASS", "EQ_TREBLE")
+
+    /**
+     * Issue #27 §4 — the revert drill: capture the active preset's live parameters and full state
+     * blob, edit [revertDrillParameterEnumNames] to a distinguishable value each, call
+     * [dev.tonexotg.protocol.TonexController.revertActivePreset], then independently re-read (a
+     * genuine round trip, not a trust of the local `parameterValues` mirror) and compare against
+     * the pre-edit baseline.
+     *
+     * Requires [FirmwareCapabilities.supportsSingleParameterWrite] — same deliberate probe
+     * override as [runWriteTest]'s own capability choice, and for the identical reason (this
+     * harness IS the "some other way" [FirmwareCapabilities]'s own KDoc requires).
+     *
+     * The whole edit-then-revert sequence runs inside [NonCancellable] — an Activity teardown
+     * partway through must not silently leave the preset half-edited with no log trace, exactly
+     * [runWriteTest]'s own reasoning for its cycle-2 restore (and H1's reasoning above).
+     *
+     * ## M4 (Opus review): the pre-edit baseline is logged before a single write happens
+     * [runRevertDrill]'s `edit` callback is invoked with the just-captured baseline specifically so
+     * it can be logged here before [editRevertDrillParameters] issues anything — otherwise, if
+     * [editRevertDrillParameters] or the revert call right after it fails outright, that baseline
+     * would be unrecoverable from this log.
+     *
+     * ## H2 (Opus review): teardown runs in `finally`, unconditionally — see [runSafetyBackup]'s KDoc.
+     */
+    suspend fun runRevertSafetyDrill(
+        connection: UsbDeviceConnection,
+        inEndpoint: UsbEndpoint,
+        outEndpoint: UsbEndpoint,
+    ) {
+        log.warn(
+            "=== S22 safety drill: revert drill starting (issue #27 §4 — THIS WILL EDIT SEVERAL " +
+                "PARAMETERS ON THE ACTIVE PRESET, THEN REVERT THEM) ===",
+        )
+        val transport = LoggingTonexTransport(UsbRequestTonexTransport(connection, inEndpoint, outEndpoint), log, "s22-revert")
+        val tap = MessageCaptureTap(transport)
+        val controller = DefaultTonexController(
+            scope = scope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            timeouts = ConnectionTimeouts.DEFAULT,
+        )
+        val healthJob = launchConnectionHealthLog(controller, "s22-revert")
+        try {
+            val connectResult = controller.connect(tap)
+            if (connectResult is TonexResult.Failure) {
+                log.error("Revert drill: connect() failed: ${connectResult.error.message}")
+                return
+            }
+
+            val specs = revertDrillParameterEnumNames.map { ParameterRegistry.byEnumName(it) }
+            val missing = revertDrillParameterEnumNames.filterIndexed { i, _ -> specs[i] == null }
+            if (missing.isNotEmpty()) {
+                log.error("Revert drill: $missing not found in ParameterRegistry — aborting, nothing was written.")
+                return
+            }
+
+            val drillResult = withContext(NonCancellable) {
+                runRevertDrill(controller, tap, tap, drillTimeoutMillis) { beforeEntry ->
+                    log.info(
+                        "Revert drill: pre-edit baseline for preset ${beforeEntry.index.value} " +
+                            "\"${beforeEntry.name}\": " +
+                            beforeEntry.parameters.joinToString(prefix = "[", postfix = "]") { "%.4f".format(it) },
+                    )
+                    editRevertDrillParameters(controller, specs.filterNotNull())
+                }
+            }
+
+            when (drillResult) {
+                is TonexResult.Success -> {
+                    val r = drillResult.value
+                    // B2: log the full byte-exact state-blob report on both outcomes, same
+                    // reasoning as the preset-change drill above.
+                    val stateReport = r.stateBlobAudit.describe(r.beforeBlob, r.afterBlob)
+                    if (r.passed) {
+                        log.finding(
+                            "Revert drill PASSED for preset ${r.presetIndex.value}: independently re-read " +
+                                "parameters exactly match the pre-edit baseline (0 of ${r.beforeParameters.size} " +
+                                "mismatched).\n$stateReport",
+                        )
+                    } else {
+                        log.error(
+                            "Revert drill FAILED for preset ${r.presetIndex.value}: " +
+                                "${r.mismatchedParameterIndices.size} parameter(s) did not match the pre-edit " +
+                                "baseline after revert (indices ${r.mismatchedParameterIndices}). STOP AND " +
+                                "ESCALATE per issue #27 §4:\n$stateReport",
+                        )
+                    }
+                }
+                is TonexResult.Failure -> log.error(
+                    "Revert drill did not complete: ${drillResult.error.message}. If parameters were edited but " +
+                        "not yet reverted, check/revert the active preset manually — see the pre-edit baseline " +
+                        "logged above, if it was reached.",
+                )
+            }
+        } finally {
+            healthJob.cancel()
+            runCatching { controller.disconnect() }
+                .onFailure { log.error("Revert drill: disconnect() failed during teardown: ${it.message}") }
+            runCatching { transport.close() }
+                .onFailure { log.error("Revert drill: transport.close() failed during teardown: ${it.message}") }
+        }
+        log.warn("=== Revert drill complete ===")
+    }
+
+    /**
+     * Writes a distinguishable test value to every spec in [specs] via the real
+     * [dev.tonexotg.protocol.TonexController.setParameter] — the "edit" half of
+     * [runRevertSafetyDrill]. Aborts (without writing the remaining specs) on the first
+     * out-of-range/unknown current value or write failure, mirroring [runWriteTest]'s own
+     * refuse-rather-than-guess guards.
+     */
+    private suspend fun editRevertDrillParameters(
+        controller: TonexController,
+        specs: List<ParameterSpec>,
+    ): TonexResult<Unit> {
+        for (spec in specs) {
+            val current = controller.parameterValues.value[spec.id]
+            if (current == null || !current.isFinite() || current < spec.min || current > spec.max) {
+                return TonexResult.Failure(
+                    TonexError.ProtocolStateViolation(
+                        controller.connectionState.value,
+                        "S22 revert drill: ${spec.enumName}'s current value is unknown or out of range " +
+                            "($current ${spec.unit}, registered range ${spec.min}..${spec.max}) — refusing to edit",
+                    ),
+                )
+            }
+            val testValue = if (current <= (spec.min + spec.max) / 2f) spec.max else spec.min
+            log.info("Revert drill: editing ${spec.enumName} from $current to $testValue ${spec.unit}.")
+            when (val write = controller.setParameter(spec.id, testValue)) {
+                is TonexResult.Success -> Unit
+                is TonexResult.Failure -> return write
+            }
+        }
+        return TonexResult.Success(Unit)
     }
 
     private companion object {
