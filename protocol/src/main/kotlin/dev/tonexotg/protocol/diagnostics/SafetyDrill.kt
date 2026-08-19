@@ -282,6 +282,13 @@ data class RevertDrillResult(
      * to [PresetChangeAudit]'s meaning: revert uses only per-parameter writes, so the state blob
      * (globals/slots/colour table) should not move a single byte, not even the sanctioned ones. */
     val stateBlobAudit: PresetChangeAudit,
+    /** The raw state blob captured immediately before [edit] ran — kept (not just diffed away
+     * into [stateBlobAudit]) so a caller can render [stateBlobAudit]`.describe(beforeBlob,
+     * afterBlob)`'s full old-\>new byte report (issue #27 review, B2: a bare pass/fail boolean is
+     * not evidence). */
+    val beforeBlob: ByteArray,
+    /** The raw state blob captured immediately after the revert — see [beforeBlob]. */
+    val afterBlob: ByteArray,
     /** The active preset's 109 parameter values as read from the pedal BEFORE the edit. */
     val beforeParameters: FloatArray,
     /** The active preset's 109 parameter values as read from the pedal AFTER the revert. */
@@ -371,6 +378,8 @@ suspend fun runRevertDrill(
         RevertDrillResult(
             presetIndex = active,
             stateBlobAudit = stateAudit,
+            beforeBlob = beforeBlob,
+            afterBlob = afterBlob,
             beforeParameters = beforeEntry.parameters,
             afterParameters = afterEntry.parameters,
             mismatchedParameterIndices = mismatched,
