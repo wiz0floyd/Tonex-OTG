@@ -1,6 +1,7 @@
 package dev.tonexotg.app.ui.screens.presets
 
 import dev.tonexotg.app.ui.screens.connection.ErrorPresentation
+import dev.tonexotg.app.ui.screens.connection.toPresentation
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
