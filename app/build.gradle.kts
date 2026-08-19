@@ -14,6 +14,20 @@ repositories {
     mavenCentral()
 }
 
+// Bundles the repo-root CREDITS.md and the two upstream licence texts as Android assets so the
+// About/credits screen (S19 / issue #24) reads the actual attribution source of truth at
+// runtime, instead of a hand-typed second copy that could silently drift from CREDITS.md. This
+// task's output lives under `build/` only — nothing here is checked into git, and every build
+// re-copies the current repo-root files fresh.
+val syncLicensingAssets = tasks.register<Copy>("syncLicensingAssets") {
+    from(rootProject.file("CREDITS.md"))
+    from(rootProject.file("LICENSE")) {
+        rename { "LICENSE-APACHE-2.0.txt" }
+    }
+    from(rootProject.file("LICENSES/MIT-vit3k.txt"))
+    into(layout.buildDirectory.dir("generated/licensingAssets"))
+}
+
 android {
     namespace = "dev.tonexotg.app"
     compileSdk = 36
@@ -31,6 +45,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/licensingAssets"))
+        }
     }
 
     compileOptions {
@@ -87,4 +107,16 @@ dependencies {
     // S14 (issue #19): PresetAliasStoreTest uses Turbine for Flow assertions, matching
     // :protocol's convention for testing Flow-returning APIs.
     testImplementation(libs.turbine)
+}
+
+// The generated assets dir is a plain directory reference to AGP's source-set API, which does
+// not by itself infer a task dependency on the Copy task that populates it. Wire it explicitly
+// so `assets.srcDir(...)` above is never stale: every asset-merge task (debug/release, and the
+// unit-test variant produced by `isIncludeAndroidResources = true`) depends on the sync running
+// first.
+tasks.matching { it.name.matches(Regex("merge.*Assets")) }.configureEach {
+    dependsOn(syncLicensingAssets)
+}
+tasks.named("preBuild") {
+    dependsOn(syncLicensingAssets)
 }
