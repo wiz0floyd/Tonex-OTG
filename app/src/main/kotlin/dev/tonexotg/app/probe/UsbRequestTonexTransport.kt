@@ -8,11 +8,14 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -29,7 +32,7 @@ import kotlinx.coroutines.withContext
  * available, which cannot be interrupted (AOSP issue 39522) and would make this class impossible to
  * shut down safely between the probe's reconnect cycles.
  *
- * ## Why one dedicated thread drives BOTH directions, not one thread per direction
+ * ## Why one dedicated thread drives `requestWait`, but [write] queues its own OUT request directly
  *
  * [UsbDeviceConnection.requestWait] is a single call that waits for **any** [UsbRequest] queued on
  * this [connection] (any endpoint) to complete, and returns whichever one did — there is no
@@ -38,9 +41,23 @@ import kotlinx.coroutines.withContext
  * request, silently misrouting a write completion as a read or vice versa — a real correctness
  * hazard, not a hypothetical one. So exactly one thread ([loopThread]) ever calls `requestWait` on
  * [connection]: it demuxes the returned request by identity ([inRequest] vs [outRequest], compared
- * with `===`) and services both directions from that single loop. [write] itself runs on
- * `Dispatchers.IO` (an arbitrary thread pool thread) and only ever *hands off* the bytes to queue —
- * via [pendingWrites] — never calls `requestWait` itself.
+ * with `===`) and completes whichever [PendingWrite] is currently in flight ([inFlightWrite]) when
+ * [outRequest] comes back.
+ *
+ * [write] itself, however, calls [UsbRequest.queue] on [outRequest] directly from its own
+ * `Dispatchers.IO` thread rather than handing the buffer to the loop to queue on its next
+ * iteration — an earlier version routed writes through a channel the loop drained only at the top
+ * of each `requestWait` cycle, which meant a write issued right after the loop entered its (up to
+ * [LOOP_WAIT_TIMEOUT_MILLIS]-long) `requestWait` call sat unqueued until that call timed out: a
+ * uniform 0-500ms artifact added to *every* write, dwarfing the very latency this class exists to
+ * measure. Queuing directly from [write]'s thread is safe without additional locking against
+ * [loopThread]'s concurrent `requestWait`: `UsbRequest.queue()` routes through
+ * `UsbDeviceConnection.queueRequest()`, which synchronizes on the connection's internal lock, while
+ * `requestWait()` deliberately does not take that same lock — confirmed against AOSP
+ * `UsbDeviceConnection.java`. [writeMutex] instead serializes concurrent [write] callers against
+ * each other (matching [TonexTransport]'s documented one-write-in-flight-at-a-time contract, kept
+ * explicit here rather than assumed) and against [inFlightWrite] itself, which only [write] and
+ * [loopThread] ever touch and which is never read by both at once thanks to that ordering.
  *
  * ## A genuine limitation versus [UsbTonexTransport]: no short-write detection on OUT transfers
  *
@@ -73,10 +90,19 @@ class UsbRequestTonexTransport(
 
     private val closed = AtomicBoolean(false)
     private val incomingChannel = Channel<ByteArray>(Channel.UNLIMITED)
-    private val pendingWrites = Channel<PendingWrite>(Channel.UNLIMITED)
 
-    private val inRequest = UsbRequest().apply { initialize(connection, inEndpoint) }
-    private val outRequest = UsbRequest().apply { initialize(connection, outEndpoint) }
+    /** Serializes concurrent [write] callers; also guards [inFlightWrite] — see class KDoc. */
+    private val writeMutex = Mutex()
+
+    /** The write currently queued on [outRequest], if any. Set by [write], cleared by [loopThread]. */
+    private val inFlightWrite = AtomicReference<PendingWrite?>(null)
+
+    private val inRequest = UsbRequest().apply {
+        check(initialize(connection, inEndpoint)) { "UsbRequestTonexTransport: inRequest.initialize() failed" }
+    }
+    private val outRequest = UsbRequest().apply {
+        check(initialize(connection, outEndpoint)) { "UsbRequestTonexTransport: outRequest.initialize() failed" }
+    }
 
     private val loopThread: Thread
 
@@ -87,96 +113,92 @@ class UsbRequestTonexTransport(
         }
     }
 
-    private class PendingWrite(val buffer: ByteBuffer, val sizeBytes: Int, val completion: CompletableDeferred<Int>)
+    private class PendingWrite(val sizeBytes: Int, val completion: CompletableDeferred<Int>)
 
     /**
      * The single thread that ever calls [UsbDeviceConnection.requestWait] on [connection] — see
      * class KDoc for why that is load-bearing, not a style choice. Owns queuing and re-queuing
-     * [inRequest] for the next read, and dequeuing+queuing at most one [PendingWrite] at a time onto
-     * [outRequest] (matching [dev.tonexotg.protocol.TonexTransport]'s documented contract that
-     * callers above this seam serialize writes — this loop never queues a second OUT transfer while
-     * one is still in flight).
+     * [inRequest] for the next read, and completing whichever [PendingWrite] [write] left in
+     * [inFlightWrite] once [outRequest] comes back. Wrapped in `try`/`finally` so any unexpected
+     * throw (including an initial IN-queue failure) still runs the cleanup below rather than
+     * leaking native [UsbRequest] resources and leaving [incomingChannel] open forever.
      */
     private fun eventLoop() {
         val readBuffer = ByteBuffer.allocateDirect(READ_BUFFER_SIZE)
-        if (!inRequest.queue(readBuffer)) {
-            incomingChannel.close(IOException("UsbRequestTonexTransport: initial IN queue() failed"))
-            return
-        }
-
-        var inFlightWrite: PendingWrite? = null
-        while (!closed.get()) {
-            if (inFlightWrite == null) {
-                val pending = pendingWrites.tryReceive().getOrNull()
-                if (pending != null) {
-                    if (outRequest.queue(pending.buffer)) {
-                        inFlightWrite = pending
-                    } else {
-                        pending.completion.completeExceptionally(IOException("UsbRequestTonexTransport.write: OUT queue() failed"))
-                    }
-                }
+        try {
+            if (!inRequest.queue(readBuffer)) {
+                incomingChannel.close(IOException("UsbRequestTonexTransport: initial IN queue() failed"))
+                return
             }
 
-            val completed = try {
-                connection.requestWait(LOOP_WAIT_TIMEOUT_MILLIS)
-            } catch (t: TimeoutException) {
-                null // nothing completed within the poll window; loop around to re-check closed/pending writes
-            } catch (t: Throwable) {
-                if (closed.get()) break
-                incomingChannel.close(IOException("UsbRequestTonexTransport: requestWait failed", t))
-                inFlightWrite?.completion?.completeExceptionally(t)
-                inFlightWrite = null
-                break
-            } ?: continue
+            while (!closed.get()) {
+                val completed = try {
+                    connection.requestWait(LOOP_WAIT_TIMEOUT_MILLIS)
+                } catch (t: TimeoutException) {
+                    null // nothing completed within the poll window; loop around to re-check closed
+                } catch (t: Throwable) {
+                    if (closed.get()) break
+                    incomingChannel.close(IOException("UsbRequestTonexTransport: requestWait failed", t))
+                    inFlightWrite.getAndSet(null)?.completion?.completeExceptionally(t)
+                    break
+                } ?: continue
 
-            when {
-                completed === inRequest -> {
-                    val n = readBuffer.position()
-                    if (n > 0) {
-                        readBuffer.flip()
-                        val bytes = ByteArray(n)
-                        readBuffer.get(bytes)
-                        incomingChannel.trySend(bytes)
+                when {
+                    completed === inRequest -> {
+                        val n = readBuffer.position()
+                        if (n > 0) {
+                            readBuffer.flip()
+                            val bytes = ByteArray(n)
+                            readBuffer.get(bytes)
+                            incomingChannel.trySend(bytes)
+                        }
+                        readBuffer.clear()
+                        if (!closed.get() && !inRequest.queue(readBuffer)) {
+                            incomingChannel.close(IOException("UsbRequestTonexTransport: re-queue of IN request failed"))
+                            break
+                        }
                     }
-                    readBuffer.clear()
-                    if (!closed.get() && !inRequest.queue(readBuffer)) {
-                        incomingChannel.close(IOException("UsbRequestTonexTransport: re-queue of IN request failed"))
-                        break
+                    completed === outRequest -> {
+                        // No transferred-byte-count API exists for a completed UsbRequest -- see class
+                        // KDoc's "no short-write detection" section. A successful completion is trusted
+                        // to mean the whole buffer went out.
+                        val pending = inFlightWrite.getAndSet(null)
+                        pending?.completion?.complete(pending.sizeBytes)
                     }
+                    else -> Unit // a stale/cancelled request draining through close(); nothing to do
                 }
-                completed === outRequest -> {
-                    // No transferred-byte-count API exists for a completed UsbRequest -- see class
-                    // KDoc's "no short-write detection" section. A successful completion is trusted
-                    // to mean the whole buffer went out.
-                    inFlightWrite?.completion?.complete(inFlightWrite?.sizeBytes ?: 0)
-                    inFlightWrite = null
-                }
-                else -> Unit // a stale/cancelled request draining through close(); nothing to do
             }
+        } finally {
+            runCatching { inRequest.cancel() }
+            runCatching { outRequest.cancel() }
+            runCatching { inRequest.close() }
+            runCatching { outRequest.close() }
+            inFlightWrite.getAndSet(null)?.completion?.completeExceptionally(
+                IOException("UsbRequestTonexTransport: transport closed with a write still in flight"),
+            )
+            incomingChannel.close()
         }
-
-        runCatching { inRequest.cancel() }
-        runCatching { outRequest.cancel() }
-        runCatching { inRequest.close() }
-        runCatching { outRequest.close() }
-        inFlightWrite?.completion?.completeExceptionally(IOException("UsbRequestTonexTransport: transport closed with a write still in flight"))
-        incomingChannel.close()
     }
 
-    override suspend fun write(bytes: ByteArray): Int = withContext(Dispatchers.IO) {
-        if (closed.get()) {
-            throw IOException("UsbRequestTonexTransport.write: transport is closed")
+    override suspend fun write(bytes: ByteArray): Int = writeMutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (closed.get()) {
+                throw IOException("UsbRequestTonexTransport.write: transport is closed")
+            }
+            val buffer = ByteBuffer.allocateDirect(bytes.size).apply {
+                put(bytes)
+                flip()
+            }
+            val completion = CompletableDeferred<Int>()
+            inFlightWrite.set(PendingWrite(bytes.size, completion))
+            // Safe to call from this (IO dispatcher) thread concurrently with loopThread's
+            // requestWait -- see class KDoc's "why write queues its own OUT request directly".
+            if (!outRequest.queue(buffer)) {
+                inFlightWrite.set(null)
+                throw IOException("UsbRequestTonexTransport.write: OUT queue() failed")
+            }
+            completion.await()
         }
-        val buffer = ByteBuffer.allocateDirect(bytes.size).apply {
-            put(bytes)
-            flip()
-        }
-        val completion = CompletableDeferred<Int>()
-        val offered = pendingWrites.trySend(PendingWrite(buffer, bytes.size, completion)).isSuccess
-        if (!offered) {
-            throw IOException("UsbRequestTonexTransport.write: could not enqueue write (transport closing)")
-        }
-        completion.await()
     }
 
     override fun incoming(): Flow<ByteArray> = incomingChannel.receiveAsFlow()
@@ -201,7 +223,7 @@ class UsbRequestTonexTransport(
 
         /**
          * Bounds each [UsbDeviceConnection.requestWait] call so [eventLoop] periodically re-checks
-         * [closed] and [pendingWrites] even with nothing completing — the same role
+         * [closed] even with nothing completing — the same role
          * [UsbTonexTransport]'s `READ_TIMEOUT_MILLIS` plays for its `bulkTransfer` poll loop. Not a
          * protocol timeout: a transfer that never completes within this window simply gets polled
          * again next iteration, it is not failed.
