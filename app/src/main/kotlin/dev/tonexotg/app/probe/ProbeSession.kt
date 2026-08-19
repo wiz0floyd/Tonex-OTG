@@ -693,6 +693,14 @@ class ProbeSession(
      * close the transport — the straight-line-only teardown the old wiring had would leak this
      * session's reader thread into the NEXT drill's connection, corrupting ITS reads (see
      * [UsbTonexTransport]'s own KDoc on why a leaked reader thread is not cosmetic).
+     * `controller.disconnect()` itself runs inside [NonCancellable] (re-review MEDIUM finding on
+     * PR #61): it is `suspend` and acquires `operationMutex`, so on a cancelled coroutine it would
+     * otherwise throw `CancellationException` at that acquisition and get swallowed by
+     * `runCatching`, silently skipping the disconnect this whole `finally` block exists to
+     * guarantee. One consequence worth knowing: because that same `operationMutex` now also
+     * serializes this file's own raw captures (M1's fix — see [captureStateBlob]'s KDoc),
+     * teardown can block behind an in-flight capture for up to [drillTimeoutMillis] (~5s) before
+     * `disconnect()` actually proceeds.
      *
      * @return `true` iff the backup completed successfully.
      */
@@ -743,8 +751,17 @@ class ProbeSession(
             }
         } finally {
             healthJob.cancel()
-            runCatching { controller.disconnect() }
-                .onFailure { log.error("S22 backup: disconnect() failed during teardown: ${it.message}") }
+            // Re-review MEDIUM finding: disconnect() is suspend and acquires operationMutex — a
+            // suspension point. On a cancelled coroutine it throws CancellationException
+            // immediately, which runCatching's Throwable catch then swallows and mislogs as
+            // "disconnect() failed" rather than letting the actual teardown happen. Wrapping in
+            // NonCancellable lets it genuinely run on the cancellation path too — the exact path
+            // H2 exists for. transport.close() is non-suspend and does not need this: it's
+            // already unconditional regardless of cancellation state.
+            withContext(NonCancellable) {
+                runCatching { controller.disconnect() }
+                    .onFailure { log.error("S22 backup: disconnect() failed during teardown: ${it.message}") }
+            }
             runCatching { transport.close() }
                 .onFailure { log.error("S22 backup: transport.close() failed during teardown: ${it.message}") }
         }
@@ -876,12 +893,21 @@ class ProbeSession(
             }
         } finally {
             healthJob.cancel()
-            runCatching { controller.disconnect() }
-                .onFailure { log.error("Preset-change drill: disconnect() failed during teardown: ${it.message}") }
+            // See runSafetyBackup's teardown comment for why disconnect() specifically needs
+            // NonCancellable here (Re-review MEDIUM finding).
+            withContext(NonCancellable) {
+                runCatching { controller.disconnect() }
+                    .onFailure { log.error("Preset-change drill: disconnect() failed during teardown: ${it.message}") }
+            }
             runCatching { transport.close() }
                 .onFailure { log.error("Preset-change drill: transport.close() failed during teardown: ${it.message}") }
+            // Re-review LOW: logged inside finally, not after it, so this closing banner is
+            // printed on every path (including the early "connect() failed" / "active preset
+            // unknown" returns above) — not just the happy path. The old placement after the
+            // try/finally block was skipped by any early `return` inside try, leaving the
+            // "starting" banner unbalanced by a missing "complete" in those logs.
+            log.warn("=== Preset-change byte-diff drill complete ===")
         }
-        log.warn("=== Preset-change byte-diff drill complete ===")
     }
 
     /** Preset-scoped, non-identity parameters edited by [runRevertSafetyDrill] — same selection
@@ -977,18 +1003,27 @@ class ProbeSession(
                 }
                 is TonexResult.Failure -> log.error(
                     "Revert drill did not complete: ${drillResult.error.message}. If parameters were edited but " +
-                        "not yet reverted, check/revert the active preset manually — see the pre-edit baseline " +
-                        "logged above, if it was reached.",
+                        "not yet reverted, check/revert the active preset manually. Per M4, the pre-edit baseline " +
+                        "is ALWAYS logged above before editRevertDrillParameters issues a single write — if this " +
+                        "failure happened before any baseline line appears above, nothing was edited yet and " +
+                        "there is nothing to restore.",
                 )
             }
         } finally {
             healthJob.cancel()
-            runCatching { controller.disconnect() }
-                .onFailure { log.error("Revert drill: disconnect() failed during teardown: ${it.message}") }
+            // See runSafetyBackup's teardown comment for why disconnect() specifically needs
+            // NonCancellable here (Re-review MEDIUM finding).
+            withContext(NonCancellable) {
+                runCatching { controller.disconnect() }
+                    .onFailure { log.error("Revert drill: disconnect() failed during teardown: ${it.message}") }
+            }
             runCatching { transport.close() }
                 .onFailure { log.error("Revert drill: transport.close() failed during teardown: ${it.message}") }
+            // Re-review LOW: logged inside finally so it's printed on every path, including the
+            // early "connect() failed" / "parameter not found" returns above — see the matching
+            // comment on the preset-change drill's teardown.
+            log.warn("=== Revert drill complete ===")
         }
-        log.warn("=== Revert drill complete ===")
     }
 
     /**
