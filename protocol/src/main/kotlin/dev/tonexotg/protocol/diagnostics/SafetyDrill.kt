@@ -12,6 +12,8 @@ import dev.tonexotg.protocol.message.PresetParameterExtractor
 import dev.tonexotg.protocol.message.RequestPresetDetailsMessage
 import dev.tonexotg.protocol.message.RequestStateMessage
 import dev.tonexotg.protocol.message.TonexMessage
+import dev.tonexotg.protocol.state.StateBlobOffsets
+import dev.tonexotg.protocol.state.StateBlobReader
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -55,6 +57,15 @@ import kotlinx.coroutines.CancellationException
  * same connection — both write to the same physical transport, and interleaving would race two
  * writes onto the wire. Every function in this file that calls this one already respects that
  * sequencing; a caller building a new drill on top of it must preserve it too.
+ *
+ * ## Rejects an implausibly short payload rather than diffing garbage
+ * Every other consumer of a raw state blob in this codebase ([dev.tonexotg.protocol.PedalState.create],
+ * [StateBlobReader], [dev.tonexotg.protocol.state.StateBlobPatcher]) enforces
+ * [StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE] before trusting the bytes. This function is the one
+ * other place a raw state blob enters this codebase, so it enforces the same floor — an Opus
+ * review of issue #27 (M2) pointed out that without this, two equal-length *implausible* payloads
+ * (e.g. a truncated read on both sides of a drill) would byte-diff as identical and the drill would
+ * report a clean PASS with no evidence anything real was even read.
  */
 suspend fun captureStateBlob(
     transport: TonexTransport,
@@ -65,7 +76,16 @@ suspend fun captureStateBlob(
     writeRawFramed(transport, RequestStateMessage.encode()).let { if (it is TonexResult.Failure) return it }
     val message = tap.awaitMessage(timeoutMillis) { it is TonexMessage.StateUpdate }
         ?: return TonexResult.Failure(TonexError.Timeout("diagnostics-state-read", timeoutMillis))
-    return TonexResult.Success((message as TonexMessage.StateUpdate).payload)
+    val payload = (message as TonexMessage.StateUpdate).payload
+    if (payload.size < StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE) {
+        return TonexResult.Failure(
+            TonexError.BlobTooShortToPatch(
+                minimumSize = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE,
+                actualSize = payload.size,
+            ),
+        )
+    }
+    return TonexResult.Success(payload)
 }
 
 /** One preset's name and 109 parameter values, as captured by [capturePresetDetails]. */
@@ -163,10 +183,27 @@ data class PresetChangeDrillResult(
  * stomp-AB mode/bypass mode unchanged" (§3) — see [PresetChangeAudit]'s own KDoc for why those are
  * one fact, not three separate checks, once the diff is genuinely exhaustive.
  *
- * @return [TonexResult.Failure] if either state-blob capture or the [selectPreset][dev.tonexotg.protocol.TonexController.selectPreset]
- *   call itself fails — never a "drill completed, but here's an error" result buried inside a
- *   [TonexResult.Success]. A completed drill's [PresetChangeAudit.passed] may still be `false`;
- *   that is the drill *working*, not the drill failing to run.
+ * ## Closing the vacuous-pass hole (Opus review, blocking finding B1)
+ * Which offset [targetPreset]'s selection *should* touch is computed here from the real
+ * pre-write [before] blob — via [StateBlobReader], mirroring exactly the same branches
+ * [dev.tonexotg.protocol.connection.DefaultTonexController.selectPreset] itself takes — and passed
+ * to [PresetChangeAudit.audit] as `expectedOffsets`. That closes the specific hole an Opus review
+ * of this issue found reachable: [dev.tonexotg.protocol.connection.DefaultTonexController.selectPreset]
+ * returns success the instant its write is framed onto the wire, never waiting for pedal
+ * confirmation, so a dropped/deferred write, or an `awaitMessage` match against a stale
+ * `StateUpdate`, could previously produce two identical blobs and a clean, evidence-free PASS —
+ * exactly the "no side effects detected: true" report issue #27's own ground-truth comment
+ * pre-declared unacceptable. If [targetPreset] is already the active preset,
+ * [selectPreset][dev.tonexotg.protocol.TonexController.selectPreset] performs a complete no-write
+ * no-op (see its own KDoc) — there is nothing to audit, so this function refuses to run rather than
+ * report a vacuous pass for that case either.
+ *
+ * @return [TonexResult.Failure] if either state-blob capture, the pre-write shape read used to
+ *   compute `expectedOffsets`, the [selectPreset][dev.tonexotg.protocol.TonexController.selectPreset]
+ *   call itself, or the already-active-preset refusal above — never a "drill completed, but here's
+ *   an error" result buried inside a [TonexResult.Success]. A completed drill's
+ *   [PresetChangeAudit.passed] may still be `false`; that is the drill *working*, not the drill
+ *   failing to run.
  */
 suspend fun runPresetChangeByteDiffDrill(
     controller: TonexController,
@@ -180,6 +217,30 @@ suspend fun runPresetChangeByteDiffDrill(
         is TonexResult.Failure -> return r
     }
 
+    // Mirrors DefaultTonexController#selectPreset's own branch logic exactly, against the SAME
+    // `before` blob the drill will diff against — not a separate, possibly-stale read.
+    val assignments = when (val r = StateBlobReader.slotAssignments(before)) {
+        is TonexResult.Success -> r.value
+        is TonexResult.Failure -> return r
+    }
+    val activeSlot = when (val r = StateBlobReader.activeSlot(before)) {
+        is TonexResult.Success -> r.value
+        is TonexResult.Failure -> return r
+    }
+    val holdingSlot = assignments.entries.firstOrNull { it.value == targetPreset }?.key
+    val expectedOffsets: Set<Int> = when {
+        holdingSlot == activeSlot -> return TonexResult.Failure(
+            TonexError.ProtocolStateViolation(
+                controller.connectionState.value,
+                "preset-change byte-diff drill: preset ${targetPreset.value} is already active on slot " +
+                    "$activeSlot — selectPreset() would be a complete no-write no-op, so there is nothing " +
+                    "for this drill to audit. Choose a different target preset.",
+            ),
+        )
+        holdingSlot != null -> setOf(StateBlobOffsets.END_CURRENT_SLOT)
+        else -> setOf(StateBlobOffsets.endOffsetForSlotPreset(activeSlot))
+    }
+
     when (val r = controller.selectPreset(targetPreset)) {
         is TonexResult.Success -> Unit
         is TonexResult.Failure -> return r
@@ -190,7 +251,7 @@ suspend fun runPresetChangeByteDiffDrill(
         is TonexResult.Failure -> return r
     }
 
-    val audit = PresetChangeAudit.audit(before, after)
+    val audit = PresetChangeAudit.audit(before, after, expectedOffsets)
     return TonexResult.Success(PresetChangeDrillResult(targetPreset, before, after, audit))
 }
 

@@ -105,6 +105,27 @@ class SafetyDrillTest {
     }
 
     @Test
+    fun `captureStateBlob rejects an implausibly short payload rather than diffing garbage`() = runTest {
+        // Opus review of issue #27 (M2): every other consumer of a raw state blob enforces
+        // MIN_PLAUSIBLE_BLOB_SIZE; this is the one other place a raw blob enters the codebase, and
+        // without this check two equal-length implausible payloads would byte-diff as identical --
+        // a clean PASS with no evidence anything real was even read.
+        val fake = FakeTonexTransport()
+        val tap = MessageCaptureTap(fake)
+        val collectJob = launch { tap.incoming().collect { } }
+        val tooShort = ByteArray(StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE - 1)
+
+        val deferred = async { captureStateBlob(tap, tap, 1_000) }
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(tooShort))
+        testScheduler.runCurrent()
+
+        val result = deferred.await()
+        assertIs<TonexResult.Failure>(result)
+        collectJob.cancel()
+    }
+
+    @Test
     fun `captureFullBackup fails fast on the first bad preset read rather than reporting a partial backup`() = runTest {
         val fake = FakeTonexTransport()
         val tap = MessageCaptureTap(fake)
@@ -154,6 +175,35 @@ class SafetyDrillTest {
         assertTrue(audit.passed, "expected a clean audit, got unexpected indices: ${audit.unexpectedIndices}")
         assertEquals(setOf(StateBlobOffsets.END_CURRENT_SLOT), audit.sanctionedOffsetsChanged)
         assertEquals(emptyList(), audit.unexpectedIndices)
+    }
+
+    @Test
+    fun `preset-change drill refuses to run when the target preset is already active - nothing to audit`() = runTest {
+        val fake = FakeTonexTransport()
+        val tap = MessageCaptureTap(fake)
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        val connectDeferred = async { controller.connect(tap) }
+        driveToReady(fake, activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)
+        connectDeferred.await()
+
+        // Preset 0 is already assigned to slot A, which is already active -- selectPreset would be
+        // a complete no-write no-op (see its own KDoc). There is nothing for the drill to audit.
+        val writesBeforeDrill = fake.written.size
+        val drillDeferred = async { runPresetChangeByteDiffDrill(controller, tap, tap, PresetIndex(0), 5_000) }
+
+        testScheduler.runCurrent() // drill's own raw "before" read
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 0, b = 1, c = 2)))
+        testScheduler.runCurrent()
+
+        val result = drillDeferred.await()
+        assertIs<TonexResult.Failure>(result, "the drill must refuse rather than report a vacuous pass for a no-op selectPreset")
+        // No selectPreset write, and no second/third raw read, was ever issued -- only the drill's
+        // own single raw "before" state read happened before it refused.
+        assertEquals(
+            writesBeforeDrill + 1,
+            fake.written.size,
+            "expected only the drill's own single raw state read after refusing",
+        )
     }
 
     @Test
