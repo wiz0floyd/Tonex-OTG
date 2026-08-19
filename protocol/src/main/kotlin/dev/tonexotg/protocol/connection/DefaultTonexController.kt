@@ -1221,6 +1221,23 @@ class DefaultTonexController(
      * rare, deliberate, user-invoked action (D2: "hard to trigger by accident") — always patching
      * and writing when called is simpler and costs nothing a real user would notice, even on the
      * (equally rare) call where nothing had actually drifted from the snapshot.
+     *
+     * ## [selfInitiatedPreset] is armed CONDITIONALLY, only when this write actually changes the
+     * active preset (Opus review, issue #36 round 1)
+     * [selfInitiatedPreset] is a one-shot latch: [applyStateUpdate] consumes and clears it only
+     * inside its `previous != idx` branch. [selectPreset] can rely on setting it unconditionally
+     * because it always short-circuits to a zero-write no-op in the one case where the write
+     * wouldn't move the active preset (`holdingSlot == activeSlot`) — this function deliberately has
+     * no such short-circuit (see above), so a restore that leaves the active slot's assignment
+     * unchanged (nothing had drifted, or only B/C drifted while A/active stayed put) still reaches
+     * this point and issues a write. Arming the latch unconditionally in that case would leave it
+     * armed with nothing to ever consume it — [applyStateUpdate] never even evaluates the latch
+     * unless it first observes `previous != idx`, so a same-preset confirming push leaves the stale
+     * latch sitting there, silently misclassifying the *next* genuinely external preset change back
+     * to that same preset as self-initiated and swallowing its [TonexEvent.ExternalPresetChange].
+     * Comparing the snapshot's target preset for [activeSlot] against what that slot currently holds
+     * — both already decoded from the SAME `fresh` re-read — is what makes this conditional check
+     * exact rather than a heuristic.
      */
     override suspend fun restoreFootswitches(): TonexResult<Unit> = operationMutex.withLock {
         // 1. Lifecycle.
@@ -1251,18 +1268,24 @@ class DefaultTonexController(
             }
         }.orReturn { return@withLock it }
 
-        val activeSlot = StateBlobReader.activeSlot(fresh.copyOfBytes()).orReturn { return@withLock it }
+        val bytes = fresh.copyOfBytes()
+        val activeSlot = StateBlobReader.activeSlot(bytes).orReturn { return@withLock it }
+        val currentActive = StateBlobReader.presetInSlot(bytes, activeSlot).orReturn { return@withLock it }
+        val restoredActive = snapshot.presetFor(activeSlot)
         val patched = StateBlobPatcher.restoreSlotAssignments(fresh, s, snapshot.toMap()).orReturn { return@withLock it }
 
-        // Restoring the currently-active slot's assignment changes what _activePreset reports (the
-        // active slot didn't move, but what it points at did) — set AFTER the re-read, BEFORE the
-        // write, for the identical reason selectPreset's own comment explains: setting it earlier
-        // would cause the re-read's own StateUpdate (reporting the OLD active preset) to be misread
-        // as self-initiated, suppressing a genuine ExternalPresetChange the app is learning about
-        // for the first time.
-        selfInitiatedPreset = snapshot.presetFor(activeSlot)
+        // Restoring the currently-active slot's assignment changes what _activePreset reports only
+        // when the snapshot's value for that slot actually differs from what it holds right now
+        // (this `fresh` re-read) — see this function's KDoc for why an unconditional latch-arm here
+        // (mirroring selectPreset's) is wrong for this function specifically. Set AFTER the re-read,
+        // BEFORE the write, for the identical ordering reason selectPreset's own comment explains:
+        // setting it earlier would cause the re-read's own StateUpdate (reporting the OLD active
+        // preset) to be misread as self-initiated, suppressing a genuine ExternalPresetChange the
+        // app is learning about for the first time.
+        val changesActivePreset = restoredActive != currentActive
+        if (changesActivePreset) selfInitiatedPreset = restoredActive
         writeFramed(SetStateMessage.encode(patched)).orReturn {
-            selfInitiatedPreset = null
+            if (changesActivePreset) selfInitiatedPreset = null
             return@withLock it
         }
         TonexResult.Success(Unit)

@@ -83,7 +83,7 @@ class DefaultTonexControllerFootswitchRestoreTest {
     }
 
     @Test
-    fun `restoreFootswitches never touches the active-slot byte even when it changes the active preset`() = runTest {
+    fun `restoreFootswitches never touches the active-slot byte, even when nothing had drifted`() = runTest {
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
         connectToReady(controller, fake, activeSlot = PresetSlot.C, a = 4, b = 5, c = 6)
@@ -103,6 +103,57 @@ class DefaultTonexControllerFootswitchRestoreTest {
             written.payload[rereadBlob.size - StateBlobOffsets.END_CURRENT_SLOT],
             "restoreFootswitches must never change which slot is active",
         )
+    }
+
+    // ---- selfInitiatedPreset must not be armed by a no-change restore (Opus review MUST-FIX #2) --
+
+    @Test
+    fun `a restore that changes nothing does NOT arm the self-initiated latch - two subsequent external changes are BOTH reported`() = runTest {
+        // Reproduces the exact scenario the round-1 Opus review caught: restoreFootswitches used to
+        // arm selfInitiatedPreset unconditionally, even when the write didn't move the active
+        // preset. That latch is one-shot and consumed only inside applyStateUpdate's
+        // `previous != idx` branch, so an armed-but-never-consumed latch stays armed indefinitely
+        // and silently swallows the NEXT genuinely external preset change back to that same preset.
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        connectToReady(controller, fake, activeSlot = PresetSlot.C, a = 4, b = 5, c = 6)
+
+        // Restore: nothing had drifted (live state == captured snapshot), so this write does not
+        // change the active preset. The buggy version still armed the latch at 6 (slot C's value)
+        // here regardless.
+        val rereadForRestore = plausibleBlob(activeSlot = PresetSlot.C, a = 4, b = 5, c = 6)
+        val restoreDeferred = async { controller.restoreFootswitches() }
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(rereadForRestore))
+        testScheduler.runCurrent()
+        restoreDeferred.await().let { assertIs<TonexResult.Success<Unit>>(it) }
+
+        val externalChanges = mutableListOf<PresetIndex>()
+        val eventsJob = launch(start = CoroutineStart.UNDISPATCHED) {
+            controller.events.collect { if (it is TonexEvent.ExternalPresetChange) externalChanges += it.newIndex }
+        }
+
+        // The pedal's confirming push for the restore write: still reports C=6 (nothing changed),
+        // so applyStateUpdate's `previous != idx` branch never runs and never clears the latch --
+        // exactly the condition the buggy version left dangling.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.C, a = 4, b = 5, c = 6)))
+        testScheduler.runCurrent()
+
+        // First genuine external change: footswitch press moves the active slot C -> B (preset 5).
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 4, b = 5, c = 6)))
+        testScheduler.runCurrent()
+
+        // Second genuine external change: footswitch press moves back B -> C (preset 6) -- the SAME
+        // preset the (buggy, unconditionally-armed) latch would still have matched.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.C, a = 4, b = 5, c = 6)))
+        testScheduler.runCurrent()
+
+        assertEquals(
+            listOf(PresetIndex(5), PresetIndex(6)),
+            externalChanges,
+            "both external footswitch presses must be reported, including the return to preset 6",
+        )
+        eventsJob.cancel()
     }
 
     // ---- mandatory re-read before every patch -------------------------------------------------
