@@ -278,6 +278,23 @@ class TonexUsbTransport internal constructor(
      * [writerLoop] has fully finished this exact job. That keeps the invariant [writeQueue]'s
      * bounded handoff was always meant to assume -- the writer is idle by the time a new job
      * arrives -- true again in the case that used to violate it.
+     *
+     * **Consequence a caller must know (found during PR #62 re-review, M4): cancelling this call
+     * does not return control to the caller promptly.** A `kotlinx.coroutines` cancellation
+     * (`withTimeout`, a parent job cancelling, etc.) still gets honored -- this call always
+     * eventually throws [kotlinx.coroutines.CancellationException] -- but the calling coroutine
+     * stays suspended for however long the `doneLatch` wait above takes, up to
+     * [WRITE_JOIN_TIMEOUT_MILLIS] (~3s) in the worst case, not whatever shorter budget the caller
+     * requested. This only bites on an already-degraded path (a write that was going to be
+     * cancelled or time out anyway), never during ordinary operation, and nothing corrupts or
+     * hangs indefinitely either way -- but it does mean
+     * [dev.tonexotg.protocol.connection.ConnectionTimeouts.transportWriteMillis]'s budget (the
+     * `withTimeout` `writeFramed` wraps this call in) bounds how long that caller *waits before
+     * asking* to move on, not how long it actually takes to regain control on this transport. See
+     * that constant's own KDoc for the same caveat from the `:protocol` side. Restructuring this
+     * to wait on the *next* caller's entry instead of the cancelled caller's exit (staying
+     * cancellable within that caller's own budget) is a viable follow-up; not done here per this
+     * project's "don't over-build" guidance for a gap that only affects an already-failing call.
      */
     override suspend fun write(bytes: ByteArray): Int = writeMutex.withLock {
         if (closed.get()) throw IOException(closeReason.get())
@@ -314,9 +331,16 @@ class TonexUsbTransport internal constructor(
                 }
             }
         } finally {
+            // Skip the NonCancellable + Dispatchers.IO hop entirely when the latch is already
+            // down (the overwhelmingly common case -- writerLoop's countDown() ordinarily beats
+            // this finally here, since it runs right after the resume() this coroutine is already
+            // resuming from). Measured ~176us/write of avoidable dispatcher round-trip otherwise;
+            // this project measures exactly this kind of thing (S21), so it's worth the one line.
             job?.let { j ->
-                withContext(NonCancellable + Dispatchers.IO) {
-                    j.doneLatch.await(WRITE_JOIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                if (j.doneLatch.count > 0L) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        j.doneLatch.await(WRITE_JOIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                    }
                 }
             }
         }
