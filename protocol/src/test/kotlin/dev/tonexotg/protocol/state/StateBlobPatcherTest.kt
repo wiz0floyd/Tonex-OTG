@@ -9,6 +9,7 @@ import dev.tonexotg.protocol.TonexResult
 import java.lang.reflect.Modifier
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.fail
@@ -1132,5 +1133,141 @@ class StateBlobPatcherTest {
         // Not exploitable today - but that is a "nothing to reach it with" argument, not a
         // "cannot be reached" one, and this test should not overclaim the latter a third time.
         result.assertSuccess()
+    }
+
+    // ---- restoreSlotAssignments (issue #36) -------------------------------------------------
+
+    @Test
+    fun `restoreSlotAssignments changes exactly the three slot-assignment bytes, everywhere else bit-identical`() {
+        val session = SessionId.create()
+        val original = plausibleBlob(slotA = 0, slotB = 1, slotC = 2, currentSlot = 1)
+        val state = stateFor(session, original)
+
+        val target = mapOf(PresetSlot.A to PresetIndex(11), PresetSlot.B to PresetIndex(12), PresetSlot.C to PresetIndex(13))
+        val patched = StateBlobPatcher.restoreSlotAssignments(state, session, target).assertSuccess()
+
+        val changed = setOf(
+            original.size - StateBlobOffsets.END_SLOT_A_PRESET,
+            original.size - StateBlobOffsets.END_SLOT_B_PRESET,
+            original.size - StateBlobOffsets.END_SLOT_C_PRESET,
+        )
+        assertEquals(original.size, patched.size)
+        for (i in original.indices) {
+            if (i in changed) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged (was ${original[i]}, is now ${patched[i]})")
+        }
+        assertEquals(11.toByte(), patched[original.size - StateBlobOffsets.END_SLOT_A_PRESET])
+        assertEquals(12.toByte(), patched[original.size - StateBlobOffsets.END_SLOT_B_PRESET])
+        assertEquals(13.toByte(), patched[original.size - StateBlobOffsets.END_SLOT_C_PRESET])
+    }
+
+    @Test
+    fun `restoreSlotAssignments never touches the active-slot byte`() {
+        val session = SessionId.create()
+        val original = plausibleBlob(slotA = 0, slotB = 1, slotC = 2, currentSlot = 2) // active = C
+        val state = stateFor(session, original)
+
+        val target = mapOf(PresetSlot.A to PresetIndex(5), PresetSlot.B to PresetIndex(6), PresetSlot.C to PresetIndex(7))
+        val patched = StateBlobPatcher.restoreSlotAssignments(state, session, target).assertSuccess()
+
+        assertEquals(
+            2.toByte(),
+            patched[original.size - StateBlobOffsets.END_CURRENT_SLOT],
+            "restoreSlotAssignments must never change which slot is active",
+        )
+    }
+
+    @Test
+    fun `restoreSlotAssignments is single-use, session-scoped, and length-checked identically to the other patch functions`() {
+        for (secondCall in listOf<(PedalState, SessionId) -> TonexResult<ByteArray>>(
+            { state, session ->
+                StateBlobPatcher.restoreSlotAssignments(
+                    state,
+                    session,
+                    mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to PresetIndex(2), PresetSlot.C to PresetIndex(3)),
+                )
+            },
+        )) {
+            val session = SessionId.create()
+            val read1 = stateFor(session, plausibleBlob())
+            StateBlobPatcher.patchSlotAssignment(read1, session, PresetSlot.A, PresetIndex(4)).assertSuccess()
+
+            val second = secondCall(read1, session)
+            assertTrue(second.assertFailure() is TonexError.StaleSessionState, "second call against the spent read1 must be rejected")
+        }
+
+        // Cross-session rejection.
+        val readSession = SessionId.create()
+        val currentSession = SessionId.create()
+        val crossState = stateFor(readSession, plausibleBlob())
+        val crossResult = StateBlobPatcher.restoreSlotAssignments(
+            crossState,
+            currentSession,
+            mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to PresetIndex(2), PresetSlot.C to PresetIndex(3)),
+        )
+        assertTrue(crossResult.assertFailure() is TonexError.StaleSessionState)
+
+        // Too-short blob rejection.
+        val shortSession = SessionId.create()
+        val shortState = stateFor(shortSession, ByteArray(0))
+        val shortResult = StateBlobPatcher.restoreSlotAssignments(
+            shortState,
+            shortSession,
+            mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to PresetIndex(2), PresetSlot.C to PresetIndex(3)),
+        )
+        assertTrue(shortResult.assertFailure() is TonexError.BlobTooShortToPatch)
+    }
+
+    @Test
+    fun `restoreSlotAssignments with a map missing a slot throws IllegalArgumentException, not a TonexResult failure`() {
+        // FootswitchSnapshot's own constructor already guarantees a complete map; a caller reaching
+        // this function with an incomplete one is an internal-invariant violation, not a runtime
+        // condition a UI-facing TonexResult should have to model.
+        val session = SessionId.create()
+        val state = stateFor(session, plausibleBlob())
+
+        assertFailsWith<IllegalArgumentException> {
+            StateBlobPatcher.restoreSlotAssignments(state, session, mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to PresetIndex(2)))
+        }
+    }
+
+    /**
+     * `restoreSlotAssignments`'s per-value out-of-range re-check IS reachable, unlike an earlier
+     * version of this file's reasoning claimed — verified against the compiled bytecode rather than
+     * assumed (Opus review, issue #36 round 1, SHOULD-FIX #3). `javap` on [PresetIndex] shows
+     * `box-impl(int)` invoking the `private` constructor directly, never `constructor-impl(int)` —
+     * the synthetic static method that actually runs `init { require(...) }` — so a caller who
+     * invokes the compiled `box-impl` method via reflection gets a genuinely boxed `PresetIndex`
+     * whose out-of-range `.value` never passed that check, fit to store directly as a `Map` value.
+     * Same class of bypass the two `patchSlotAssignment`/`selectPreset` reflection tests above
+     * already exercise for their own bare `PresetIndex` parameter — this is the `Map`-value-position
+     * equivalent.
+     */
+    private fun boxedPresetIndexOf(value: Int): PresetIndex {
+        val boxImpl = PresetIndex::class.java.getDeclaredMethod("box-impl", Int::class.javaPrimitiveType)
+        boxImpl.isAccessible = true
+        return boxImpl.invoke(null, value) as PresetIndex
+    }
+
+    @Test
+    fun `restoreSlotAssignments rejects an out-of-range boxed PresetIndex smuggled past its own guard, before consuming the read generation`() {
+        val session = SessionId.create()
+        val state = stateFor(session, plausibleBlob())
+        val forged = boxedPresetIndexOf(255)
+
+        val result = StateBlobPatcher.restoreSlotAssignments(
+            state,
+            session,
+            mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to forged, PresetSlot.C to PresetIndex(3)),
+        )
+
+        val error = result.assertFailure()
+        assertTrue(error is TonexError.InvalidPresetIndex, "expected InvalidPresetIndex, got $error")
+        assertEquals(255, (error as TonexError.InvalidPresetIndex).value)
+
+        // The read generation must NOT have been consumed - a genuine subsequent write against the
+        // same state must still succeed, proving the invalid-value rejection happened before
+        // prepareForPatch's generation-consuming step.
+        StateBlobPatcher.patchActiveSlot(state, session, PresetSlot.B).assertSuccess()
     }
 }

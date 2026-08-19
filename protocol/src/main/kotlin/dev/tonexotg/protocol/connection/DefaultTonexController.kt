@@ -1,11 +1,13 @@
 package dev.tonexotg.protocol.connection
 
 import dev.tonexotg.protocol.ConnectionState
+import dev.tonexotg.protocol.FootswitchSnapshot
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.ParameterScope
 import dev.tonexotg.protocol.PedalState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.PresetSnapshot
 import dev.tonexotg.protocol.SessionId
 import dev.tonexotg.protocol.SnapshotStore
@@ -143,6 +145,17 @@ class DefaultTonexController(
     @Volatile private var readerJob: Job? = null
     @Volatile private var session: SessionId? = null
     @Volatile private var selfInitiatedPreset: PresetIndex? = null
+
+    /**
+     * The three footswitch slot assignments (A/B/C) as they were the moment this session reached
+     * [ConnectionState.Ready] — captured once, in [connect], from the very state blob the
+     * handshake already read, before any write this controller could issue has had a chance to
+     * touch them. `null` until captured, and forever `null` for this session if that capture
+     * failed (an implausibly-shaped handshake blob) — [restoreFootswitches] surfaces
+     * [TonexError.NoFootswitchSnapshotAvailable] rather than treating either case as "nothing to
+     * do." See issue #36.
+     */
+    @Volatile private var footswitchSnapshot: FootswitchSnapshot? = null
 
     // ---- the Inbound envelope (§6.3) --------------------------------------------------------
 
@@ -484,6 +497,7 @@ class DefaultTonexController(
         transport = null
         session = null
         selfInitiatedPreset = null
+        footswitchSnapshot = null
         snapshotStore.clear()
         _presets.value = emptyList()
         _activePreset.value = null
@@ -573,8 +587,13 @@ class DefaultTonexController(
         val initialActive = StateBlobReader.activePreset(blob).orFinish { return@withLock it }
 
         // ---- Ready -----------------------------------------------------------------------------
-        session = SessionId.create() // ← THE ONLY SessionId.create() CALL SITE
+        val newSession = SessionId.create() // ← THE ONLY SessionId.create() CALL SITE
+        session = newSession
         _activePreset.value = initialActive // first observation ⇒ no ExternalPresetChange
+        // issue #36: capture the footswitch slot assignments from the handshake blob ALREADY read
+        // above — before this Ready assignment, before harvestPresetNames/harvestMasterVolume, and
+        // long before any selectPreset() this connection could ever issue. No further wire read.
+        footswitchSnapshot = captureFootswitchSnapshot(newSession, blob)
         _connectionState.value = ConnectionState.Ready
 
         // ---- Post-Ready harvest -----------------------------------------------------------------
@@ -647,6 +666,28 @@ class DefaultTonexController(
                 else -> null
             }
         } // result deliberately discarded
+    }
+
+    // ---- footswitch-snapshot capture (issue #36) -------------------------------------------------
+
+    /**
+     * Decodes [blob]'s three footswitch slot assignments and wraps them as a [FootswitchSnapshot]
+     * stamped with [sessionId] — issue #36's "capture at handshake, before any write" requirement.
+     * [blob] is the raw handshake `GetState` bytes [connect] already read (the same bytes
+     * [StateBlobReader.activePreset] decoded a few lines above this call site) — this is a pure
+     * decode of bytes already in hand, not a further round trip, and has no failure mode beyond
+     * the blob failing to look like a plausible slot region.
+     *
+     * `null` on failure (an implausibly-shaped or too-short handshake blob) — never fatal to
+     * [connect], mirroring [captureSnapshotLocked]'s "a read failure records nothing, never blocks
+     * Ready" discipline: a pedal a user can otherwise fully operate minus the footswitch-restore
+     * affordance is still a fully usable app. [restoreFootswitches] is what surfaces this failure
+     * to the caller, as [TonexError.NoFootswitchSnapshotAvailable], the first time restore is
+     * actually attempted — not silently swallowed here.
+     */
+    private fun captureFootswitchSnapshot(sessionId: SessionId, blob: ByteArray): FootswitchSnapshot? {
+        val result = StateBlobReader.slotAssignments(blob)
+        return (result as? TonexResult.Success)?.let { FootswitchSnapshot(sessionId, it.value) }
     }
 
     // ---- snapshot capture (S9b / §E) -----------------------------------------------------------
@@ -1137,6 +1178,115 @@ class DefaultTonexController(
                     ),
                 )
             }
+        }
+        TonexResult.Success(Unit)
+    }
+
+    // ---- restoreFootswitches() (issue #36) -------------------------------------------------------
+
+    /**
+     * The explicit, user-invoked "restore my footswitches" action (issue #36): returns the pedal's
+     * A/B/C slot assignments to the values [footswitchSnapshot] captured at handshake, before any
+     * write this session could have touched them.
+     *
+     * ## Why a whole-state write, not per-parameter writes
+     * Unlike [revertActivePreset], there is no per-parameter write path for footswitch slot
+     * assignments — they are pedal globals, not [ParameterScope.PRESET]-scoped parameters (see
+     * [writeParameterLocked]'s `else` branch: ":protocol has no write path" for globals other than
+     * master volume). The *only* way to change a slot assignment on this pedal at all is the same
+     * read-modify-write whole-state mechanism [selectPreset] already uses — this function follows
+     * that exact, already-reviewed pattern: mandatory re-read immediately before the patch,
+     * [StateBlobPatcher] as the sole byte-touching authority, and [selfInitiatedPreset] set (only)
+     * if the write is about to change what [_activePreset] reports, following the identical
+     * ordering rule [selectPreset] documents (set AFTER the re-read, BEFORE the write).
+     *
+     * ## Guard order
+     * 1. Lifecycle — requires [ConnectionState.Ready].
+     * 2. Session — mirrors every other write path's `session ?: ...` guard.
+     * 3. A footswitch snapshot must exist for THIS session — compared by [SessionId] identity
+     *    (`=== s`), not mere presence, deliberately mirroring [revertActivePreset]'s guard 4 and
+     *    [captureSnapshotLocked]'s first-arrival-wins retention check (issue #46 Opus review): this
+     *    class's whole `footswitchSnapshot` field is nulled by [teardown] on every disconnect, so
+     *    there is no launched-coroutine race that could let a phantom cross-session snapshot slip
+     *    through the way issue #46 found for [SnapshotStore] — but this check is the same
+     *    belt-and-braces defense-in-depth the rest of this class applies everywhere a captured
+     *    value is about to be written back, not a presence-only check reintroducing that bug's
+     *    shape. Failing with [TonexError.NoFootswitchSnapshotAvailable] here, rather than treating
+     *    a missing/foreign-session snapshot as "nothing to do," is exactly issue #36's "surfaces a
+     *    typed error rather than silently no-opping" acceptance criterion.
+     *
+     * ## No no-op short-circuit, unlike [selectPreset]
+     * [selectPreset] skips the write when the target is already active+assigned because it runs on
+     * essentially every screen tap, including taps on the already-active preset. This function is a
+     * rare, deliberate, user-invoked action (D2: "hard to trigger by accident") — always patching
+     * and writing when called is simpler and costs nothing a real user would notice, even on the
+     * (equally rare) call where nothing had actually drifted from the snapshot.
+     *
+     * ## [selfInitiatedPreset] is armed CONDITIONALLY, only when this write actually changes the
+     * active preset (Opus review, issue #36 round 1)
+     * [selfInitiatedPreset] is a one-shot latch: [applyStateUpdate] consumes and clears it only
+     * inside its `previous != idx` branch. [selectPreset] can rely on setting it unconditionally
+     * because it always short-circuits to a zero-write no-op in the one case where the write
+     * wouldn't move the active preset (`holdingSlot == activeSlot`) — this function deliberately has
+     * no such short-circuit (see above), so a restore that leaves the active slot's assignment
+     * unchanged (nothing had drifted, or only B/C drifted while A/active stayed put) still reaches
+     * this point and issues a write. Arming the latch unconditionally in that case would leave it
+     * armed with nothing to ever consume it — [applyStateUpdate] never even evaluates the latch
+     * unless it first observes `previous != idx`, so a same-preset confirming push leaves the stale
+     * latch sitting there, silently misclassifying the *next* genuinely external preset change back
+     * to that same preset as self-initiated and swallowing its [TonexEvent.ExternalPresetChange].
+     * Comparing the snapshot's target preset for [activeSlot] against what that slot currently holds
+     * — both already decoded from the SAME `fresh` re-read — is what makes this conditional check
+     * exact rather than a heuristic.
+     */
+    override suspend fun restoreFootswitches(): TonexResult<Unit> = operationMutex.withLock {
+        // 1. Lifecycle.
+        if (_connectionState.value !is ConnectionState.Ready) {
+            return@withLock TonexResult.Failure(
+                TonexError.ProtocolStateViolation(_connectionState.value, "restoreFootswitches requires Ready"),
+            )
+        }
+        // 2. Session.
+        val s = session ?: return@withLock TonexResult.Failure(
+            TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+        )
+        // 3. A footswitch snapshot must exist, AND must belong to the current session — see this
+        //    function's KDoc for why this compares sessionId identity rather than mere presence.
+        val snapshot = footswitchSnapshot?.takeIf { it.sessionId === s }
+            ?: return@withLock TonexResult.Failure(TonexError.NoFootswitchSnapshotAvailable)
+
+        // ---- MANDATORY re-read, immediately before the patch (PedalState's freshness contract),
+        // identical to selectPreset's own re-read. ------------------------------------------------
+        val fresh: PedalState = requestAndAwait(
+            RequestStateMessage.encode(),
+            timeouts.stateReadMillis,
+            "state-read",
+        ) { inb ->
+            commonInbound("state-read", inb) ?: when (inb) {
+                is Inbound.State -> inb.result // Success(PedalState) or Failure(OversizedStateBlob)
+                else -> null
+            }
+        }.orReturn { return@withLock it }
+
+        val bytes = fresh.copyOfBytes()
+        val activeSlot = StateBlobReader.activeSlot(bytes).orReturn { return@withLock it }
+        val currentActive = StateBlobReader.presetInSlot(bytes, activeSlot).orReturn { return@withLock it }
+        val restoredActive = snapshot.presetFor(activeSlot)
+        val patched = StateBlobPatcher.restoreSlotAssignments(fresh, s, snapshot.toMap()).orReturn { return@withLock it }
+
+        // Restoring the currently-active slot's assignment changes what _activePreset reports only
+        // when the snapshot's value for that slot actually differs from what it holds right now
+        // (this `fresh` re-read) — see this function's KDoc for why an unconditional latch-arm here
+        // (mirroring selectPreset's) is wrong for this function specifically. Set AFTER the re-read,
+        // BEFORE the write, for the identical ordering reason selectPreset's own comment explains:
+        // setting it earlier would cause the re-read's own StateUpdate (reporting the OLD active
+        // preset) to be misread as self-initiated, suppressing a genuine ExternalPresetChange the
+        // app is learning about for the first time.
+        val changesActivePreset = restoredActive != currentActive
+        if (changesActivePreset) selfInitiatedPreset = restoredActive
+        writeFramed(SetStateMessage.encode(patched)).orReturn {
+            if (changesActivePreset) selfInitiatedPreset = null
+            return@withLock it
         }
         TonexResult.Success(Unit)
     }

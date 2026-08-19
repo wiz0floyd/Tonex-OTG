@@ -12,13 +12,13 @@ import org.junit.Test
 
 /**
  * Covers this story's core acceptance criterion — "every [TonexError] variant has a distinct,
- * actionable presentation" — by enumerating **all 17** current variants explicitly (not a
+ * actionable presentation" — by enumerating **all 18** current variants explicitly (not a
  * sample) and checking each one individually, plus cross-cutting checks (pairwise distinctness,
  * no variant looking like success) over the full set.
  *
  * One instance of each variant is built here, with plausible field values; the exhaustive `when`
- * in `ErrorPresentation.kt` itself is what guarantees a *future* 18th variant can't reach this
- * list unnoticed (this test only proves today's 17 are each handled correctly).
+ * in `ErrorPresentation.kt` itself is what guarantees a *future* 19th variant can't reach this
+ * list unnoticed (this test only proves today's 18 are each handled correctly).
  */
 class ErrorPresentationTest {
 
@@ -52,6 +52,7 @@ class ErrorPresentationTest {
             nextParameter = ParameterId(20),
         ),
         TonexError.ParameterValueOutOfRange(id = ParameterId(20), value = 99f, min = 0f, max = 10f),
+        TonexError.NoFootswitchSnapshotAvailable,
     )
 
     // ---- Individual-variant checks: distinct, actionable, non-empty --------------------------
@@ -197,13 +198,25 @@ class ErrorPresentationTest {
         assertFalse(p.recommendReconnect)
     }
 
+    @Test
+    fun noFootswitchSnapshotAvailable_recommendsNoReconnect() {
+        // Issue #36's own acceptance criterion: "if capture failed or is unavailable, the UI says
+        // so rather than offering a restore that would silently no-op" -- this is that presentation.
+        // recommendReconnect must be false: this is an operation-level failure (the connection is
+        // still Ready), and reconnecting would not conjure a footswitch snapshot that was never
+        // captured -- it would simply start a fresh session that captures its own.
+        val p = TonexError.NoFootswitchSnapshotAvailable.toPresentation()
+        assertEquals("No Footswitches To Restore", p.title)
+        assertFalse(p.recommendReconnect)
+    }
+
     // ---- Cross-cutting checks over the full set -----------------------------------------------
 
     @Test
-    fun allSeventeenVariants_areCovered() {
+    fun allEighteenVariants_areCovered() {
         // Pins the enumeration itself against silent drift — if TonexError grows or shrinks a
         // variant, this count is the first thing that should force a look at this file.
-        assertEquals(17, allErrors.size)
+        assertEquals(18, allErrors.size)
     }
 
     @Test
@@ -284,6 +297,7 @@ class ErrorPresentationTest {
             TonexError.RevertIncomplete::class,
             TonexError.ActivePresetChangedDuringRevert::class,
             TonexError.ParameterValueOutOfRange::class,
+            TonexError.NoFootswitchSnapshotAvailable::class,
         )
         for (error in allErrors) {
             val p = error.toPresentation()

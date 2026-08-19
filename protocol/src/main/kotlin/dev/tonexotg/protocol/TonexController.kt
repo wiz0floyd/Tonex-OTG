@@ -160,4 +160,22 @@ interface TonexController {
      * avoid (S9b).
      */
     suspend fun revertActivePreset(): TonexResult<Unit>
+
+    /**
+     * Restores the pedal's three footswitch slot assignments (A/B/C) to the values captured at
+     * handshake, before any write occurred this session (issue #36).
+     *
+     * `selectPreset`'s whole-state write inherently overwrites all three slot assignments as a
+     * side effect of the "set preset" wire message (see [PedalState]) — this is the deliberate,
+     * explicit, user-invoked undo for that. Available at any point during
+     * [ConnectionState.Ready], not only at disconnect, and never triggered automatically: an
+     * automatic restore on disconnect cannot be relied on if the app crashes or the cable is
+     * pulled, so a deliberate, predictable action the user can invoke at any time is the more
+     * honest affordance (issue #36's rationale).
+     *
+     * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation] otherwise,
+     * and with [TonexError.NoFootswitchSnapshotAvailable] if the three slot assignments were never
+     * successfully captured this session — this never silently no-ops.
+     */
+    suspend fun restoreFootswitches(): TonexResult<Unit>
 }

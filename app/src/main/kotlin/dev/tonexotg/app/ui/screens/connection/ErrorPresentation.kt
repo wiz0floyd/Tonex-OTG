@@ -176,4 +176,12 @@ fun TonexError.toPresentation(): ErrorPresentation = when (this) {
         advice = "That value is outside this parameter's valid range. Adjust it and try again.",
         recommendReconnect = false,
     )
+
+    is TonexError.NoFootswitchSnapshotAvailable -> ErrorPresentation(
+        title = "No Footswitches To Restore",
+        detail = message,
+        advice = "This app has no captured footswitch layout for this session, so there's " +
+            "nothing to restore. The connection is otherwise fine; this doesn't need a reconnect.",
+        recommendReconnect = false,
+    )
 }
