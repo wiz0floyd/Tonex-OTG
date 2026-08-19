@@ -1,5 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      Required for UsbManager/UsbDeviceConnection (S20 hardware probe, issue #25 —
+      dev.tonexotg.app.probe). Not required="true" globally on <application>, since the rest of
+      the app doesn't need it yet; declared here so the Play/APK installer can warn correctly on
+      a device with no USB host support.
+    -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
@@ -13,6 +23,29 @@
         <activity
             android:name=".MainActivity"
             android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          ⚠️ DIAGNOSTIC-ONLY (S20 hardware probe, issue #25). Not part of the app's real
+          navigation — see dev.tonexotg.app.probe's KDoc. A standalone launcher activity so the
+          product owner can run it directly from the device's app drawer, separate from
+          MainActivity, without any of this being wired into real screens (S16-S19).
+        -->
+        <activity
+            android:name=".probe.ProbeActivity"
+            android:label="Tonex Probe (Diagnostic)"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
+            <!--
+              configChanges above keeps a rotation (or keyboard/UI-mode change) from destroying
+              and recreating this Activity mid-probe, which would cancel its CoroutineScope —
+              see ProbeSession.runWriteTest's NonCancellable restore-write guard (issue #25,
+              opus-reviewer-probe25 B1).
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
