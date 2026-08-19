@@ -30,10 +30,22 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  * pedal that index is the CDC **Communications** interface (the control/notification interface a
  * standard CDC-ACM function exposes), which carries at most one interrupt IN endpoint — not the
  * bulk IN/OUT pair. The bulk pair lives on the CDC **Data** interface, a different interface
- * index. Rather than hardcode a corrected-but-still-guessed index, [requestPermissionAndOpen]
- * searches every interface the device reports and claims whichever one actually exposes both a
- * bulk IN and a bulk OUT endpoint — the property this harness (and the real transport) actually
- * needs, regardless of which interface index the OS happens to enumerate it under.
+ * index (confirmed `1` on this pedal, but [requestPermissionAndOpen] does not hardcode that
+ * either — it searches every interface the device reports and claims whichever one actually
+ * exposes both a bulk IN and a bulk OUT endpoint).
+ *
+ * That split matters for the CDC class control requests too, not just the bulk endpoints. Per the
+ * CDC 1.2 spec, `SET_LINE_CODING`/`SET_CONTROL_LINE_STATE` are addressed to the *Communications*
+ * interface, never the Data interface — and this pedal's own descriptor dump confirms the two are
+ * genuinely separate here: the Union Functional Descriptor (`24 06 00 01`) declares master
+ * interface `0`, slave interface `1`. A first attempt at this fix reused the bulk-endpoint
+ * interface's id (`1`) for the control requests too, on the reasoning that both used to be
+ * `INTERFACE_INDEX` before this fix existed; `controlTransfer` accepted that without error, but
+ * the pedal never responded to the opening "hello" handshake — consistent with DTR never actually
+ * having been asserted. [requestPermissionAndOpen] now locates the Communications interface
+ * separately (by [UsbConstants.USB_CLASS_COMM]) and claims and targets both interfaces
+ * independently. (Diagnosis from the descriptor bytes and the CDC spec; awaiting a hardware run
+ * to confirm the "hello" handshake actually completes with this fix.)
  */
 object UsbDeviceOpener {
 
@@ -57,6 +69,7 @@ object UsbDeviceOpener {
         data class Success(
             val connection: UsbDeviceConnection,
             val usbInterface: UsbInterface,
+            val commInterface: UsbInterface,
             val inEndpoint: UsbEndpoint,
             val outEndpoint: UsbEndpoint,
             val rawDescriptors: ByteArray,
@@ -101,6 +114,14 @@ object UsbDeviceOpener {
                     "and bulk OUT endpoint (per-interface endpoint counts: " +
                     interfaces.joinToString { "id=${it.id}:${it.endpointCount}" } + ")",
             )
+        // The Communications interface (see class KDoc) is where the CDC line-coding/control-line
+        // control requests below must be addressed, not the Data interface found above.
+        val commInterface = interfaces.firstOrNull { it.interfaceClass == UsbConstants.USB_CLASS_COMM }
+            ?: return OpenResult.Failure(
+                "No interface with class USB_CLASS_COMM (0x02) found (device reports " +
+                    "${device.interfaceCount} interface(s)); cannot address SET_LINE_CODING/" +
+                    "SET_CONTROL_LINE_STATE without it",
+            )
 
         val connection = manager.openDevice(device)
             ?: return OpenResult.Failure("UsbManager.openDevice returned null")
@@ -110,6 +131,11 @@ object UsbDeviceOpener {
         if (!connection.claimInterface(usbInterface, true)) {
             connection.close()
             return OpenResult.Failure("claimInterface(interface ${usbInterface.id}, force=true) returned false")
+        }
+        if (!connection.claimInterface(commInterface, true)) {
+            connection.releaseInterface(usbInterface)
+            connection.close()
+            return OpenResult.Failure("claimInterface(interface ${commInterface.id}, force=true) returned false")
         }
 
         // Line coding is cosmetic per issue #16 ("both work"), but every known-working upstream
@@ -125,7 +151,7 @@ object UsbDeviceOpener {
             REQUEST_TYPE_CLASS_INTERFACE_OUT,
             REQUEST_SET_LINE_CODING,
             0,
-            usbInterface.id,
+            commInterface.id,
             lineCoding,
             lineCoding.size,
             1000,
@@ -136,18 +162,19 @@ object UsbDeviceOpener {
             REQUEST_TYPE_CLASS_INTERFACE_OUT,
             REQUEST_SET_CONTROL_LINE_STATE,
             CONTROL_LINE_DTR_RTS,
-            usbInterface.id,
+            commInterface.id,
             null,
             0,
             1000,
         )
         if (dtrResult < 0) {
+            connection.releaseInterface(commInterface)
             connection.releaseInterface(usbInterface)
             connection.close()
             return OpenResult.Failure("SET_CONTROL_LINE_STATE (assert DTR) failed, controlTransfer returned $dtrResult")
         }
 
-        return OpenResult.Success(connection, usbInterface, inEndpoint, outEndpoint, rawDescriptors)
+        return OpenResult.Success(connection, usbInterface, commInterface, inEndpoint, outEndpoint, rawDescriptors)
     }
 
     /**

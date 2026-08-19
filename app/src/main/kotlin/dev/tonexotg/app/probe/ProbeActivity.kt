@@ -94,6 +94,7 @@ class ProbeActivity : ComponentActivity() {
 private class UsbConnectionHandles(
     val connection: UsbDeviceConnection,
     val usbInterface: UsbInterface,
+    val commInterface: UsbInterface,
     val inEndpoint: UsbEndpoint,
     val outEndpoint: UsbEndpoint,
 )
@@ -146,13 +147,15 @@ private fun ProbeScreen(scope: CoroutineScope) {
                                         "Android specifically:\n${UsbDeviceOpener.hexDump(opened.rawDescriptors)}",
                                 )
                                 log.info(
-                                    "Claimed interface ${opened.usbInterface.id}, asserted DTR, IN endpoint " +
+                                    "Claimed data interface ${opened.usbInterface.id} and comm interface " +
+                                        "${opened.commInterface.id}, asserted DTR, IN endpoint " +
                                         "0x${opened.inEndpoint.address.toString(16)}, OUT endpoint " +
                                         "0x${opened.outEndpoint.address.toString(16)}.",
                                 )
                                 handles = UsbConnectionHandles(
                                     opened.connection,
                                     opened.usbInterface,
+                                    opened.commInterface,
                                     opened.inEndpoint,
                                     opened.outEndpoint,
                                 )
@@ -194,6 +197,7 @@ private fun ProbeScreen(scope: CoroutineScope) {
             enabled = !busy && handles != null,
             onClick = {
                 handles?.let {
+                    runCatching { it.connection.releaseInterface(it.commInterface) }
                     runCatching { it.connection.releaseInterface(it.usbInterface) }
                     runCatching { it.connection.close() }
                     log.info("USB connection released.")
