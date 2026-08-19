@@ -280,16 +280,26 @@ class UsbConnectionManager internal constructor(
          * `UsbConnectionServiceRobolectricTest`, which does call [start] (via [UsbConnectionService]),
          * is what surfaced this.
          *
-         * Now [ContextCompat.RECEIVER_EXPORTED]: for [start]'s own receiver specifically (only
-         * ever handling `ACTION_USB_DEVICE_ATTACHED`/`ACTION_USB_DEVICE_DETACHED`, both
-         * system-protected broadcasts nothing but the platform can ever send -- see this class's
-         * KDoc), whether it's exported or not carries no actual security difference: no
-         * third-party app can spoof either action regardless. Do not reuse this constant for any
-         * receiver that also handles an app-defined action (like [UsbTonexDeviceOpener]'s
-         * `ACTION_USB_PERMISSION`, which correctly uses `RECEIVER_NOT_EXPORTED` -- a real
-         * app-defined action *can* be spoofed by another app if exported).
+         * Now [ContextCompat.RECEIVER_NOT_EXPORTED] -- **not** `RECEIVER_EXPORTED` (PR #64
+         * review, B2, catching an error in this comment's own first draft): for [start]'s own
+         * receiver specifically (only ever handling `ACTION_USB_DEVICE_ATTACHED`/
+         * `ACTION_USB_DEVICE_DETACHED`, both system-protected broadcasts nothing but the platform
+         * can ever send -- see this class's KDoc), whether it's exported or not carries no actual
+         * security difference *today*: no third-party app can spoof either action regardless.
+         * `RECEIVER_NOT_EXPORTED` is still the correct choice, not just an equally-valid
+         * alternative -- [ContextCompat.registerReceiver]'s own javadoc says exactly this: a
+         * receiver listening only for broadcasts "from the system uid" should use
+         * `RECEIVER_NOT_EXPORTED`, and that flag still receives system broadcasts fine (it only
+         * blocks *other apps'* broadcasts, never the platform's own). `RECEIVER_EXPORTED` fails
+         * *open* if this same [IntentFilter] is ever extended with a non-protected action later
+         * (a real, if hypothetical, hazard this class's own future maintainers could introduce
+         * without realizing); `RECEIVER_NOT_EXPORTED` fails *closed* in that same scenario. Do
+         * not reuse this constant for any receiver that also handles an app-defined action (like
+         * [UsbTonexDeviceOpener]'s `ACTION_USB_PERMISSION`, already correctly on
+         * `RECEIVER_NOT_EXPORTED` for the more obvious reason: a real app-defined action *can* be
+         * spoofed by another app if exported).
          */
-        private const val SYSTEM_BROADCAST_RECEIVER_FLAGS = ContextCompat.RECEIVER_EXPORTED
+        private const val SYSTEM_BROADCAST_RECEIVER_FLAGS = ContextCompat.RECEIVER_NOT_EXPORTED
 
         @Volatile
         private var instance: UsbConnectionManager? = null
