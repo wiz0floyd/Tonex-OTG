@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
@@ -114,7 +115,9 @@ fun PresetListContent(
         }
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("presetList"),
             contentPadding = PaddingValues(TonexTheme.spacing.space2),
             verticalArrangement = Arrangement.spacedBy(TonexTheme.touchTargets.spacing),
         ) {
@@ -131,6 +134,7 @@ fun PresetListContent(
                     onClick = { onPresetClick(item.index) },
                     subtitle = subtitle,
                     onEditAlias = { onEditAliasRequested(item.index) },
+                    modifier = Modifier.testTag("presetRow.${item.index.value}"),
                 )
             }
         }

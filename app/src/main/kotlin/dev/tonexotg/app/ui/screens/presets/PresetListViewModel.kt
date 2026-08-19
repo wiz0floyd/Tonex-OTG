@@ -109,17 +109,21 @@ class PresetListViewModel(
     /**
      * Loads [index] as the pedal's active preset — the whole point of this screen (O1).
      *
-     * A no-op while [PresetListUiState.isLive] is `false`: there is no live pedal to select a
-     * preset on, and calling [TonexController.selectPreset] outside [ConnectionState.Ready]
+     * A no-op while the controller isn't [ConnectionState.Ready]: there is no live pedal to
+     * select a preset on, and calling [TonexController.selectPreset] outside [ConnectionState.Ready]
      * would just fail with [TonexError.ProtocolStateViolation] anyway — checking here avoids a
-     * round trip through the controller for a failure the UI already knows is coming.
+     * round trip through the controller for a failure the UI already knows is coming. Reads
+     * [TonexController.connectionState] directly rather than [uiState]'s own `isLive` — unlike
+     * the controller's flows, [uiState] is a [kotlinx.coroutines.flow.SharingStarted.WhileSubscribed]
+     * projection that only reflects live values while something is actively collecting it, so
+     * gating on it here would make this check's correctness depend on collector presence.
      * Fire-and-forget by design, matching [dev.tonexotg.app.ui.screens.connection.ConnectionStatusViewModel.reconnect]:
      * progress is observable via [uiState] ([TonexController.activePreset] updates the row's
      * highlight), and a failure lands in [PresetListUiState.selectPresetError] rather than being
      * silently dropped (fail fast and loud).
      */
     fun selectPreset(index: PresetIndex) {
-        if (!uiState.value.isLive) return
+        if (controller.connectionState.value !is ConnectionState.Ready) return
         scope.launch {
             when (val result = controller.selectPreset(index)) {
                 is TonexResult.Success -> lastSelectError.value = null
