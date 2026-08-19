@@ -299,10 +299,11 @@ object MessageHeaderCodec {
      *
      * Exists because [encode]'s output sometimes needs to be read back: test suites that capture
      * what [DefaultTonexController][dev.tonexotg.protocol.connection.DefaultTonexController]
-     * actually wrote and assert on it (`FakeTonexTransport.writtenMessages()`), and diagnostic
-     * tooling that wants to interpret captured outbound wire traffic (the S20 probe harness's
-     * write-side logging) both need to parse the *outbound* shape specifically — [decode] would
-     * misread it, for the same reason it would misread any 4-field frame.
+     * actually wrote and assert on it (`FakeTonexTransport.writtenMessages()`), and any future
+     * diagnostic tooling that wants to interpret captured outbound wire traffic, need to parse the
+     * *outbound* shape specifically — [decode] would misread it, for the same reason it would
+     * misread any 4-field frame. (The S20 probe harness does not currently do this — it logs raw
+     * bytes only, with no header decoding on either side.)
      */
     fun decodeOutbound(bytes: ByteArray): TonexResult<DecodedMessage> {
         if (bytes.size < MIN_OUTBOUND_FRAME_LENGTH) {

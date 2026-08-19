@@ -40,6 +40,10 @@ import kotlin.test.assertEquals
  * those conventions are specifically about matching real *outbound* literals byte-for-byte, and
  * have no bearing on inbound frames, which nothing here claims to match byte-for-byte — decode()
  * itself is agnostic to which valid marker form was used.
+ *
+ * A near-duplicate of this function lives in `MessageHeaderCodecTest` (a different package,
+ * codec-unit-test-focused, kept local there since it's a handful of lines and that file has no
+ * other reason to depend on this one). If inbound framing changes again, update both.
  */
 fun encodeInboundFrame(type: MessageType, unknown: Long, payload: ByteArray): ByteArray {
     val out = ArrayList<Byte>(2 + 6 + payload.size)
