@@ -77,6 +77,8 @@ class FakeTonexController(
     override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = TonexResult.Success(Unit)
 
     override suspend fun revertActivePreset(): TonexResult<Unit> = TonexResult.Success(Unit)
+
+    override suspend fun restoreFootswitches(): TonexResult<Unit> = TonexResult.Success(Unit)
 }
 
 /** A [TonexTransport] test double that does nothing — only its identity is ever inspected. */
