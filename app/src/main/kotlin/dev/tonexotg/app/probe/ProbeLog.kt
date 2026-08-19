@@ -48,8 +48,16 @@ class ProbeLog {
         const val LOGCAT_TAG = "TonexProbe"
     }
 
-    /** Plain-text rendering for the "Copy log to clipboard" button — one line per entry. */
-    fun renderForClipboard(): String {
+    /**
+     * Plain-text rendering for the "Save & share log" button — one line per entry.
+     *
+     * Was `renderForClipboard()` / copied straight to [android.content.ClipboardManager] until
+     * issue #25's full read/write test logs started overflowing the clipboard's Binder
+     * transaction size limit (`TransactionTooLargeException`, roughly 1MB shared across the
+     * whole process). Callers now write this to a file and share that instead — see
+     * `ProbeActivity`'s "Save & share log" button.
+     */
+    fun render(): String {
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
         return _entries.value.joinToString("\n") { entry ->
             "[${fmt.format(Date(entry.timestampMillis))}] [${entry.level}] ${entry.message}"

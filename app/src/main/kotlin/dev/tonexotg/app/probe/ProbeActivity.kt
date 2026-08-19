@@ -1,5 +1,7 @@
 package dev.tonexotg.app.probe
 
+import android.content.Context
+import android.content.Intent
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
@@ -28,13 +30,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.ClipboardManager
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.PresetIndex
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,7 +51,7 @@ import kotlinx.coroutines.launch
  * Deliberately a standalone launcher Activity, not wired into `MainActivity`'s navigation or
  * `dev.tonexotg.app.ui.components` — see this package's other files for why. Launch it directly
  * (it has its own launcher icon, "Tonex Probe (Diagnostic)") to run the probe against a real
- * pedal, then use "Copy log to clipboard" to hand the results back for review.
+ * pedal, then use "Save & share log" to hand the results back for review.
  */
 class ProbeActivity : ComponentActivity() {
 
@@ -91,6 +95,23 @@ class ProbeActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Writes [text] to a fresh timestamped file under `probe-logs/` in the app's external files dir
+ * and returns it. That subdirectory name must match `probe_log_file_paths.xml`'s
+ * `external-files-path` entry, which is what makes [FileProvider.getUriForFile] willing to hand
+ * out a `content://` Uri for a file in it.
+ *
+ * Exists because issue #25's full read/write test logs (raw descriptor hex dumps plus every
+ * chunk of a multi-KB preset read) overflow `ClipboardManager`'s Binder transaction size limit —
+ * the "Copy log to clipboard" button this replaced would throw or silently truncate on those
+ * runs.
+ */
+private fun writeLogFile(context: Context, text: String): File {
+    val dir = File(context.getExternalFilesDir(null), "probe-logs").apply { mkdirs() }
+    val timestamp = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
+    return File(dir, "tonex-probe-$timestamp.log").apply { writeText(text) }
+}
+
 private class UsbConnectionHandles(
     val connection: UsbDeviceConnection,
     val usbInterface: UsbInterface,
@@ -102,7 +123,6 @@ private class UsbConnectionHandles(
 @Composable
 private fun ProbeScreen(scope: CoroutineScope) {
     val context = LocalContext.current
-    val clipboard: ClipboardManager = LocalClipboardManager.current
     val log = remember { ProbeLog() }
     val entries by log.entries.collectAsState()
     val probeSession = remember { ProbeSession(scope, log) }
@@ -188,9 +208,23 @@ private fun ProbeScreen(scope: CoroutineScope) {
         }
 
         OutlinedButton(
-            onClick = { clipboard.setText(AnnotatedString(log.renderForClipboard())) },
+            onClick = {
+                val file = writeLogFile(context, log.render())
+                log.info("Log saved to ${file.absolutePath}")
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.probelogprovider", file)
+                context.startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        },
+                        "Share Tonex probe log",
+                    ),
+                )
+            },
         ) {
-            Text("Copy log to clipboard")
+            Text("Save & share log")
         }
 
         OutlinedButton(

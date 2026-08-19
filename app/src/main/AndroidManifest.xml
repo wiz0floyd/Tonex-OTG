@@ -65,6 +65,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          Backs ProbeActivity's "Save & share log" button (issue #25): a full read/write test's
+          log overflows ClipboardManager's Binder transaction limit, so it's written to a file
+          under getExternalFilesDir(null) instead and handed to another app via a content:// Uri
+          from this provider, per androidx's FileProvider requirement (a raw file:// Uri would
+          throw FileUriExposedException on API 24+).
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.probelogprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/probe_log_file_paths" />
+        </provider>
     </application>
 
 </manifest>
