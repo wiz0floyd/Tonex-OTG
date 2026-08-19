@@ -37,13 +37,28 @@ class PresetListViewModelTest {
             scope = scope,
         )
 
+    /**
+     * [PresetListViewModel.uiState] is a [kotlinx.coroutines.flow.SharingStarted.WhileSubscribed]
+     * [kotlinx.coroutines.flow.stateIn] — its internal sharing coroutine is a long-lived job that
+     * outlives any single [app.cash.turbine.ReceiveTurbine.test] block (it only stops
+     * `stopTimeoutMillis` after the *last* subscriber goes away). Every test below constructs its
+     * view model with [backgroundScope], the `runTest` coroutine intended for exactly this: a job
+     * that keeps running across the test body but is force-cancelled when the test ends, rather
+     * than the test's own scope (`this`), which `runTest` instead requires to have completed all
+     * its own children before the test is allowed to finish (see
+     * [kotlinx.coroutines.test.UncompletedCoroutinesError]'s own message).
+     */
+    private fun kotlinx.coroutines.test.TestScope.newViewModel(
+        controller: FakeTonexController,
+    ): PresetListViewModel = newViewModel(controller, backgroundScope)
+
     // --- All 20 presets load and display real pedal names ---------------------------------
 
     @Test
     fun `uiState lists all 20 presets with the pedal's real names once ready`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.uiState.test {
             val state = awaitItem { it.items.all { item -> item.pedalName != null } }
@@ -61,7 +76,7 @@ class PresetListViewModelTest {
     fun `a local alias overrides the pedal name in displayName but not pedalName itself`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.setAlias(PresetIndex(6), "Set Opener")
 
@@ -81,7 +96,7 @@ class PresetListViewModelTest {
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
         controller.setActivePreset(PresetIndex(3))
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.uiState.test {
             val state = awaitItem { it.items.count { item -> item.isActive } == 1 }
@@ -96,10 +111,23 @@ class PresetListViewModelTest {
     fun `selectPreset calls through to the controller while live`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
-        val viewModel = newViewModel(controller, this)
+        controller.setActivePreset(PresetIndex(0))
+        val viewModel = newViewModel(controller)
 
-        viewModel.selectPreset(PresetIndex(9))
-        testScheduler.advanceUntilIdle()
+        // selectPreset() launches on backgroundScope (see PresetListViewModel's kdoc on why:
+        // it's fire-and-forget, observable via uiState). A bare `testScheduler.advanceUntilIdle()`
+        // does not by itself drain a coroutine launched on a *different* CoroutineScope than the
+        // test's own -- only actually suspending on the flow (as Turbine's awaitItem does below)
+        // gives the dispatcher's event loop a chance to run it, the same mechanism every other
+        // selectPreset-observing test in this class already relies on.
+        viewModel.uiState.test {
+            awaitItem { it.items[0].isActive }
+
+            viewModel.selectPreset(PresetIndex(9))
+
+            val state = awaitItem { it.items[9].isActive }
+            assertTrue(state.items[9].isActive)
+        }
 
         assertEquals(listOf(PresetIndex(9)), controller.selectPresetCalls)
     }
@@ -107,7 +135,7 @@ class PresetListViewModelTest {
     @Test
     fun `selectPreset is a no-op when not live`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Idle)
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.selectPreset(PresetIndex(9))
         testScheduler.advanceUntilIdle()
@@ -122,7 +150,7 @@ class PresetListViewModelTest {
         controller.nextSelectPresetResult = TonexResult.Failure(
             TonexError.ProtocolStateViolation(state = ConnectionState.Connecting, details = "not ready"),
         )
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.selectPreset(PresetIndex(2))
 
@@ -139,7 +167,7 @@ class PresetListViewModelTest {
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
         controller.setActivePreset(PresetIndex(0))
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.uiState.test {
             awaitItem { it.items[0].isActive }
@@ -162,7 +190,7 @@ class PresetListViewModelTest {
     @Test
     fun `while disconnected, isLive is false and no item is active`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Idle)
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.uiState.test {
             val state = awaitItem { !it.isLive || true } // first emission is always non-live here
@@ -175,7 +203,7 @@ class PresetListViewModelTest {
     @Test
     fun `while disconnected, a previously-set local alias is still shown`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Idle)
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
         viewModel.setAlias(PresetIndex(5), "My Lead Tone")
 
         viewModel.uiState.test {
@@ -189,7 +217,7 @@ class PresetListViewModelTest {
     @Test
     fun `a slot with neither an alias nor a known pedal name falls back to a numbered placeholder`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Idle)
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.uiState.test {
             val state = awaitItem { it.items.isNotEmpty() }
@@ -204,7 +232,7 @@ class PresetListViewModelTest {
     fun `setAlias with blank text clears the alias instead of throwing`() = runTest {
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
-        val viewModel = newViewModel(controller, this)
+        val viewModel = newViewModel(controller)
 
         viewModel.setAlias(PresetIndex(1), "Custom")
         viewModel.uiState.test {
