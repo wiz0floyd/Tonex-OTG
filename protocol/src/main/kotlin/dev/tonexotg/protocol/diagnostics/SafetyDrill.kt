@@ -160,8 +160,8 @@ data class PresetChangeDrillResult(
  *
  * A clean [PresetChangeAudit.passed] result is, simultaneously, the answer to three separate parts
  * of issue #27: "only slot bytes changed" (§2), "no global drifted" (§2), and "`DIRECT_MONITOR`/
- * stomp-AB mode unchanged" (§3) — see [PresetChangeAudit]'s own KDoc for why those are one fact,
- * not three separate checks, once the diff is genuinely exhaustive.
+ * stomp-AB mode/bypass mode unchanged" (§3) — see [PresetChangeAudit]'s own KDoc for why those are
+ * one fact, not three separate checks, once the diff is genuinely exhaustive.
  *
  * @return [TonexResult.Failure] if either state-blob capture or the [selectPreset][dev.tonexotg.protocol.TonexController.selectPreset]
  *   call itself fails — never a "drill completed, but here's an error" result buried inside a

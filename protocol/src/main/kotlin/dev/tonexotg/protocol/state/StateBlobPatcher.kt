@@ -35,8 +35,11 @@ import dev.tonexotg.protocol.TonexResult
  *
  * ## What this deliberately does not do
  * - **No side effects.** Upstream's `set_preset_in_slot()` unconditionally forces
- *   `DIRECT_MONITOR = 1` and may force stomp/AB mode. Neither offset is even named in
- *   [StateBlobOffsets], so there is no write path here capable of touching them.
+ *   `DIRECT_MONITOR = 1`, may force stomp/AB mode, and — when upstream's `TOGGLE_BYPASS` config is
+ *   enabled — also writes `END_BYPASS_MODE` (see [StateBlobOffsets]'s "Fields intentionally NOT
+ *   modelled here" for the full three-offset list, confirmed against upstream source per issue
+ *   #27). None of the three offsets is even named in [StateBlobOffsets], so there is no write path
+ *   here capable of touching any of them.
  * - **No message framing.** The `{0xb9, 0x03, 0x81, 0x06, 0x03, 0x82, ...}` wrapper that turns
  *   these bytes into an outgoing wire message is [dev.tonexotg.protocol.message]'s concern, not
  *   this module's — everything here returns plain patched bytes, ready for that layer to frame
@@ -128,7 +131,8 @@ object StateBlobPatcher {
      * — exactly the two bytes touched by [patchSlotAssignment] and [patchActiveSlot] combined,
      * and nothing else. This is the byte-level equivalent of pressing a footswitch button to
      * select a preset that is not already on that footswitch, with none of upstream
-     * `set_preset_in_slot()`'s forced-mode or forced-direct-monitor side effects.
+     * `set_preset_in_slot()`'s forced-mode, forced-direct-monitor, or forced-bypass-mode side
+     * effects (see [StateBlobOffsets]'s "Fields intentionally NOT modelled here" for all three).
      *
      * Implemented as two writes over one shared copy (not as two chained calls to
      * [patchSlotAssignment] then [patchActiveSlot]) because those functions consume a
