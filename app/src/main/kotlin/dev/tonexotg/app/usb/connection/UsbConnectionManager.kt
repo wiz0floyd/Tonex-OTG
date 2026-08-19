@@ -50,8 +50,25 @@ import kotlinx.coroutines.withContext
  * the state transition off [UsbConnectionState.Connected] on detach. [UsbConnectionDecisions]
  * keys every transition on `UsbDevice.getDeviceId()`, the platform's own per-attachment identity,
  * which is guaranteed to differ after a replug -- so a stale attachment's transport is always
- * torn down (see [closeCurrentTransportLocked]) before a new one for the same physical pedal can
- * ever be opened.
+ * torn down (see [closeTransport]) before a new one for the same physical pedal can ever be
+ * opened.
+ *
+ * ### State is published *before* the slow close, not after
+ * [onDeviceAttached] and [onDeviceDetached] both capture any previous [TonexUsbTransport] and
+ * advance [_state] off [UsbConnectionState.Connected] *before* calling [closeTransport] on it, not
+ * after. Found in review (PR #63, Opus, M1): the original ordering awaited the close first, which
+ * left [_state] (and therefore [currentTransport]) reporting [UsbConnectionState.Connected] --
+ * handing out a transport that was already closing or closed -- for the entire close, measured at
+ * ~300ms on an ordinary detach and over 1.5s via [TonexUsbTransport.teardown]'s leak branch
+ * against a close-behavior-faithful fake `UsbIoPort` (the `FakeUsbIoPort` this module's other
+ * tests use hides the gap entirely, since its `requestWait` throws on interrupt instead of
+ * honoring the real native call's ~500ms bound the way `AndroidUsbIoPort` does). Not a
+ * correctness/safety hazard on its own -- a write against an already-closing transport still
+ * fails loudly and accurately, per S11's own guarantees -- but S13's foreground service is meant
+ * to consume [state]/[currentTransport] directly, so reporting a connection that is actually
+ * already gone is a real observability bug worth closing now rather than carrying into that
+ * story. This reordering only narrows the window (the mutex still keeps the whole sequence
+ * serialized -- see "Serialization" below); it does not change any of that section's reasoning.
  *
  * ### Serialization: [mutex] holds across the *entire* connect attempt, including the permission
  * wait
@@ -76,17 +93,20 @@ import kotlinx.coroutines.withContext
  * connection state.
  *
  * This same mutex is also what rules out ever having two live [TonexUsbTransport]s open against
- * overlapping USB state at once: [closeCurrentTransportLocked] always runs to completion (its
+ * overlapping USB state at once: [closeTransport] always runs to completion (its
  * `withContext(Dispatchers.IO) { transport.close() }` actually returns) before either
  * [onDeviceAttached] or [onDeviceDetached] releases the lock, so a new transport can never be
- * opened while a previous one is still mid-teardown.
+ * opened while a previous one is still mid-teardown -- this holds regardless of exactly when
+ * [_state] itself gets updated relative to that close (see "State is published before the slow
+ * close" above); [mutex] is the actual serialization mechanism, [_state]'s timing is purely about
+ * what outside observers see.
  *
  * ### Never blocks the caller's thread
  * [TonexUsbTransport.close]'s own KDoc: it can block synchronously for up to ~4.5s and must not
- * be called from the main thread. [closeCurrentTransportLocked] always hops to [Dispatchers.IO]
- * before calling it, regardless of what dispatcher called into this class -- so nothing in this
- * class can ANR the caller no matter which thread/dispatcher invokes [onDeviceAttached],
- * [onDeviceDetached], or [disconnect].
+ * be called from the main thread. [closeTransport] always hops to [Dispatchers.IO] before calling
+ * it, regardless of what dispatcher called into this class -- so nothing in this class can ANR
+ * the caller no matter which thread/dispatcher invokes [onDeviceAttached], [onDeviceDetached], or
+ * [disconnect].
  */
 class UsbConnectionManager internal constructor(
     private val context: Context,
@@ -152,8 +172,13 @@ class UsbConnectionManager internal constructor(
         scope.launch {
             mutex.withLock {
                 if (!UsbConnectionDecisions.shouldConnect(_state.value, deviceId)) return@withLock
-                closeCurrentTransportLocked()
+                // Capture (and publish past) any previous transport *before* closing it -- see
+                // this class's KDoc, "state is published before the slow close." Once _state
+                // flips off Connected, currentTransport() correctly returns null for the rest of
+                // this attempt even while closeTransport's up-to-~4.5s close is still running.
+                val previous = (_state.value as? UsbConnectionState.Connected)?.transport
                 _state.value = UsbConnectionState.Connecting(deviceId)
+                previous?.let { closeTransport(it) }
                 when (val result = UsbTonexDeviceOpener.requestPermissionAndOpen(context, device)) {
                     is UsbTonexDeviceOpener.OpenResult.Failure ->
                         _state.value = UsbConnectionState.Failed(result.reason)
@@ -196,8 +221,9 @@ class UsbConnectionManager internal constructor(
         scope.launch {
             mutex.withLock {
                 if (!UsbConnectionDecisions.shouldDisconnect(_state.value, deviceId)) return@withLock
-                closeCurrentTransportLocked()
+                val previous = (_state.value as? UsbConnectionState.Connected)?.transport
                 _state.value = UsbConnectionState.Disconnected
+                previous?.let { closeTransport(it) }
             }
         }
     }
@@ -206,20 +232,23 @@ class UsbConnectionManager internal constructor(
     fun disconnect() {
         scope.launch {
             mutex.withLock {
-                closeCurrentTransportLocked()
+                val previous = (_state.value as? UsbConnectionState.Connected)?.transport
                 _state.value = UsbConnectionState.Disconnected
+                previous?.let { closeTransport(it) }
             }
         }
     }
 
     /**
-     * Closes [_state]'s current transport, if any, off the caller's dispatcher -- see this
-     * class's KDoc, "Never blocks the caller's thread." Always called with [mutex] held; see
-     * "Serialization" above for why that specifically (not just "eventually") is what rules out a
-     * second transport ever existing alongside one still mid-teardown.
+     * Closes [transport] off the caller's dispatcher -- see this class's KDoc, "Never blocks the
+     * caller's thread." Always called with [mutex] held, and always *after* [_state] has already
+     * been advanced past whatever [UsbConnectionState.Connected] held this exact [transport] --
+     * see "State is published before the slow close" above. [mutex] staying held while this runs
+     * is still what rules out a second transport ever existing alongside one still mid-teardown;
+     * only the *visibility* of [_state]/[currentTransport] to outside callers moved earlier, not
+     * the actual serialization.
      */
-    private suspend fun closeCurrentTransportLocked() {
-        val transport = (_state.value as? UsbConnectionState.Connected)?.transport ?: return
+    private suspend fun closeTransport(transport: TonexUsbTransport) {
         withContext(Dispatchers.IO) { transport.close() }
     }
 
