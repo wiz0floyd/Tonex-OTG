@@ -135,6 +135,7 @@ object PresetParameterExtractor {
         if (blockStart + needed > payload.size) {
             return TonexResult.Failure(
                 TonexError.UnexpectedBlobShape(
+                    context = "preset parameter block (PresetParameterExtractor.extract)",
                     expectedSize = needed,
                     actualSize = (payload.size - blockStart).coerceAtLeast(0),
                 ),

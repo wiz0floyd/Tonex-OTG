@@ -189,6 +189,7 @@ class MessageHeaderCodecTest {
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(10, error.expectedSize)
         assertEquals(0, error.actualSize)
+        assertEquals("message header body (MessageHeaderCodec.decode)", error.context)
     }
 
     // ---- known message types ------------------------------------------------------------------
@@ -278,6 +279,7 @@ class MessageHeaderCodecTest {
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(100, error.expectedSize)
         assertEquals(2, error.actualSize)
+        assertEquals("message header body (MessageHeaderCodec.decode)", error.context)
     }
 
     @Test
@@ -291,6 +293,7 @@ class MessageHeaderCodecTest {
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(2, error.expectedSize)
         assertEquals(3, error.actualSize)
+        assertEquals("message header body (MessageHeaderCodec.decode)", error.context)
     }
 
     @Test

@@ -240,7 +240,11 @@ object MessageHeaderCodec {
         val remaining = bytes.size - cursor
         if (size.value != remaining.toLong()) {
             return TonexResult.Failure(
-                TonexError.UnexpectedBlobShape(expectedSize = size.value.toInt(), actualSize = remaining),
+                TonexError.UnexpectedBlobShape(
+                    context = "message header body (MessageHeaderCodec.decode)",
+                    expectedSize = size.value.toInt(),
+                    actualSize = remaining,
+                ),
             )
         }
         val payload = bytes.copyOfRange(cursor, bytes.size)

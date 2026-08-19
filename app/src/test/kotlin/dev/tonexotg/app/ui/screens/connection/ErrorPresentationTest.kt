@@ -30,7 +30,7 @@ class ErrorPresentationTest {
         TonexError.ProtocolStateViolation(state = ConnectionState.Connecting, details = "setParameter requires Ready"),
         TonexError.UnsupportedByFirmware(operation = "single-parameter-write"),
         TonexError.StaleSessionState(details = "superseded by a later read", sameSession = true),
-        TonexError.UnexpectedBlobShape(expectedSize = 4096, actualSize = 12),
+        TonexError.UnexpectedBlobShape(context = "state blob", expectedSize = 4096, actualSize = 12),
         TonexError.BlobTooShortToPatch(minimumSize = 256, actualSize = 18),
         TonexError.BlobSizeChangedSinceHandshake(pinnedSize = 4096, actualSize = 2048),
         TonexError.ImplausibleStateBlobShape(actualSize = 4096),
@@ -110,7 +110,7 @@ class ErrorPresentationTest {
 
     @Test
     fun unexpectedBlobShape_hasDistinctActionablePresentation() {
-        val p = TonexError.UnexpectedBlobShape(4096, 12).toPresentation()
+        val p = TonexError.UnexpectedBlobShape("state blob", 4096, 12).toPresentation()
         assertEquals("Unexpected Pedal Data", p.title)
     }
 

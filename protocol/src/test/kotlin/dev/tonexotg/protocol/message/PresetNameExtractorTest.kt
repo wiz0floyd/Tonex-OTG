@@ -113,6 +113,7 @@ class PresetNameExtractorTest {
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(32, error.expectedSize)
         assertEquals(10, error.actualSize)
+        assertEquals("preset name field (PresetNameExtractor.extract)", error.context)
     }
 
     @Test
@@ -122,6 +123,7 @@ class PresetNameExtractorTest {
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(32, error.expectedSize)
         assertEquals(0, error.actualSize)
+        assertEquals("preset name field (PresetNameExtractor.extract)", error.context)
     }
 
     @Test

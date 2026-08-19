@@ -12,8 +12,11 @@ import kotlinx.coroutines.flow.onEach
  * or [dev.tonexotg.protocol.TonexError.MalformedFrame]) only surfaces the error's own summary —
  * not the bytes that triggered it — so there is currently no way to tell whether a given
  * decode failure is a real firmware/protocol difference or a transport-level data loss without
- * capturing the raw wire traffic directly. See issue #25's "Unexpected state blob size: expected
- * 43, got 42" finding, which this wrapper exists to get raw bytes for on the next probe run.
+ * capturing the raw wire traffic directly. See issue #25's `UnexpectedBlobShape` finding, which
+ * this wrapper exists to get raw bytes for. [dev.tonexotg.protocol.TonexError.UnexpectedBlobShape]'s
+ * `context` field (added for the same "which call site, from the log alone" reason) narrows
+ * which of several structurally-similar checks actually failed once this wrapper's captured
+ * bytes and that field are read together.
  */
 class LoggingTonexTransport(
     private val delegate: TonexTransport,

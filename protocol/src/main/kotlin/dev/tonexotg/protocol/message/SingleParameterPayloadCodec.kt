@@ -203,6 +203,7 @@ object SingleParameterPayloadCodec {
             if (floatMarkerPos >= payload.size) {
                 lastFailure = TonexResult.Failure(
                     TonexError.UnexpectedBlobShape(
+                        context = "single-parameter payload float marker (SingleParameterPayloadCodec)",
                         expectedSize = floatMarkerPos + 1,
                         actualSize = payload.size,
                     ),
