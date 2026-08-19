@@ -5,6 +5,7 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import dev.tonexotg.protocol.TonexTransport
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -13,12 +14,15 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Production [dev.tonexotg.protocol.TonexTransport] backed by [UsbDeviceConnection] (S11, issue
@@ -62,7 +66,15 @@ import kotlinx.coroutines.sync.withLock
  *   [WriteJob] and suspends on a [CancellableContinuation] that [writerThread] resumes.
  * - [watchdogThread] periodically checks [lastReaderHeartbeatNanos]; if [readerThread] hasn't
  *   completed a `requestWait` cycle within [watchdogTimeoutMillis], it force-closes (see
- *   [teardown]'s KDoc for why the *order* of that matters).
+ *   [teardown]'s KDoc for why the *order* of that matters). **This only covers [readerThread] --
+ *   a wedged [writerThread] is NOT detected here.** A stuck `bulkTransfer` call currently only
+ *   surfaces as [write] hanging until the caller's own timeout/cancellation; per-write recovery
+ *   (the `doneLatch` wait described under [write]) keeps that from corrupting a *later* write's
+ *   result, but nothing here force-closes the connection on the writer's behalf the way the
+ *   watchdog does for the reader. Flagged as a known gap (issue #16 / #25), not fixed in this
+ *   pass -- `bulkTransfer` is already OS-timeout-bounded, so a genuinely stuck call would itself
+ *   indicate a platform/driver bug rather than the routine "wedge" the reader-side watchdog
+ *   exists for.
  *
  * [write] is serialized by [writeMutex] (the interface's own contract: not required to be safe to
  * call concurrently with itself). That mutex is held for the full round trip -- including the
@@ -119,12 +131,34 @@ class TonexUsbTransport internal constructor(
     private val watchdogThread = Thread({ watchdogLoop() }, "TonexUsbTransport-watchdog").apply { isDaemon = true }
 
     init {
+        // A healthy reader's own per-iteration timeout (READER_POLL_TIMEOUT_MILLIS) must be
+        // comfortably shorter than watchdogTimeoutMillis, or the watchdog cannot tell "reader is
+        // fine, just between iterations" from "reader is wedged" -- it force-closes on every
+        // single normal cycle regardless of anything being wrong. Found during PR #62 review: a
+        // test helper's own too-low default did exactly this, and the resulting "wedge" tests
+        // passed even with their wedge-simulation line deleted, because the watchdog fired
+        // unconditionally either way. This constructor is the one place that can catch a
+        // regression of that shape for good, for every caller including tests.
+        require(watchdogTimeoutMillis > READER_POLL_TIMEOUT_MILLIS * 2) {
+            "TonexUsbTransport: watchdogTimeoutMillis ($watchdogTimeoutMillis) must be more than " +
+                "2x READER_POLL_TIMEOUT_MILLIS ($READER_POLL_TIMEOUT_MILLIS)ms, or a healthy " +
+                "reader's own normal per-iteration timeout is indistinguishable from a wedge"
+        }
         readerThread.start()
         writerThread.start()
         watchdogThread.start()
     }
 
-    private class WriteJob(val bytes: ByteArray, val cont: CancellableContinuation<Int>)
+    private class WriteJob(val bytes: ByteArray, val cont: CancellableContinuation<Int>) {
+        /**
+         * Counted down by [writerLoop] once it has fully finished processing this job (success or
+         * failure) -- [write]'s `finally` waits on this, even across its own cancellation, so
+         * [writeMutex] is never released to the next caller while [writerThread] might still be
+         * touching [io] on this job's behalf. See [write]'s KDoc, "why write waits for the writer
+         * thread to actually finish."
+         */
+        val doneLatch = CountDownLatch(1)
+    }
 
     // ---------------------------------------------------------------------------------------
     // Reader
@@ -179,18 +213,28 @@ class TonexUsbTransport internal constructor(
             val job = try {
                 writeQueue.poll(WRITER_IDLE_POLL_MILLIS, TimeUnit.MILLISECONDS)
             } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
                 null
             } ?: continue
-            val n = try {
-                io.writeBulk(job.bytes, WRITE_TIMEOUT_MILLIS)
-            } catch (t: Throwable) {
-                job.cont.resumeWithException(IOException("TonexUsbTransport.write: unexpected failure", t))
-                continue
-            }
-            if (n < 0) {
-                job.cont.resumeWithException(IOException(shortWriteFailureMessage(job.bytes.size, n)))
-            } else {
-                job.cont.resume(n)
+            try {
+                val n = try {
+                    io.writeBulk(job.bytes, WRITE_TIMEOUT_MILLIS)
+                } catch (t: Throwable) {
+                    job.cont.resumeWithException(IOException("TonexUsbTransport.write: unexpected failure", t))
+                    null
+                }
+                if (n != null) {
+                    if (n < 0) {
+                        job.cont.resumeWithException(IOException(shortWriteFailureMessage(job.bytes.size, n)))
+                    } else {
+                        job.cont.resume(n)
+                    }
+                }
+            } finally {
+                // Always runs, on every exit from the block above -- this is the signal write()'s
+                // finally waits on before it will let writeMutex release to the next caller. See
+                // WriteJob.doneLatch's KDoc.
+                job.doneLatch.countDown()
             }
         }
     }
@@ -219,37 +263,94 @@ class TonexUsbTransport internal constructor(
      * [writerThread] and suspends until it completes; and — deliberately — does not chunk, retry,
      * or otherwise second-guess an oversized [bytes] array. See this class's own KDoc, "A hazard
      * this class does NOT paper over."
+     *
+     * ### Why this waits for the writer thread to actually finish, even across cancellation
+     * `bulkTransfer` cannot be interrupted early (see the `invokeOnCancellation` comment below),
+     * so a cancelled `write()` call unwinds immediately while [writerThread] can legitimately
+     * still be inside `io.writeBulk` for up to [WRITE_TIMEOUT_MILLIS] more. If [writeMutex] were
+     * released as soon as this coroutine unwinds, the *next* `write()` call could reach its own
+     * [writeQueue] handoff while the writer is still busy with the *previous*, cancelled job --
+     * exactly the race PR #62's review found: the handoff would then legitimately time out well
+     * before the writer frees up, and (before this fix) that timeout was reported as "transport is
+     * closed" even though nothing had closed it. The `finally` below closes this by waiting
+     * (bounded, and immune to this call's own cancellation via [NonCancellable] -- a cancelled
+     * caller must not get to skip it) for [WriteJob.doneLatch], which only fires once
+     * [writerLoop] has fully finished this exact job. That keeps the invariant [writeQueue]'s
+     * bounded handoff was always meant to assume -- the writer is idle by the time a new job
+     * arrives -- true again in the case that used to violate it.
      */
     override suspend fun write(bytes: ByteArray): Int = writeMutex.withLock {
         if (closed.get()) throw IOException(closeReason.get())
-        suspendCancellableCoroutine { cont ->
-            // A bounded offer(), not put(): if teardown() concurrently wins the race (interrupts
-            // and retires writerThread between our closed.get() check above and this call), an
-            // unbounded put() would block forever waiting for a taker that will never arrive --
-            // writerThread only ever exits its loop, it never comes back. Timing out and failing
-            // this write is the fail-fast-and-loud alternative to that hang.
-            val accepted = try {
-                writeQueue.offer(WriteJob(bytes, cont), WRITE_ENQUEUE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                false
+        var job: WriteJob? = null
+        try {
+            suspendCancellableCoroutine { cont ->
+                val newJob = WriteJob(bytes, cont)
+                job = newJob
+                // A bounded offer(), not put(): if teardown() concurrently wins the race
+                // (interrupts and retires writerThread between our closed.get() check above and
+                // this call), an unbounded put() would block forever waiting for a taker that
+                // will never arrive -- writerThread only ever exits its loop, it never comes back.
+                // Timing out and failing this write is the fail-fast-and-loud alternative to that
+                // hang. Should be rare in practice now that the finally below keeps the writer
+                // provably idle before any new job is offered -- see this method's KDoc.
+                val accepted = try {
+                    writeQueue.offer(newJob, WRITE_ENQUEUE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    false
+                }
+                if (!accepted) {
+                    job = null // never queued -- writerLoop will never see it, nothing to wait for
+                    cont.resumeWithException(IOException(enqueueTimeoutMessage()))
+                    return@suspendCancellableCoroutine
+                }
+                cont.invokeOnCancellation {
+                    // bulkTransfer is a blocking JNI call; interrupting writerThread cannot
+                    // unblock it early (same limitation the diagnostic UsbRequestTonexTransport
+                    // documents). The transfer still runs to completion, bounded by
+                    // WRITE_TIMEOUT_MILLIS, and its eventual resume()/resumeWithException() on an
+                    // already-cancelled continuation is a documented safe no-op -- nothing else to
+                    // do here. The finally below (not this callback) is what waits for it.
+                }
             }
-            if (!accepted) {
-                cont.resumeWithException(IOException(closeReason.get()))
-                return@suspendCancellableCoroutine
-            }
-            cont.invokeOnCancellation {
-                // bulkTransfer is a blocking JNI call; interrupting writerThread cannot unblock
-                // it early (same limitation the diagnostic UsbRequestTonexTransport documents).
-                // The transfer still runs to completion, bounded by WRITE_TIMEOUT_MILLIS, and its
-                // eventual resume()/resumeWithException() on an already-cancelled continuation is
-                // a documented safe no-op -- nothing else to do here.
+        } finally {
+            job?.let { j ->
+                withContext(NonCancellable + Dispatchers.IO) {
+                    j.doneLatch.await(WRITE_JOIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                }
             }
         }
     }
 
+    /**
+     * The enqueue-timeout message for [write]'s `offer()` -- must check [closed] itself rather
+     * than assume the timeout means closure. Before this fix (PR #62 review, B1) this path always
+     * reported [closeReason]'s default "transport is closed" text unconditionally, which was
+     * actively wrong on a transport that was still open (see [write]'s KDoc for the race that
+     * produced it) -- a wrong diagnosis is worse than none, per CLAUDE.md's fail-loud philosophy.
+     */
+    private fun enqueueTimeoutMessage(): String = if (closed.get()) {
+        closeReason.get()
+    } else {
+        "TonexUsbTransport.write: timed out queueing the write after " +
+            "${WRITE_ENQUEUE_TIMEOUT_MILLIS}ms (the transport is NOT closed -- writerThread may " +
+            "still be busy with a previous write, or genuinely stuck; see write()'s KDoc)"
+    }
+
     override fun incoming(): Flow<ByteArray> = incomingChannel.receiveAsFlow()
 
+    /**
+     * See [dev.tonexotg.protocol.TonexTransport.close]'s KDoc for the general (idempotent,
+     * must-not-throw) contract.
+     *
+     * **Blocking, not async, and can take a while:** in the worst case this synchronously blocks
+     * for up to `READER_JOIN_TIMEOUT_MILLIS + WRITE_JOIN_TIMEOUT_MILLIS` (currently ~1.5s + 3s =
+     * ~4.5s) while [teardown] waits out both threads' bounded joins. That is comfortably inside
+     * Android's ANR window if called from the main thread. Callers should call this from a
+     * background dispatcher/thread, the same way they would any other blocking teardown call --
+     * this class does not do that hop itself because [dev.tonexotg.protocol.TonexTransport.close]
+     * is declared non-`suspend`, so there is no coroutine context here to dispatch with.
+     */
     override fun close() = teardown(null)
 
     // ---------------------------------------------------------------------------------------
@@ -316,11 +417,17 @@ class TonexUsbTransport internal constructor(
 
         io.cancelRead()
 
+        // joinIfNotSelf() interrupts each thread itself -- an extra explicit interrupt() here
+        // would be redundant (PR #62 review, L2).
         val readerJoined = joinIfNotSelf(readerThread, READER_JOIN_TIMEOUT_MILLIS)
-        writerThread.interrupt()
         val writerJoined = joinIfNotSelf(writerThread, WRITE_JOIN_TIMEOUT_MILLIS)
 
         if (readerJoined && writerJoined) {
+            // Also update closeReason on the success path, not just the leak branch below --
+            // otherwise a watchdog-forced close delivers its specific cause to incoming()'s
+            // collectors but a subsequent write() call only ever sees the generic default
+            // "transport is closed" (PR #62 review, M2).
+            cause?.let { closeReason.set(it.message ?: it.toString()) }
             io.releaseAndClose()
             incomingChannel.close(cause)
         } else {

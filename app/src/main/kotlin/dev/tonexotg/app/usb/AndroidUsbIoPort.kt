@@ -81,6 +81,17 @@ internal class AndroidUsbIoPort(
         } catch (t: TimeoutException) {
             return ReadOutcome.TimedOut
         }
+        if (completed == null) {
+            // Distinct from the identity-mismatch case below (PR #62 review, L1): a null return
+            // without a thrown TimeoutException means the platform call itself failed -- most
+            // likely the connection was closed, or a native error occurred, while a request was
+            // pending. Reporting this as "unrecognized UsbRequest" would misdescribe what actually
+            // happened.
+            throw IOException(
+                "AndroidUsbIoPort: requestWait() returned null rather than throwing -- likely the " +
+                    "connection was closed or a native error occurred while a request was pending",
+            )
+        }
         if (completed !== readRequest) {
             // Should be unreachable -- see class KDoc's demux-removal argument. Fail loud rather
             // than silently treat an unrecognized UsbRequest as a completed read.

@@ -21,16 +21,29 @@ import org.junit.Test
  * timeout at all.
  *
  * A short [watchdogTimeoutMillis]/[watchdogPollMillis] pair is used throughout so these tests run
- * in well under a second of real wall-clock time each; [TonexUsbTransport]'s own dedicated
- * threads do real (non-virtual) `Thread.sleep`/blocking calls, so there is no virtual-time
- * scheduler to fast-forward here the way `kotlinx-coroutines-test` normally would.
+ * in a few seconds of real wall-clock time each; [TonexUsbTransport]'s own dedicated threads do
+ * real (non-virtual) `Thread.sleep`/blocking calls, so there is no virtual-time scheduler to
+ * fast-forward here the way `kotlinx-coroutines-test` normally would.
+ *
+ * ### `watchdogTimeoutMillis` must stay comfortably above `READER_POLL_TIMEOUT_MILLIS`
+ * [TonexUsbTransport]'s own constructor now `require()`s `watchdogTimeoutMillis >
+ * READER_POLL_TIMEOUT_MILLIS * 2` (500ms * 2 = 1000ms) -- found necessary during PR #62 review,
+ * because [newTransport]'s original default (300ms) sat *below* that floor. A healthy,
+ * non-wedged [FakeUsbIoPort] blocks for up to `READER_POLL_TIMEOUT_MILLIS` per iteration before
+ * its first heartbeat update even lands, so a watchdog timeout shorter than that force-closes on
+ * every single normal cycle -- indistinguishable from an actual wedge. That is exactly why the
+ * previous [watchdog_forceClosesAnInterruptibleWedgedReader]/
+ * [watchdog_leaksRatherThanCloseIntoAnUnjoinableReader] tests still passed with their
+ * `wedgeMode.set(...)` line deleted: the watchdog fired regardless of whether anything was
+ * actually wedged. [watchdog_doesNotForceCloseAHealthyReader] below is the negative control that
+ * pins this for good; [newTransport]'s default is now comfortably above the constructor's floor.
  */
 class TonexUsbTransportTest {
 
     private fun newTransport(
         port: FakeUsbIoPort,
-        watchdogTimeoutMillis: Long = 300L,
-        watchdogPollMillis: Long = 50L,
+        watchdogTimeoutMillis: Long = 1_200L,
+        watchdogPollMillis: Long = 100L,
     ): TonexUsbTransport = TonexUsbTransport(port, watchdogTimeoutMillis, watchdogPollMillis)
 
     // ---------------------------------------------------------------------------------------
@@ -122,6 +135,47 @@ class TonexUsbTransportTest {
         transport.close()
     }
 
+    /**
+     * The exact race PR #62 review (B1) reproduced: `bulkTransfer` can't be interrupted early, so
+     * a cancelled `write()` call's underlying job can still be running on [writeQueue]'s consumer
+     * thread well after the caller's coroutine has been asked to cancel. Before the fix, a second
+     * `write()` issued in that window could time out waiting to enqueue and be told "transport is
+     * closed" -- which was false; nothing had closed it. This pins that it no longer happens: the
+     * second write simply waits (its own coroutine stays suspended, not resumed with a bogus
+     * error) until the first job's `writeBulk` call actually finishes.
+     */
+    @Test
+    fun write_cancelledWriteDoesNotCauseNextWriteToFalselyReportClosed() = runBlocking {
+        val port = FakeUsbIoPort()
+        val writeStarted = CountDownLatch(1)
+        val releaseWrite = CountDownLatch(1)
+        port.onWriteBulk = { bytes ->
+            if (bytes.contentEquals(byteArrayOf(1))) {
+                writeStarted.countDown()
+                releaseWrite.await(5, TimeUnit.SECONDS) // simulate a slow bulkTransfer the cancellation can't interrupt
+            }
+        }
+        val transport = newTransport(port)
+
+        val job1 = launch(Dispatchers.Default) { runCatching { transport.write(byteArrayOf(1)) } }
+        assertTrue(writeStarted.await(2, TimeUnit.SECONDS))
+        job1.cancel() // signals cancellation; per write()'s KDoc, job1 won't actually complete until writerThread finishes
+
+        val job2 = async(Dispatchers.Default) { transport.write(byteArrayOf(2)) }
+        delay(200) // give job2 every chance to (incorrectly) race ahead or fail early
+        assertTrue("second write must still be waiting, not resumed with a false error", job2.isActive)
+
+        releaseWrite.countDown() // let the first (cancelled) write's writeBulk finally return
+        val result = withTimeout(4_000) { job2.await() }
+        assertEquals(1, result) // byteArrayOf(2) is a 1-byte array; write() returns the transferred count, not the byte's value
+        assertEquals(2, port.writesReceived.size)
+        assertTrue(port.writesReceived[0].contentEquals(byteArrayOf(1)))
+        assertTrue(port.writesReceived[1].contentEquals(byteArrayOf(2)))
+
+        job1.join()
+        transport.close()
+    }
+
     // ---------------------------------------------------------------------------------------
     // incoming()
     // ---------------------------------------------------------------------------------------
@@ -183,6 +237,30 @@ class TonexUsbTransportTest {
     // ---------------------------------------------------------------------------------------
 
     /**
+     * The negative control PR #62 review found missing: a healthy, non-wedged reader must survive
+     * comfortably past `watchdogTimeoutMillis` without ever being force-closed. Without this test,
+     * [watchdog_forceClosesAnInterruptibleWedgedReader] and
+     * [watchdog_leaksRatherThanCloseIntoAnUnjoinableReader] could both "pass" for the wrong reason
+     * (the watchdog firing unconditionally regardless of `wedgeMode`) -- see this class's own
+     * KDoc. This is the test that actually proves the watchdog discriminates.
+     */
+    @Test
+    fun watchdog_doesNotForceCloseAHealthyReader() = runBlocking {
+        val port = FakeUsbIoPort() // wedgeMode defaults to NONE
+        val transport = newTransport(port, watchdogTimeoutMillis = 1_200L, watchdogPollMillis = 100L)
+
+        // Wait past watchdogTimeoutMillis plus several poll cycles -- comfortably long enough for
+        // a false-positive watchdog to have fired if it were going to.
+        delay(2_500)
+
+        assertEquals(0, port.releaseAndCloseCallCount.get())
+        assertEquals(0, port.cancelReadCallCount.get())
+        // The transport must still be genuinely usable, not just "not yet closed."
+        assertEquals(4, transport.write(byteArrayOf(1, 2, 3, 4)))
+        transport.close()
+    }
+
+    /**
      * The literal acceptance criterion: a reader that stops making progress gets force-closed by
      * the watchdog. [FakeUsbIoPort.WedgeMode.INTERRUPTIBLE] represents the realistic case per the
      * design's own reasoning (`TonexUsbTransport.teardown`'s KDoc) -- `requestWait` is always
@@ -193,10 +271,10 @@ class TonexUsbTransportTest {
     fun watchdog_forceClosesAnInterruptibleWedgedReader() = runBlocking {
         val port = FakeUsbIoPort()
         port.wedgeMode.set(FakeUsbIoPort.WedgeMode.INTERRUPTIBLE)
-        val transport = newTransport(port, watchdogTimeoutMillis = 200L, watchdogPollMillis = 50L)
+        val transport = newTransport(port, watchdogTimeoutMillis = 1_200L, watchdogPollMillis = 100L)
 
-        withTimeout(5_000) {
-            while (port.releaseAndCloseCallCount.get() == 0) delay(20)
+        withTimeout(6_000) {
+            while (port.releaseAndCloseCallCount.get() == 0) delay(50)
         }
 
         assertTrue(port.cancelReadCallCount.get() >= 1)
@@ -222,7 +300,7 @@ class TonexUsbTransportTest {
         val port = FakeUsbIoPort()
         port.wedgeMode.set(FakeUsbIoPort.WedgeMode.UNINTERRUPTIBLE)
         port.uninterruptibleForMillis = 3_000L // comfortably longer than TonexUsbTransport's internal join bound
-        val transport = newTransport(port, watchdogTimeoutMillis = 100L, watchdogPollMillis = 50L)
+        val transport = newTransport(port, watchdogTimeoutMillis = 1_200L, watchdogPollMillis = 100L)
 
         // Poll write()'s rejection message until teardown has actually finished attempting (and
         // failing) its joins -- closed flips true immediately when the watchdog fires, well before
