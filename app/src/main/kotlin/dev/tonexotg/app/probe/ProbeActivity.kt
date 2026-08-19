@@ -137,6 +137,17 @@ private fun ProbeScreen(scope: CoroutineScope) {
     var showLatencyDialog by remember { mutableStateOf(false) }
     var latencyTransportKind by remember { mutableStateOf(TransportKind.BULK_TRANSFER) }
 
+    // S22 (issue #27): the write-drill buttons below are gated on `s22BackupPersisted`, not just
+    // "the backup call returned true" -- Opus review finding L7: "the backup only really exists
+    // once it has left in-memory state." A successful runSafetyBackup() only sets this once its
+    // full log (state blob + all 20 presets) has also been written to a file on disk, same as
+    // "Save & share log" does, but automatically -- so a user who runs the backup and immediately
+    // proceeds to a write drill without remembering to press "Save & share log" still has a durable
+    // backup sitting in probe-logs/ before either write drill can run.
+    var s22BackupPersisted by remember { mutableStateOf(false) }
+    var showPresetChangeDrillDialog by remember { mutableStateOf(false) }
+    var showRevertDrillDialog by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -232,6 +243,56 @@ private fun ProbeScreen(scope: CoroutineScope) {
             Text("Run latency measurements (writes to your pedal)")
         }
 
+        Text("S22 Safety drill (issue #27) — prove a write cannot corrupt the pedal", style = MaterialTheme.typography.titleSmall)
+
+        Button(
+            enabled = !busy && readOnlyPassDone && handles != null,
+            onClick = {
+                busy = true
+                scope.launch {
+                    try {
+                        handles?.let {
+                            val ok = probeSession.runSafetyBackup(it.connection, it.inEndpoint, it.outEndpoint)
+                            if (ok) {
+                                // L7 (Opus review): the backup only really exists once it has left
+                                // in-memory state. Persist it to disk automatically here, rather
+                                // than waiting for the user to remember "Save & share log" -- that
+                                // is what actually unlocks the two write drills below.
+                                val file = writeLogFile(context, log.render())
+                                log.info("S22 backup persisted to disk: ${file.absolutePath}")
+                                s22BackupPersisted = true
+                            } else {
+                                s22BackupPersisted = false
+                            }
+                        }
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        log.error("S22 backup crashed: ${t::class.simpleName}: ${t.message}")
+                        s22BackupPersisted = false
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+        ) {
+            Text("S22: Full backup (read-only, persists to disk)")
+        }
+
+        Button(
+            enabled = !busy && s22BackupPersisted && handles != null,
+            onClick = { showPresetChangeDrillDialog = true },
+        ) {
+            Text("S22: Preset-change byte-diff drill (writes to your pedal)")
+        }
+
+        Button(
+            enabled = !busy && s22BackupPersisted && handles != null,
+            onClick = { showRevertDrillDialog = true },
+        ) {
+            Text("S22: Revert drill (writes to your pedal)")
+        }
+
         OutlinedButton(
             onClick = {
                 val file = writeLogFile(context, log.render())
@@ -263,6 +324,11 @@ private fun ProbeScreen(scope: CoroutineScope) {
                 }
                 handles = null
                 readOnlyPassDone = false
+                // A fresh connection means a fresh pedal state as far as this session's records
+                // are concerned -- the persisted backup was captured against the connection just
+                // released, not whatever gets connected next. Require a new S22 backup before
+                // either write drill unlocks again.
+                s22BackupPersisted = false
             },
         ) {
             Text("Release USB connection")
@@ -368,6 +434,86 @@ private fun ProbeScreen(scope: CoroutineScope) {
             },
             dismissButton = {
                 OutlinedButton(onClick = { showLatencyDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showPresetChangeDrillDialog) {
+        AlertDialog(
+            onDismissRequest = { showPresetChangeDrillDialog = false },
+            title = { Text("This will write to your pedal") },
+            text = {
+                Text(
+                    "This is issue #27's preset-change byte-diff drill: it captures the full state " +
+                        "blob, switches the active preset to a different one, captures the state blob " +
+                        "again, and byte-diffs every single byte to prove only the sanctioned slot " +
+                        "bytes changed. It then attempts to restore the original active preset and " +
+                        "independently re-verifies the restore with a third capture. A completed S22 " +
+                        "backup (${if (s22BackupPersisted) "already saved to disk" else "REQUIRED first"}) " +
+                        "is your safety net if anything goes wrong.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showPresetChangeDrillDialog = false
+                    busy = true
+                    scope.launch {
+                        try {
+                            handles?.let {
+                                probeSession.runPresetChangeSafetyDrill(it.connection, it.inEndpoint, it.outEndpoint)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            log.error("Preset-change byte-diff drill crashed: ${t::class.simpleName}: ${t.message}")
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }) { Text("I understand, run the preset-change drill") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showPresetChangeDrillDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showRevertDrillDialog) {
+        AlertDialog(
+            onDismissRequest = { showRevertDrillDialog = false },
+            title = { Text("This will write to your pedal") },
+            text = {
+                Text(
+                    "This is issue #27's revert drill: it edits ${probeSession.revertDrillParameterEnumNames.joinToString()} " +
+                        "on the currently active preset to distinguishable test values, calls the " +
+                        "app's own revert operation, then independently re-reads the preset (a fresh " +
+                        "round trip, not the local cache) to confirm every parameter and the full " +
+                        "state blob genuinely came back to their pre-edit values. A completed S22 " +
+                        "backup (${if (s22BackupPersisted) "already saved to disk" else "REQUIRED first"}) " +
+                        "is your safety net if anything goes wrong.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showRevertDrillDialog = false
+                    busy = true
+                    scope.launch {
+                        try {
+                            handles?.let {
+                                probeSession.runRevertSafetyDrill(it.connection, it.inEndpoint, it.outEndpoint)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            log.error("Revert drill crashed: ${t::class.simpleName}: ${t.message}")
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }) { Text("I understand, run the revert drill") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showRevertDrillDialog = false }) { Text("Cancel") }
             },
         )
     }
