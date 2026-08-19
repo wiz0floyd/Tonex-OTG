@@ -132,6 +132,9 @@ private fun ProbeScreen(scope: CoroutineScope) {
     var activePreset by remember { mutableStateOf<PresetIndex?>(null) }
     var busy by remember { mutableStateOf(false) }
     var showWriteTestDialog by remember { mutableStateOf(false) }
+    var s22BackupDone by remember { mutableStateOf(false) }
+    var showS22PresetDiffDialog by remember { mutableStateOf(false) }
+    var showS22RevertDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -205,6 +208,44 @@ private fun ProbeScreen(scope: CoroutineScope) {
             onClick = { showWriteTestDialog = true },
         ) {
             Text("Single-parameter write test (writes to your pedal)")
+        }
+
+        Text("S22 first-write safety drill (issue #27)", style = MaterialTheme.typography.titleSmall)
+
+        Button(
+            enabled = !busy && readOnlyPassDone && handles != null,
+            onClick = {
+                busy = true
+                scope.launch {
+                    try {
+                        handles?.let {
+                            s22BackupDone = probeSession.runSafetyBackup(it.connection, it.inEndpoint, it.outEndpoint)
+                        }
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        log.error("S22 backup crashed: ${t::class.simpleName}: ${t.message}")
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+        ) {
+            Text("S22: Full backup (read-only, run this first)")
+        }
+
+        Button(
+            enabled = !busy && s22BackupDone && handles != null,
+            onClick = { showS22PresetDiffDialog = true },
+        ) {
+            Text("S22: Preset-change byte-diff drill (writes to your pedal)")
+        }
+
+        Button(
+            enabled = !busy && s22BackupDone && handles != null,
+            onClick = { showS22RevertDialog = true },
+        ) {
+            Text("S22: Revert drill (writes to your pedal)")
         }
 
         OutlinedButton(
@@ -303,6 +344,80 @@ private fun ProbeScreen(scope: CoroutineScope) {
             },
             dismissButton = {
                 OutlinedButton(onClick = { showWriteTestDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showS22PresetDiffDialog) {
+        AlertDialog(
+            onDismissRequest = { showS22PresetDiffDialog = false },
+            title = { Text("This will change your pedal's active preset") },
+            text = {
+                Text(
+                    "S22 (issue #27): selects a different preset via the real controller, byte-diffs the " +
+                        "full state blob before/after, then attempts to restore your original active preset. " +
+                        "Requires a completed S22 backup first (already checked). This never performs a " +
+                        "hardcoded whole-state replay -- only the real selectPreset() path.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showS22PresetDiffDialog = false
+                    busy = true
+                    scope.launch {
+                        try {
+                            handles?.let {
+                                probeSession.runPresetChangeSafetyDrill(it.connection, it.inEndpoint, it.outEndpoint)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            log.error("S22 preset-change drill crashed: ${t::class.simpleName}: ${t.message}")
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }) { Text("I understand, run the drill") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showS22PresetDiffDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showS22RevertDialog) {
+        AlertDialog(
+            onDismissRequest = { showS22RevertDialog = false },
+            title = { Text("This will edit several parameters, then revert them") },
+            text = {
+                Text(
+                    "S22 (issue #27): edits ${probeSession.revertDrillParameterEnumNames.joinToString()} on the " +
+                        "currently active preset via the real controller, calls revertActivePreset(), then " +
+                        "independently re-reads the pedal to confirm the revert actually landed (not just that " +
+                        "the write was accepted). Requires a completed S22 backup first (already checked).",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showS22RevertDialog = false
+                    busy = true
+                    scope.launch {
+                        try {
+                            handles?.let {
+                                probeSession.runRevertSafetyDrill(it.connection, it.inEndpoint, it.outEndpoint)
+                            }
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (t: Throwable) {
+                            log.error("S22 revert drill crashed: ${t::class.simpleName}: ${t.message}")
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }) { Text("I understand, run the drill") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showS22RevertDialog = false }) { Text("Cancel") }
             },
         )
     }
