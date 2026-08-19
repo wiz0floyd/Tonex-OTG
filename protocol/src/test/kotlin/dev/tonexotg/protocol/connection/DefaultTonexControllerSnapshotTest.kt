@@ -7,6 +7,8 @@ import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetSlot
+import dev.tonexotg.protocol.PresetSnapshot
+import dev.tonexotg.protocol.SessionId
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexEvent
 import dev.tonexotg.protocol.TonexResult
@@ -132,7 +134,7 @@ class DefaultTonexControllerSnapshotTest {
     // ---- re-snapshot on active-preset change: external, self-initiated, both -------------------
 
     @Test
-    fun `an external preset change re-snapshots`() = runTest {
+    fun `an external preset change captures a snapshot on first arrival`() = runTest {
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
             scope = backgroundScope,
@@ -153,7 +155,7 @@ class DefaultTonexControllerSnapshotTest {
         }
 
         val captureRequests = fake.writtenMessages().drop(writesBefore)
-        assertEquals(1, captureRequests.size, "the external change should trigger exactly one re-snapshot request")
+        assertEquals(1, captureRequests.size, "the external change should trigger exactly one first-arrival capture request")
         assertEquals(1, captureRequests[0].payload[4].toInt() and 0xFF, "should capture the NEW active preset (1)")
 
         fake.emitMessage(presetDetailsSummaryWithParameters("New Active", newValues))
@@ -166,7 +168,7 @@ class DefaultTonexControllerSnapshotTest {
     }
 
     @Test
-    fun `a self-initiated selectPreset also re-snapshots, without emitting ExternalPresetChange`() = runTest {
+    fun `a self-initiated selectPreset also captures a snapshot on first arrival, without emitting ExternalPresetChange`() = runTest {
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
             scope = backgroundScope,
@@ -190,7 +192,7 @@ class DefaultTonexControllerSnapshotTest {
             testScheduler.runCurrent()
 
             val newWrites = fake.writtenMessages().drop(writesBeforeConfirmation)
-            assertEquals(1, newWrites.size, "the confirmation should trigger exactly one re-snapshot request")
+            assertEquals(1, newWrites.size, "the confirmation should trigger exactly one first-arrival capture request")
             assertEquals(19, newWrites[0].payload[4].toInt() and 0xFF, "should capture the newly active preset (19)")
             expectNoEvents()
         }
@@ -364,6 +366,43 @@ class DefaultTonexControllerSnapshotTest {
             assertIs<TonexResult.Success<SingleParameterPayload>>(decoded)
             assertEquals(originalValues[i], decoded.value.value, 1e-3f, "write $i should restore the ORIGINAL pre-tweak value")
         }
+    }
+
+    // ---- cross-session phantom-snapshot race (Opus review must-fix #1, issue #46 PR) --------------
+
+    @Test
+    fun `a snapshot stamped with a foreign session is replaced, not pinned, by this session's own first-arrival capture`() = runTest {
+        val fake = FakeTonexTransport()
+        val store = InMemorySnapshotStore()
+        // Simulate the end-state of the cross-session race the review found: onTransportEnded's
+        // teardown runs on `scope` without operationMutex, so `session = null` then
+        // `snapshotStore.clear()` can interleave with a capture from a DIFFERENT (dead) session that
+        // already passed its own liveness check on another thread of a caller-supplied multithreaded
+        // scope -- landing a snapshot stamped with that dead session's SessionId here, for the same
+        // preset index the fresh connect below is about to arrive at.
+        val foreignValues = alteredSnapshotValues(offset = 2)
+        store.record(PresetSnapshot(PresetIndex(0), SessionId.create(), foreignValues))
+
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            snapshotStore = store,
+        )
+        val connectDeferred = async { controller.connect(fake) }
+        val realValues = snapshotValues()
+        driveToReady(fake, activeSlot = PresetSlot.A, a = 0, b = 1, c = 2, captureValues = realValues)
+        connectDeferred.await()
+
+        // The presence-only guard this fix replaced (`snapshotFor(index) == null`) would have seen a
+        // non-null entry for preset 0 and skipped recording -- permanently pinning the foreign
+        // session's phantom values for the entire lifetime of the new session. The sessionId-scoped
+        // guard must instead treat "belongs to a different session" the same as "nothing recorded
+        // yet" and let this session's own first-arrival capture through.
+        assertSnapshotValuesEqual(
+            realValues,
+            store.snapshotFor(PresetIndex(0)),
+            "this session's own first-arrival capture must replace the foreign session's phantom snapshot",
+        )
     }
 
     // ---- helpers --------------------------------------------------------------------------------
