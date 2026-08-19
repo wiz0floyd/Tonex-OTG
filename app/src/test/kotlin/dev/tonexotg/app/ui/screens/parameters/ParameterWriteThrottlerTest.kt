@@ -4,7 +4,7 @@ import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.TonexResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -16,6 +16,25 @@ import org.junit.Test
  * exact conflation behavior [ParameterWriteThrottler] exists to provide — issue #22 calls this
  * out as "the trickiest [test], write a test that simulates rapid value changes and asserts the
  * controller only receives the conflated final value, not every intermediate one."
+ *
+ * ## `runCurrent()`, not `advanceUntilIdle()`
+ *
+ * Every test below pumps the scheduler with [kotlinx.coroutines.test.runCurrent] rather than the
+ * more commonly reached-for [kotlinx.coroutines.test.TestScope.advanceUntilIdle] — deliberately,
+ * not a style choice. [ParameterWriteThrottler] is constructed with `scope = backgroundScope`
+ * (matching its real caller, [dev.tonexotg.app.ui.screens.parameters.ParameterEditorViewModel],
+ * which does the same), and each worker it starts is a `backgroundScope` coroutine tagged
+ * "background," not "foreground," by `kotlinx-coroutines-test`'s own bookkeeping. Per that
+ * library's `TestCoroutineScheduler.advanceUntilIdle` (decompiled and confirmed against the
+ * exact `1.11.0` jar this project resolves): it loops only while at least one **foreground**
+ * event remains queued and stops immediately once none does — it does not run purely-background
+ * work at all when nothing foreground is pending, which is every case in this file (nothing here
+ * ever launches on the bare `TestScope` itself). `advanceUntilIdle()` in that situation is a
+ * silent no-op: the very bug this comment exists to prevent someone from reintroducing by
+ * "simplifying" `runCurrent()` back to the more familiar call. [runCurrent] runs every
+ * currently-ready event regardless of foreground/background tagging, which is what these tests
+ * actually need — nothing here uses `delay()`, so there is no virtual time to additionally
+ * advance.
  */
 class ParameterWriteThrottlerTest {
 
@@ -54,7 +73,7 @@ class ParameterWriteThrottlerTest {
         throttler.submit(gain, 6.4f) // the drag's final, released position
 
         releaseFirstWrite.complete(Unit)
-        advanceUntilIdle()
+        runCurrent()
 
         // Exactly two writes ever reach the controller: the one already in flight when the flood
         // started, and the conflated *last* value - never 2f, 3f, 4f, or 5f individually, and
@@ -77,7 +96,7 @@ class ParameterWriteThrottlerTest {
         for (v in 0..99) {
             throttler.submit(gain, v.toFloat())
         }
-        advanceUntilIdle()
+        runCurrent()
 
         // Bounded backlog: whatever the worker happens to pick up first, at most 2 writes ever
         // happen for a burst offered before any write starts (one dequeued+in-flight, one
@@ -101,7 +120,7 @@ class ParameterWriteThrottlerTest {
 
         throttler.submit(gain, 7f)
         throttler.submit(bass, 3f)
-        advanceUntilIdle()
+        runCurrent()
 
         assertEquals(setOf(gain to 7f, bass to 3f), received.toSet())
     }
@@ -119,7 +138,7 @@ class ParameterWriteThrottlerTest {
         )
 
         throttler.submit(gain, 5f)
-        advanceUntilIdle()
+        runCurrent()
 
         assertEquals(listOf(5f), observed)
     }
@@ -150,7 +169,7 @@ class ParameterWriteThrottlerTest {
 
         throttler.cancelAll() // D3 §6.3: an external preset change mid-drag drops the pending value
         releaseFirstWrite.complete(Unit)
-        advanceUntilIdle()
+        runCurrent()
 
         assertEquals(listOf(1f), received) // 2f was never sent
     }
