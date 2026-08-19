@@ -429,7 +429,14 @@ class ProbeSession(
         // function's KDoc for why a plain cancellation unwind here (ProbeActivity's scope dying on
         // back press or system reclaim mid-measurement) would silently skip a restore and leave the
         // pedal on the wrong preset or an extreme parameter value. See issue #26's adversarial
-        // review, finding S3.
+        // review, finding S3. disconnect()/close() live INSIDE this block, in a finally, and behind
+        // runCatching -- matching runWriteTest's shape exactly. A first cut left them outside: a
+        // cancellation there still resumed teardown() far enough to CAS teardownDone before dying at
+        // the next suspension point (readerJob.cancelAndJoin()), permanently orphaning the transport
+        // and leaving UsbRequestTonexTransport's loop thread as a second live requestWait() caller on
+        // the shared connection -- exactly the misrouting hazard that class's own KDoc calls out. A
+        // throw out of the measurements (e.g. BurstStats.of's require()) skipped the same teardown
+        // even without cancellation, since there was no try/finally at all. See PR #60 review.
         withContext(NonCancellable) {
             // Suppress LoggingTonexTransport's per-write hex-dump logging for the timed calls only
             // -- that string building plus ProbeLog's list-copy append are systematic overhead
@@ -444,11 +451,13 @@ class ProbeSession(
                 measureSliderDragBurst(controller, id, spec)
             } finally {
                 transport.quiet = false
+                runCatching { controller.disconnect() }
+                    .onFailure { log.error("Latency measurements: disconnect() failed during teardown: ${it.message}") }
+                runCatching { transport.close() }
+                    .onFailure { log.error("Latency measurements: transport.close() failed during teardown: ${it.message}") }
             }
         }
 
-        controller.disconnect()
-        transport.close()
         log.warn("=== Latency measurements complete ===")
     }
 

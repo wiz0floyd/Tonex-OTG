@@ -34,8 +34,18 @@ class LoggingTonexTransport(
      * calls whose overhead must not be measured (e.g. [ProbeSession.runLatencyMeasurements]'s
      * timed calls), while still getting normal hex-dump logging for the surrounding
      * connect/disconnect traffic, which is exactly what a human would want to see if a measurement
-     * run fails to connect at all.
+     * run fails to connect at all. Suppresses BOTH [write] and [incoming]'s logging — the flow
+     * side matters just as much as writes, since a read landing during a "quiet" window still goes
+     * through the same [ProbeLog.append] the flag exists to keep out of the measured window.
+     *
+     * `@Volatile`: written from the toggling caller's thread/coroutine context and read from
+     * [write]'s caller and separately from [incoming]'s long-lived `onEach` collector, with no
+     * other synchronization between those sites. A stale read wouldn't corrupt anything, but it
+     * would silently let a hex-dump append slip back into a timed window — exactly the bias this
+     * flag exists to eliminate — so this is made correct by construction rather than "usually
+     * correct" via incidental dispatcher-handoff publication. See PR #60 review.
      */
+    @Volatile
     var quiet: Boolean = false
 
     override suspend fun write(bytes: ByteArray): Int {

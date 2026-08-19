@@ -20,21 +20,20 @@ import kotlin.test.assertIs
  * [DefaultTonexController] operation (`setParameter`/`selectPreset`), not just around a bare
  * suspend lambda (see `LatencyTest` for that). Uses [FakeTonexTransport.writeDelayMillis] (a
  * virtual, `runTest`-clock-advancing delay — never a real sleep) as the "real USB latency" stand-in
- * this codebase's test discipline calls for, and `testScheduler.currentTime`
- * as the injected [ElapsedClock] so the assertions are exact and deterministic, matching every
- * other test in this suite's `testScheduler.runCurrent()` discipline (see `ConnectionTestFixtures`).
+ * this codebase's test discipline calls for, and a `testScheduler.currentTime`-derived injected
+ * [ElapsedClock] (see below) so the assertions are exact and deterministic, matching every other
+ * test in this suite's `testScheduler.runCurrent()` discipline (see `ConnectionTestFixtures`).
  *
  * This is instrumentation-correctness coverage only. It says nothing about real hardware latency —
  * that number can only come from a real pedal (issue #26's cloud-environment limitation), which is
  * exactly why `dev.tonexotg.app.probe.ProbeSession` exists to wrap these same real controller calls
  * for a human to run.
  *
- * Note on units: production's [ElapsedClock.SYSTEM] reports microseconds (see its KDoc), but this
- * file's injected clock reports `testScheduler.currentTime` directly, which is the coroutines test
- * scheduler's own virtual-millisecond tick count. These tests only prove [measureLatency]'s
- * `end - start` arithmetic is correct against *some* injected clock — the numbers below (75, 20,
- * 60, ...) are scheduler ticks matching [FakeTonexTransport.writeDelayMillis], not real
- * microseconds, regardless of the [TimedResult.elapsedMicros] field name.
+ * The injected [ElapsedClock] scales `testScheduler.currentTime` (the coroutines test scheduler's
+ * own virtual-millisecond tick count) up to microseconds at the injection point, matching
+ * [ElapsedClock]'s microseconds contract exactly rather than quietly violating it — see PR #60
+ * review. [FakeTonexTransport.writeDelayMillis] stays in milliseconds (that's what it's named and
+ * what the fake actually models); only the clock reading is scaled.
  */
 class DefaultTonexControllerLatencyTest {
 
@@ -52,13 +51,13 @@ class DefaultTonexControllerLatencyTest {
         assertIs<TonexResult.Success<Unit>>(connectDeferred.await())
 
         fake.writeDelayMillis = 75
-        val clock = ElapsedClock { testScheduler.currentTime }
+        val clock = ElapsedClock { testScheduler.currentTime * 1_000 } // virtual ms -> micros
 
         val timed = measureLatency(clock) { controller.setParameter(presetParam.id, presetParam.min) }
 
         assertIs<TonexResult.Success<Unit>>(timed.value)
         // setParameter issues exactly one transport write (no response is awaited) -- one 75ms delay.
-        assertEquals(75L, timed.elapsedMicros)
+        assertEquals(75_000L, timed.elapsedMicros)
     }
 
     @Test
@@ -74,7 +73,7 @@ class DefaultTonexControllerLatencyTest {
 
         fake.writeDelayMillis = 20
         fake.writeThrows = java.io.IOException("wedged") // throws BEFORE the delay -- see FakeTonexTransport.write
-        val clock = ElapsedClock { testScheduler.currentTime }
+        val clock = ElapsedClock { testScheduler.currentTime * 1_000 } // virtual ms -> micros
 
         val timed = measureLatency(clock) { controller.setParameter(presetParam.id, presetParam.min) }
 
@@ -93,7 +92,7 @@ class DefaultTonexControllerLatencyTest {
         assertIs<TonexResult.Success<Unit>>(connectDeferred.await())
 
         fake.writeDelayMillis = 30
-        val clock = ElapsedClock { testScheduler.currentTime }
+        val clock = ElapsedClock { testScheduler.currentTime * 1_000 } // virtual ms -> micros
 
         // Preset 5 is unassigned in the a=0/b=1/c=2 fixture, so this takes the mandatory
         // re-read-then-patch-then-write path: two transport writes (RequestState, then SetState),
@@ -105,6 +104,6 @@ class DefaultTonexControllerLatencyTest {
         val timed = timedDeferred.await()
 
         assertIs<TonexResult.Success<Unit>>(timed.value)
-        assertEquals(60L, timed.elapsedMicros, "expected two 30ms writes (re-read request, then the state write)")
+        assertEquals(60_000L, timed.elapsedMicros, "expected two 30ms writes (re-read request, then the state write)")
     }
 }

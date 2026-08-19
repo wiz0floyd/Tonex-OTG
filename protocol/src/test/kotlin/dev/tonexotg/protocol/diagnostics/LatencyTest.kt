@@ -103,7 +103,7 @@ class LatencyTest {
 
     @Test
     fun `BurstStats flags backlogSuspected when the last third is much slower than the first third`() {
-        // 9 samples: first third steady at 20ms, last third grown to 80ms (4x) -- a clear backlog signal.
+        // 9 samples: first third steady at 20us, last third grown to 80us (4x) -- a clear backlog signal.
         val samples = listOf(20L, 20L, 20L, 30L, 40L, 50L, 80L, 80L, 80L)
 
         val stats = BurstStats.of(samples)

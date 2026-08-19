@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -100,8 +101,16 @@ class UsbRequestTonexTransport(
     private val inRequest = UsbRequest().apply {
         check(initialize(connection, inEndpoint)) { "UsbRequestTonexTransport: inRequest.initialize() failed" }
     }
-    private val outRequest = UsbRequest().apply {
-        check(initialize(connection, outEndpoint)) { "UsbRequestTonexTransport: outRequest.initialize() failed" }
+
+    // Wrapped so a failure initializing outRequest doesn't leak the already-initialized inRequest's
+    // native context -- see PR #60 review.
+    private val outRequest = try {
+        UsbRequest().apply {
+            check(initialize(connection, outEndpoint)) { "UsbRequestTonexTransport: outRequest.initialize() failed" }
+        }
+    } catch (t: Throwable) {
+        inRequest.close()
+        throw t
     }
 
     private val loopThread: Thread
@@ -193,11 +202,33 @@ class UsbRequestTonexTransport(
             inFlightWrite.set(PendingWrite(bytes.size, completion))
             // Safe to call from this (IO dispatcher) thread concurrently with loopThread's
             // requestWait -- see class KDoc's "why write queues its own OUT request directly".
-            if (!outRequest.queue(buffer)) {
+            val queued = try {
+                outRequest.queue(buffer)
+            } catch (t: IllegalStateException) {
+                // A close() racing this call already tore down outRequest's connection -- AOSP's
+                // UsbRequest.queue() throws ISE("invalid connection") in that case rather than
+                // returning false. Surface it as this class's own IOException like every other
+                // failure path here. See PR #60 review.
+                inFlightWrite.set(null)
+                throw IOException("UsbRequestTonexTransport.write: transport closed concurrently", t)
+            }
+            if (!queued) {
                 inFlightWrite.set(null)
                 throw IOException("UsbRequestTonexTransport.write: OUT queue() failed")
             }
-            completion.await()
+            try {
+                completion.await()
+            } catch (c: CancellationException) {
+                // A cancelled await -- realistically DefaultTonexController.writeFramed's own
+                // transportWriteMillis timeout -- must not leave outRequest permanently queued: the
+                // next write() would otherwise hit AOSP's "this request is currently queued"
+                // IllegalStateException and wedge the transport for the rest of the run. Cancel the
+                // in-flight request and clear inFlightWrite so the transport recovers. See PR #60
+                // review.
+                outRequest.cancel()
+                inFlightWrite.set(null)
+                throw c
+            }
         }
     }
 
