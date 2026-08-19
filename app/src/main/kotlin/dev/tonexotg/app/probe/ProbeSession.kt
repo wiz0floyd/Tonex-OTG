@@ -10,8 +10,11 @@ import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.connection.ConnectionTimeouts
 import dev.tonexotg.protocol.connection.DefaultTonexController
+import dev.tonexotg.protocol.diagnostics.BurstStats
 import dev.tonexotg.protocol.diagnostics.MessageCaptureTap
+import dev.tonexotg.protocol.diagnostics.TimedResult
 import dev.tonexotg.protocol.diagnostics.captureFullBackup
+import dev.tonexotg.protocol.diagnostics.measureLatency
 import dev.tonexotg.protocol.diagnostics.runPresetChangeByteDiffDrill
 import dev.tonexotg.protocol.diagnostics.runRevertDrill
 import dev.tonexotg.protocol.message.FirmwareCapabilities
@@ -21,6 +24,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val MICROS_PER_MILLI = 1_000.0
 
 /**
  * ⚠️ DIAGNOSTIC-ONLY. Orchestrates the S20 hardware probe (issue #25) against a real pedal: the
@@ -42,6 +47,9 @@ class ProbeSession(
      * see issue #25 §6 and [ParameterRegistry] for the full field list this was chosen from.
      */
     val writeTestParameterEnumName: String = "EQ_MID"
+
+    /** S21 (issue #26): how many back-to-back writes [runLatencyMeasurements]'s slider-drag burst fires. Mirrors [SLIDER_DRAG_STEPS]. */
+    val sliderDragSteps: Int = SLIDER_DRAG_STEPS
 
     /**
      * Runs the read-only diagnostic pass: connects with [FirmwareCapabilities.NONE_CONFIRMED]
@@ -674,5 +682,290 @@ class ProbeSession(
             }
         }
         return TonexResult.Success(Unit)
+    }
+
+    // ==== S21 (issue #26): latency measurements =================================================
+    //
+    // Purely informational. Per the product owner's issue #26 comment (posted after the story was
+    // written, recalibrating it for a hobby, non-gig-critical project): "there is no hard numeric
+    // target to hit or block on. Measure and report actual latency for information." Nothing below
+    // treats a measured number as pass/fail against 200ms or any other figure -- it only logs what
+    // was actually measured, honestly labelled as either a fire-and-forget transport-write duration
+    // ([setParameter]/[selectPreset] await no pedal acknowledgement -- see [DefaultTonexController]'s
+    // own `writeFramed`) or a burst summary, never implied to be more than that.
+
+    /**
+     * Runs all three S21 latency measurements in one reconnect cycle against [connection]:
+     * preset-change, single-parameter-write, and a rapid-fire "slider drag" burst. Uses
+     * [transportKind] to pick which low-level USB transfer API backs this run — see [TransportKind]
+     * — so a human can execute this twice against the same pedal (once per kind) and compare the
+     * two saved logs, per issue #26's UsbRequest-vs-bulkTransfer acceptance criterion.
+     *
+     * Like [runWriteTest], this WRITES to the pedal (parameter writes and preset switches) and must
+     * only be called after the caller's own explicit, human-confirmed warning step; see
+     * [ProbeActivity]. Every measurement restores what it changed (the test parameter's original
+     * value, the original active preset) before this function returns, wherever that is possible —
+     * see each sub-measurement's own KDoc for what happens when a restore can't be attempted.
+     */
+    suspend fun runLatencyMeasurements(
+        connection: UsbDeviceConnection,
+        inEndpoint: UsbEndpoint,
+        outEndpoint: UsbEndpoint,
+        transportKind: TransportKind,
+    ) {
+        log.warn("=== Latency measurements starting (transport=${transportKind.label}; this WILL write to the pedal) ===")
+        val spec = ParameterRegistry.byEnumName(writeTestParameterEnumName)
+        if (spec == null) {
+            log.error("$writeTestParameterEnumName not found in ParameterRegistry — aborting latency measurements.")
+            return
+        }
+        val id = spec.id
+
+        val transport = LoggingTonexTransport(transportKind.create(connection, inEndpoint, outEndpoint), log, "latency")
+        val controller = DefaultTonexController(
+            scope = scope,
+            // Same deliberate probe override as runWriteTest -- see its KDoc. This measurement pass
+            // needs setParameter to actually be attempted to time it.
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            timeouts = ConnectionTimeouts.DEFAULT,
+        )
+        val connectResult = controller.connect(transport)
+        if (connectResult is TonexResult.Failure) {
+            log.error(
+                "Latency measurements: reconnect failed: ${connectResult.error.message}. Aborting; nothing was " +
+                    "measured or written.",
+            )
+            transport.close()
+            return
+        }
+
+        val originalActive = controller.activePreset.value
+        if (originalActive == null) {
+            log.error(
+                "Latency measurements: active preset unknown after connect() — cannot safely run the preset-change " +
+                    "measurement (there would be no preset to restore to afterward). Aborting the whole pass rather " +
+                    "than running only some of it against an unknown baseline.",
+            )
+            controller.disconnect()
+            transport.close()
+            return
+        }
+
+        // Wrapped in NonCancellable: each sub-measurement below changes pedal state (preset,
+        // parameter value) and then restores it, exactly like runWriteTest's cycle 2 -- see that
+        // function's KDoc for why a plain cancellation unwind here (ProbeActivity's scope dying on
+        // back press or system reclaim mid-measurement) would silently skip a restore and leave the
+        // pedal on the wrong preset or an extreme parameter value. See issue #26's adversarial
+        // review, finding S3. disconnect()/close() live INSIDE this block, in a finally, and behind
+        // runCatching -- matching runWriteTest's shape exactly. A first cut left them outside: a
+        // cancellation there still resumed teardown() far enough to CAS teardownDone before dying at
+        // the next suspension point (readerJob.cancelAndJoin()), permanently orphaning the transport
+        // and leaving UsbRequestTonexTransport's loop thread as a second live requestWait() caller on
+        // the shared connection -- exactly the misrouting hazard that class's own KDoc calls out. A
+        // throw out of the measurements (e.g. BurstStats.of's require()) skipped the same teardown
+        // even without cancellation, since there was no try/finally at all. See PR #60 review.
+        withContext(NonCancellable) {
+            // Suppress LoggingTonexTransport's per-write hex-dump logging for the timed calls only
+            // -- that string building plus ProbeLog's list-copy append are systematic overhead
+            // sitting inside the very window being measured, and specifically bias the burst's
+            // growth-ratio signal upward as the log grows. Connect/disconnect traffic above and
+            // below this block is still logged normally. See issue #26's adversarial review,
+            // finding S4.
+            transport.quiet = true
+            try {
+                measurePresetChangeLatency(controller, originalActive)
+                measureParameterWriteLatency(controller, id, spec)
+                measureSliderDragBurst(controller, id, spec)
+            } finally {
+                transport.quiet = false
+                runCatching { controller.disconnect() }
+                    .onFailure { log.error("Latency measurements: disconnect() failed during teardown: ${it.message}") }
+                runCatching { transport.close() }
+                    .onFailure { log.error("Latency measurements: transport.close() failed during teardown: ${it.message}") }
+            }
+        }
+
+        log.warn("=== Latency measurements complete ===")
+    }
+
+    /**
+     * Issue #26's "preset-change latency": times [DefaultTonexController.selectPreset] from call to
+     * completion, switching to a different preset and then immediately switching back to
+     * [originalActive] (also timed) so the pedal ends this measurement on the preset it started on.
+     * `(originalActive.value + 1) mod 20` is always a different, always-valid preset index — no
+     * lookup or extra state needed to pick a target.
+     */
+    private suspend fun measurePresetChangeLatency(controller: DefaultTonexController, originalActive: PresetIndex) {
+        val target = PresetIndex((originalActive.value + 1) % (PresetIndex.VALID_RANGE.last + 1))
+
+        log.info("Preset-change latency: switching preset ${originalActive.value} -> ${target.value}...")
+        logPresetChangeResult(measureLatency { controller.selectPreset(target) }, originalActive.value, target.value)
+
+        log.info("Preset-change latency: restoring preset ${target.value} -> ${originalActive.value}...")
+        logPresetChangeResult(measureLatency { controller.selectPreset(originalActive) }, target.value, originalActive.value)
+    }
+
+    private fun logPresetChangeResult(timed: TimedResult<TonexResult<Unit>>, from: Int, to: Int) {
+        val ms = timed.elapsedMicros / MICROS_PER_MILLI
+        when (val result = timed.value) {
+            is TonexResult.Success -> log.finding(
+                "Preset-change latency (preset $from -> $to): ${"%.3f".format(ms)} ms (selectPreset() call to " +
+                    "completion — informational only, no pass/fail target; see issue #26).",
+            )
+            is TonexResult.Failure -> log.error(
+                "Preset-change latency (preset $from -> $to): selectPreset() FAILED after ${"%.3f".format(ms)} ms: " +
+                    "${result.error.message}",
+            )
+        }
+    }
+
+    /**
+     * Issue #26's "single-parameter-write latency": times [DefaultTonexController.setParameter]
+     * writing a distinguishable test value, then times writing the original value back. Reuses the
+     * same before-writing safety checks as [runWriteTest] (known, finite, in-range current value) —
+     * duplicated rather than shared, since [runWriteTest] is S20's already-reviewed code and this is
+     * a separate, narrower measurement that should not risk altering its behaviour.
+     */
+    private suspend fun measureParameterWriteLatency(controller: DefaultTonexController, id: ParameterId, spec: ParameterSpec) {
+        val before = controller.parameterValues.value[id]
+        if (before == null || !before.isFinite() || before < spec.min || before > spec.max) {
+            log.error(
+                "Parameter-write latency: current value of $writeTestParameterEnumName is unknown, non-finite, or " +
+                    "outside the registered range (${spec.min}..${spec.max}) — refusing to write (same safety rule " +
+                    "as the single-parameter write test). Skipping this measurement.",
+            )
+            return
+        }
+        val testValue = if (before <= (spec.min + spec.max) / 2f) spec.max else spec.min
+
+        log.info("Parameter-write latency: writing $writeTestParameterEnumName = $testValue ${spec.unit} (from $before)...")
+        logParamWriteResult(measureLatency { controller.setParameter(id, testValue) }, before, testValue, spec.unit)
+
+        log.info("Parameter-write latency: restoring $writeTestParameterEnumName = $before ${spec.unit}...")
+        logParamWriteResult(measureLatency { controller.setParameter(id, before) }, testValue, before, spec.unit)
+    }
+
+    private fun logParamWriteResult(timed: TimedResult<TonexResult<Unit>>, from: Float, to: Float, unit: String) {
+        val ms = timed.elapsedMicros / MICROS_PER_MILLI
+        when (val result = timed.value) {
+            is TonexResult.Success -> log.finding(
+                "Parameter-write latency ($writeTestParameterEnumName $from -> $to $unit): ${"%.3f".format(ms)} ms " +
+                    "(setParameter() call to completion. This is a fire-and-forget transport write — no pedal " +
+                    "acknowledgement is awaited, so this measures 'accepted by the transport', not a confirmed " +
+                    "pedal-applied round trip. Informational only, no pass/fail target; see issue #26).",
+            )
+            is TonexResult.Failure -> log.error(
+                "Parameter-write latency ($writeTestParameterEnumName $from -> $to $unit): setParameter() FAILED " +
+                    "after ${"%.3f".format(ms)} ms: ${result.error.message}",
+            )
+        }
+    }
+
+    /**
+     * Issue #26's "sustained slider-drag throughput": fires [SLIDER_DRAG_STEPS] back-to-back
+     * [DefaultTonexController.setParameter] calls sweeping [id] linearly from [ParameterSpec.min] to
+     * [ParameterSpec.max], with deliberately NO pacing between calls — simulating a fast slider drag
+     * — and times each one individually to see whether per-call latency grows over the burst
+     * ([BurstStats.growthRatio]/[BurstStats.backlogSuspected]) rather than holding steady.
+     *
+     * Aborts the burst at the first failed call (fail-fast, matching this codebase's house style —
+     * see [DefaultTonexController.revertActivePreset]'s KDoc for the same "abort at first failure"
+     * reasoning) rather than continuing through a wedged transport. Always attempts to restore
+     * [id]'s original value afterward, however far the burst got.
+     */
+    private suspend fun measureSliderDragBurst(controller: DefaultTonexController, id: ParameterId, spec: ParameterSpec) {
+        val before = controller.parameterValues.value[id]
+        if (before == null || !before.isFinite() || before < spec.min || before > spec.max) {
+            log.error(
+                "Slider-drag burst: current value of $writeTestParameterEnumName is unknown, non-finite, or " +
+                    "outside the registered range (${spec.min}..${spec.max}) — refusing to write. Skipping this " +
+                    "measurement.",
+            )
+            return
+        }
+
+        log.info(
+            "Slider-drag burst: issuing $SLIDER_DRAG_STEPS back-to-back setParameter() calls on " +
+                "$writeTestParameterEnumName (${spec.min}..${spec.max} ${spec.unit}), no pacing between them...",
+        )
+        val samples = mutableListOf<Long>()
+        var completedCalls = 0
+        for (i in 0 until SLIDER_DRAG_STEPS) {
+            // .coerceIn guards against the final step landing fractionally outside [spec.min,
+            // spec.max] by float rounding (i / (SLIDER_DRAG_STEPS - 1) need not hit exactly 1.0 at
+            // the last step) -- writeParameterLocked REJECTS an out-of-range value rather than
+            // clamping it, which would otherwise abort the burst on a spurious failure at the very
+            // last call. See issue #26's adversarial review, LOW nits.
+            val value = (spec.min + (spec.max - spec.min) * i / (SLIDER_DRAG_STEPS - 1)).coerceIn(spec.min, spec.max)
+            val timed = measureLatency { controller.setParameter(id, value) }
+            val ms = timed.elapsedMicros / MICROS_PER_MILLI
+            when (val result = timed.value) {
+                is TonexResult.Success -> {
+                    samples += timed.elapsedMicros
+                    completedCalls++
+                }
+                is TonexResult.Failure -> {
+                    log.error(
+                        "Slider-drag burst: call ${i + 1}/$SLIDER_DRAG_STEPS FAILED after ${"%.3f".format(ms)} ms: " +
+                            "${result.error.message}. Aborting the rest of the burst rather than continuing through " +
+                            "further failures.",
+                    )
+                    completedCalls++
+                    break
+                }
+            }
+        }
+
+        if (samples.isNotEmpty()) {
+            val stats = BurstStats.of(samples)
+            fun msLong(micros: Long) = "${"%.3f".format(micros / MICROS_PER_MILLI)}ms"
+            fun msDouble(micros: Double) = "${"%.3f".format(micros / MICROS_PER_MILLI)}ms"
+            val backlogNote = when {
+                !stats.growthRatio.isFinite() -> {
+                    // The first-third mean was exactly 0 -- growthRatio is undefined (0/0-shaped),
+                    // NOT evidence of steady latency. Reporting this as "no backlog signal" would
+                    // claim the opposite of what an undefined ratio actually means. See issue #26's
+                    // adversarial review, finding S1.
+                    "growth ratio is UNDEFINED (first-third mean measured ${msDouble(stats.firstThirdMeanMicros)}, " +
+                        "last-third mean ${msDouble(stats.lastThirdMeanMicros)}) — too fast to compute a ratio " +
+                        "from, not evidence either way of backlog."
+                }
+                stats.backlogSuspected -> "LATENCY GREW SUBSTANTIALLY across the burst (growth ratio " +
+                    "${"%.2f".format(stats.growthRatio)}x) — consistent with writes queuing or backing up under " +
+                    "sustained, unpaced load."
+                else -> "latency held roughly steady across the burst (growth ratio " +
+                    "${"%.2f".format(stats.growthRatio)}x) — no backlog signal."
+            }
+            log.finding(
+                "Slider-drag burst ($writeTestParameterEnumName): $SLIDER_DRAG_STEPS calls planned, " +
+                    "$completedCalls attempted, ${samples.size} succeeded. min=${msLong(stats.minMicros)} " +
+                    "mean=${msDouble(stats.meanMicros)} p50=${msLong(stats.p50Micros)} p90=${msLong(stats.p90Micros)} " +
+                    "p99=${msLong(stats.p99Micros)} max=${msLong(stats.maxMicros)}. First-third mean " +
+                    "${msDouble(stats.firstThirdMeanMicros)} vs last-third mean ${msDouble(stats.lastThirdMeanMicros)}. " +
+                    "$backlogNote Informational only, no pass/fail target; see issue #26.",
+            )
+        } else {
+            log.error("Slider-drag burst: every call failed — no successful samples to summarize.")
+        }
+
+        log.info("Slider-drag burst: restoring $writeTestParameterEnumName = $before ${spec.unit}...")
+        when (val restore = controller.setParameter(id, before)) {
+            is TonexResult.Success -> log.info("Slider-drag burst: restore write accepted by the transport.")
+            is TonexResult.Failure -> log.error(
+                "Slider-drag burst: restore write FAILED: ${restore.error.message}. $writeTestParameterEnumName may " +
+                    "still hold a burst value, NOT the original ($before ${spec.unit}) — please restore it manually.",
+            )
+        }
+    }
+
+    private companion object {
+        /**
+         * Not derived from any measurement — a reasonable diagnostic burst size for simulating a
+         * fast slider drag (comparable to the number of `onValueChange` callbacks a real Compose
+         * `Slider` drag gesture can emit in well under a second). Large enough for [BurstStats]'
+         * first-third/last-third comparison to be meaningful, small enough to run quickly and keep
+         * one probe session short.
+         */
+        const val SLIDER_DRAG_STEPS: Int = 40
     }
 }

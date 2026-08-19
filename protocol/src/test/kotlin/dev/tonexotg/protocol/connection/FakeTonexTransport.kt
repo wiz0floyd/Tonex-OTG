@@ -39,6 +39,16 @@ class FakeTonexTransport : TonexTransport {
      */
     var writeHangs: Boolean = false
 
+    /**
+     * A finite, injectable delay (via [kotlinx.coroutines.delay], so it advances a `runTest`'s
+     * virtual clock instead of sleeping real wall-clock time) before [write] returns — S21's
+     * `DefaultTonexControllerLatencyTest` uses this to prove
+     * [dev.tonexotg.protocol.diagnostics.measureLatency] correctly measures elapsed time across a
+     * real [DefaultTonexController] operation, without ever needing a real USB transport or a real
+     * sleep. Zero by default (no delay), matching every other test in this suite.
+     */
+    var writeDelayMillis: Long = 0L
+
     /** `true` once [close] has been called at least once. */
     var closed: Boolean = false
         private set
@@ -47,6 +57,7 @@ class FakeTonexTransport : TonexTransport {
         writeThrows?.let { throw it }
         written += bytes
         if (writeHangs) kotlinx.coroutines.awaitCancellation()
+        if (writeDelayMillis > 0) kotlinx.coroutines.delay(writeDelayMillis)
         return writeBehavior(bytes)
     }
 
