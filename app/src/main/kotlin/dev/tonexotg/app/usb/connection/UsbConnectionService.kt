@@ -437,6 +437,14 @@ class UsbConnectionService : Service() {
      * this method. `@SuppressLint` is still required regardless of the platform's actual runtime
      * behavior: lint's own `MissingPermission` check flags this call site at Error severity
      * either way (this was error #7 of `:app:lintDebug`'s 7).
+     *
+     * **Consequence worth being explicit about** (PR #64 review, M2): on an API 33+ device that
+     * never grants `POST_NOTIFICATIONS` -- and this story adds no request flow for it, see the
+     * manifest comment -- issue #18's "notification shows live connection status" acceptance
+     * criterion is silently unmet. The service itself is unaffected (`connectedDevice` FGS
+     * promotion does not require this permission), but there is no visible notification for the
+     * user to see until a future UI story (S16-19, gated on D2) adds the actual permission
+     * prompt. Filed on issue #18 rather than left implied by this comment alone.
      */
     @SuppressLint("MissingPermission")
     private fun NotificationManagerCompat.notifySafely(id: Int, notification: Notification) {
