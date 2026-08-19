@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -49,6 +50,7 @@ import dev.tonexotg.protocol.ParameterId
  * `MainActivity.kt` or build any navigation graph; a future navigation story wires a real
  * `TonexController`/scope into a [ParameterEditorViewModel] and hosts this composable.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ParameterEditorScreen(viewModel: ParameterEditorViewModel, modifier: Modifier = Modifier) {
     val uiState by viewModel.uiState.collectAsState()
