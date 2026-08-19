@@ -561,8 +561,8 @@ class ProbeSession(
                     "no backlog signal."
             }
             log.finding(
-                "Slider-drag burst ($writeTestParameterEnumName, ${samples.size}/$completedCalls successful calls " +
-                    "of $SLIDER_DRAG_STEPS attempted): min=${stats.minMillis}ms mean=${"%.1f".format(stats.meanMillis)}ms " +
+                "Slider-drag burst ($writeTestParameterEnumName): $SLIDER_DRAG_STEPS calls planned, " +
+                    "$completedCalls attempted, ${samples.size} succeeded. min=${stats.minMillis}ms mean=${"%.1f".format(stats.meanMillis)}ms " +
                     "p50=${stats.p50Millis}ms p90=${stats.p90Millis}ms p99=${stats.p99Millis}ms max=${stats.maxMillis}ms. " +
                     "First-third mean ${"%.1f".format(stats.firstThirdMeanMillis)}ms vs last-third mean " +
                     "${"%.1f".format(stats.lastThirdMeanMillis)}ms. $backlogNote Informational only, no pass/fail " +
