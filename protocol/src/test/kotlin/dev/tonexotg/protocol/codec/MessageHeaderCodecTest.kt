@@ -4,45 +4,61 @@ import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/**
- * Byte-exact fixtures from issue #9 ("recovered from the reference implementation and are ground
- * truth"). These are the framed message payloads *before* HDLC byte-stuffing (S4's concern, not
- * this codec's).
- */
 private fun hex(spec: String): ByteArray =
     spec.trim().split(Regex("\\s+")).map { it.toInt(16).toByte() }.toByteArray()
 
-private val HELLO_FIXTURE = hex("b9 03 00 82 04 00 80 0b 01 b9 02 02 0b")
-private val REQUEST_STATE_FIXTURE = hex("b9 03 00 82 06 00 80 0b 03 b9 02 81 06 03 0b")
-
 /**
- * The four-varint header field values for every complete message literal in upstream
- * `usb_tonex_one.c`, confirmed by testing this exact model against all of them (see
- * [MessageHeaderCodec] KDoc). Used below for the round-trip test (a synthetic, size-exact body is
- * attached and the whole message is decoded back). See [REFERENCE_HEADER_BYTES] for the raw
- * header bytes of all five, used for the byte-exact encode test.
+ * Encodes a synthetic **inbound**-shaped (3-field: `type`, `size`, `unknown`) frame for the
+ * decode()-focused tests below. Mirrors `ConnectionTestFixtures.encodeInboundFrame` (a different
+ * package, connection-test-suite-focused) but kept local here since it's a handful of lines and
+ * this file has no other reason to depend on that one.
+ *
+ * @param declaredSize normally left as [payload]'s real length; overridden explicitly by the
+ *   size-mismatch tests below to build a frame whose declared size lies about its actual body.
  */
-private data class UpstreamLiteral(
-    val label: String,
-    val type: Long,
-    val size: Long,
-    val unknownA: Long,
-    val unknownB: Long,
-)
-
-private val UPSTREAM_LITERALS = listOf(
-    UpstreamLiteral("hello (usb_tonex_one.c:204)", type = 0x0000L, size = 4L, unknownA = 11L, unknownB = 1L),
-    UpstreamLiteral("request state (usb_tonex_one.c:224)", type = 0x0000L, size = 6L, unknownA = 11L, unknownB = 3L),
-    UpstreamLiteral("preset details (usb_tonex_one.c:246)", type = 0x0300L, size = 6L, unknownA = 11L, unknownB = 3L),
-    UpstreamLiteral("usb_tonex_one.c:347", type = 0x030DL, size = 5L, unknownA = 11L, unknownB = 3L),
-)
+private fun encodeInboundFrame(
+    type: Long,
+    unknown: Long,
+    payload: ByteArray,
+    declaredSize: Long = payload.size.toLong(),
+): ByteArray {
+    val out = ArrayList<Byte>()
+    out.add(0xB9.toByte())
+    out.add(0x03.toByte())
+    out.addAll(TonexVarint.encodeInt(type).asIterable())
+    out.addAll(TonexVarint.encodeInt(declaredSize).asIterable())
+    out.addAll(TonexVarint.encodeInt(unknown).asIterable())
+    out.addAll(payload.asIterable())
+    return out.toByteArray()
+}
 
 /**
- * The raw header bytes (prefix + all four varints, no body) for all five reference literals,
+ * Real hardware capture, issue #25: the ToneX One's Hello-ack response, byte-identical across two
+ * independent connections (with HDLC framing/CRC already stripped by `FrameReassembler` — this
+ * codec's concern starts after that). This is the literal that exposed `decode()`'s field-count
+ * bug: it was reading 4 header fields (matching [MessageHeaderCodec.encode]'s outbound shape) when
+ * a real inbound frame only carries 3 — see [MessageHeaderCodec]'s class KDoc for the full
+ * evidence trail (this literal, upstream's `usb_tonex_one_parse`, and issue #9's history).
+ */
+private val REAL_HELLO_ACK_FIXTURE = hex(
+    "b9 03 02 2b 0b b9 07 00 80 c7 b9 03 02 01 00 " +
+        "b9 03 01 03 0f bc 14 6b 8d c2 72 d6 fa 9b 73 06 " +
+        "a3 3d d9 08 13 cd 0e fd 09 78 36 82 1b 45 0f 00 00",
+)
+
+// ---- outbound request literals (from usb_tonex_one.c) — confirm encode()'s 4-field shape -------
+
+private val HELLO_REQUEST_FIXTURE = hex("b9 03 00 82 04 00 80 0b 01 b9 02 02 0b")
+private val REQUEST_STATE_REQUEST_FIXTURE = hex("b9 03 00 82 06 00 80 0b 03 b9 02 81 06 03 0b")
+
+/**
+ * The raw header bytes (prefix + all four varints, no body) for five outbound reference literals,
  * extracted directly from upstream `usb_tonex_one.c` — this is what pins down each field's own
  * encoding convention (see [MessageHeaderCodec.encode] KDoc), most importantly that `type` uses
  * `0x81` for its 2-byte form and never `0x82`, which nothing else in this test file would catch a
@@ -74,58 +90,98 @@ private val REFERENCE_HEADER_BYTES = listOf(
 
 class MessageHeaderCodecTest {
 
-    // ---- byte-exact ground-truth fixtures -----------------------------------------------------
+    // ---- decode(): the real inbound 3-field shape -----------------------------------------------
 
     @Test
-    fun `decodes the Hello fixture`() {
-        val decoded = assertSuccess(MessageHeaderCodec.decode(HELLO_FIXTURE))
-        // type=0 here is the outer envelope's "type" varint as literally positioned on the wire
-        // (first of the four header varints) - it does not match any wire ID in the known
-        // MessageType table below, which upstream describes as *response* IDs. This fixture is
-        // plausibly an outgoing request, so an unrecognised/Unknown type here is expected, not a
-        // bug - see MessageHeaderCodec KDoc.
-        assertEquals(MessageType.Unknown(0), decoded.header.type)
-        assertEquals(4L, decoded.header.declaredSize)
+    fun `decodes the real hardware Hello-ack fixture (issue 25) with the 3-field inbound header`() {
+        val decoded = assertSuccess(MessageHeaderCodec.decode(REAL_HELLO_ACK_FIXTURE))
+        assertEquals(MessageType.Hello, decoded.header.type)
+        assertEquals(43L, decoded.header.declaredSize)
         assertEquals(11L, decoded.header.unknownA)
-        assertEquals(1L, decoded.header.unknownB)
-        // size is now an exact body length, not a lower bound: the header consumes 9 of the 13
-        // fixture bytes (B9 03 00 [82 04 00] [80 0B] 01), leaving exactly 4 payload bytes.
-        assertEquals(4, decoded.payload.size)
+        assertNull(decoded.header.unknownB, "a decoded inbound header never has a 4th field")
+        // 5-byte header (B9 03 <type=02> <size=2B> <unknown=0B>), so 48 - 5 = 43 payload bytes.
+        assertEquals(43, decoded.payload.size)
     }
 
     @Test
-    fun `re-encoding the decoded Hello fixture reproduces the original bytes exactly`() {
-        val decoded = assertSuccess(MessageHeaderCodec.decode(HELLO_FIXTURE))
-        val reEncoded = MessageHeaderCodec.encode(decoded.header, decoded.payload)
-        assertTrue(reEncoded.contentEquals(HELLO_FIXTURE), "expected ${HELLO_FIXTURE.hex()}, got ${reEncoded.hex()}")
+    fun `re-encoding a decoded inbound header fails loud, not silently -- unknownB is null`() {
+        val decoded = assertSuccess(MessageHeaderCodec.decode(REAL_HELLO_ACK_FIXTURE))
+        // encode() always produces the 4-field outbound shape and requires unknownB; feeding it a
+        // decoded (3-field, unknownB == null) header is a programmer error, not a valid use.
+        assertFailsWith<IllegalStateException> { MessageHeaderCodec.encode(decoded.header, decoded.payload) }
     }
 
     @Test
-    fun `decodes the Request State fixture`() {
-        val decoded = assertSuccess(MessageHeaderCodec.decode(REQUEST_STATE_FIXTURE))
-        assertEquals(MessageType.Unknown(0), decoded.header.type)
-        assertEquals(6L, decoded.header.declaredSize)
+    fun `each catalogued wire ID decodes to its known MessageType via a realistic inbound frame`() {
+        val cases = listOf(
+            0x02L to MessageType.Hello,
+            0x0303L to MessageType.FullPresetDetails,
+            0x0304L to MessageType.PresetDetailsSummary,
+            0x0306L to MessageType.StateUpdate,
+            0x0309L to MessageType.ParameterChanged,
+        )
+        for ((wireId, expected) in cases) {
+            val frame = encodeInboundFrame(type = wireId, unknown = 11L, payload = ByteArray(0))
+            val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
+            assertEquals(expected, decoded.header.type, "wire id 0x${wireId.toString(16)}")
+        }
+    }
+
+    @Test
+    fun `an uncatalogued wire ID decodes successfully as Unknown, not a failure`() {
+        val frame = encodeInboundFrame(type = 0x1234L, unknown = 11L, payload = ByteArray(0))
+        val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
+        assertEquals(MessageType.Unknown(0x1234), decoded.header.type)
+    }
+
+    @Test
+    fun `inbound header and payload round trip through encodeInboundFrame then decode`() {
+        val payload = byteArrayOf(0x01, 0x02, 0x03)
+        val frame = encodeInboundFrame(type = MessageType.StateUpdate.wireId, unknown = 11L, payload = payload)
+        val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
+        assertEquals(MessageType.StateUpdate, decoded.header.type)
         assertEquals(11L, decoded.header.unknownA)
-        assertEquals(3L, decoded.header.unknownB)
-        assertEquals(6, decoded.payload.size)
+        assertNull(decoded.header.unknownB)
+        assertTrue(payload.contentEquals(decoded.payload))
     }
 
     @Test
-    fun `re-encoding the decoded Request State fixture reproduces the original bytes exactly`() {
-        val decoded = assertSuccess(MessageHeaderCodec.decode(REQUEST_STATE_FIXTURE))
-        val reEncoded = MessageHeaderCodec.encode(decoded.header, decoded.payload)
+    fun `the inbound unknown field beyond one byte round trips via the 2-byte fallback form`() {
+        val payload = byteArrayOf(0x00)
+        val frame = encodeInboundFrame(type = MessageType.Hello.wireId, unknown = 300L, payload = payload)
+        val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
+        assertEquals(300L, decoded.header.unknownA)
+    }
+
+    // ---- encode(): the real outbound 4-field shape, byte-exact against upstream literals ---------
+
+    @Test
+    fun `encode reproduces the Hello request literal byte-exact`() {
+        val header = MessageHeader(type = MessageType.fromWireId(0), declaredSize = 4, unknownA = 11, unknownB = 1)
+        val payload = byteArrayOf(0xB9.toByte(), 0x02, 0x02, 0x0B)
+        val encoded = MessageHeaderCodec.encode(header, payload)
         assertTrue(
-            reEncoded.contentEquals(REQUEST_STATE_FIXTURE),
-            "expected ${REQUEST_STATE_FIXTURE.hex()}, got ${reEncoded.hex()}",
+            encoded.contentEquals(HELLO_REQUEST_FIXTURE),
+            "expected ${HELLO_REQUEST_FIXTURE.hex()}, got ${encoded.hex()}",
+        )
+    }
+
+    @Test
+    fun `encode reproduces the Request State literal byte-exact`() {
+        val header = MessageHeader(type = MessageType.fromWireId(0), declaredSize = 6, unknownA = 11, unknownB = 3)
+        val payload = hex("b9 02 81 06 03 0b")
+        val encoded = MessageHeaderCodec.encode(header, payload)
+        assertTrue(
+            encoded.contentEquals(REQUEST_STATE_REQUEST_FIXTURE),
+            "expected ${REQUEST_STATE_REQUEST_FIXTURE.hex()}, got ${encoded.hex()}",
         )
     }
 
     @Test
     fun `encodes each reference literal's header byte-exact, including per-field marker choice`() {
-        // This is what closes the gap flagged in the previous pass: type's marker choice (0x81,
-        // never 0x82, for wide values) is only pinned down by comparing against real upstream
-        // bytes - a round trip through this codec's own decode() cannot catch a regression here,
-        // since decode() accepts 0x81 and 0x82 interchangeably by design.
+        // Pins down type's marker choice (0x81, never 0x82, for wide values), which is only
+        // visible by comparing against real upstream bytes - decode() cannot catch a regression
+        // here, since it accepts 0x81 and 0x82 interchangeably by design.
         for (reference in REFERENCE_HEADER_BYTES) {
             val header = MessageHeader(
                 type = MessageType.fromWireId(reference.type),
@@ -135,8 +191,8 @@ class MessageHeaderCodecTest {
             )
             val expectedHeaderBytes = hex(reference.headerBytesHex)
             // Body is irrelevant here - only the header bytes are asserted, so an empty payload
-            // is used even for the four literals that have a real body (encode() does not
-            // validate declaredSize against payload.size; that is decode()'s job).
+            // is used even for the literals that have a real body (encode() does not validate
+            // declaredSize against payload.size; that is decode()'s job).
             val actualHeaderBytes = MessageHeaderCodec.encode(header, ByteArray(0))
             assertTrue(
                 actualHeaderBytes.contentEquals(expectedHeaderBytes),
@@ -145,106 +201,13 @@ class MessageHeaderCodecTest {
         }
     }
 
-    // ---- all five upstream usb_tonex_one.c literals -------------------------------------------
-
     @Test
-    fun `every upstream usb_tonex_one_c message literal decodes to its exact field values with a size-exact body`() {
-        for (literal in UPSTREAM_LITERALS) {
-            val header = MessageHeader(
-                type = MessageType.fromWireId(literal.type),
-                declaredSize = literal.size,
-                unknownA = literal.unknownA,
-                unknownB = literal.unknownB,
-            )
-            // Body content is arbitrary (upstream's actual bytes aren't part of the header
-            // fixture) - what this test pins down is the header field values and that the body
-            // length exactly equals `size`, per the confirmed four-varint model.
-            val body = ByteArray(literal.size.toInt()) { (it + 1).toByte() }
-            val frame = MessageHeaderCodec.encode(header, body)
-            val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
-
-            assertEquals(header, decoded.header, literal.label)
-            assertEquals(literal.size.toInt(), decoded.payload.size, "${literal.label}: body length must equal size")
-            assertTrue(body.contentEquals(decoded.payload), literal.label)
-        }
+    fun `encode fails loud when header unknownB is null -- it always produces the 4-field outbound shape`() {
+        val header = MessageHeader(type = MessageType.Hello, declaredSize = 0, unknownA = 11, unknownB = null)
+        assertFailsWith<IllegalStateException> { MessageHeaderCodec.encode(header, ByteArray(0)) }
     }
 
-    @Test
-    fun `the header-only template literal (usb_tonex_one_c 272) fails size validation with no body appended`() {
-        // upstream builds this header (type=0x0309 ParameterChanged, size=10, unknownA=11,
-        // unknownB=3) and appends a 10-byte body to it at runtime - it is not a complete message
-        // on its own. Decoding it with zero bytes appended is *expected* to fail size validation;
-        // that failure is the same rule that catches genuine truncation, not a special case.
-        val header = MessageHeader(
-            type = MessageType.fromWireId(0x0309L),
-            declaredSize = 10L,
-            unknownA = 11L,
-            unknownB = 3L,
-        )
-        assertEquals(MessageType.ParameterChanged, header.type)
-
-        val frame = MessageHeaderCodec.encode(header, ByteArray(0))
-        val result = MessageHeaderCodec.decode(frame)
-        assertIs<TonexResult.Failure>(result)
-        val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
-        assertEquals(10, error.expectedSize)
-        assertEquals(0, error.actualSize)
-    }
-
-    // ---- known message types ------------------------------------------------------------------
-
-    @Test
-    fun `each catalogued wire ID decodes to its known MessageType`() {
-        val cases = listOf(
-            0x02L to MessageType.Hello,
-            0x0303L to MessageType.FullPresetDetails,
-            0x0304L to MessageType.PresetDetailsSummary,
-            0x0306L to MessageType.StateUpdate,
-            0x0309L to MessageType.ParameterChanged,
-        )
-        for ((wireId, expected) in cases) {
-            val header = MessageHeader(
-                type = MessageType.fromWireId(wireId),
-                declaredSize = 0,
-                unknownA = 0,
-                unknownB = 0,
-            )
-            val frame = MessageHeaderCodec.encode(header, ByteArray(0))
-            val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
-            assertEquals(expected, decoded.header.type, "wire id 0x${wireId.toString(16)}")
-        }
-    }
-
-    @Test
-    fun `an uncatalogued wire ID decodes successfully as Unknown, not a failure`() {
-        val header = MessageHeader(type = MessageType.Unknown(0x1234), declaredSize = 0, unknownA = 0, unknownB = 0)
-        val frame = MessageHeaderCodec.encode(header, ByteArray(0))
-        val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
-        assertEquals(MessageType.Unknown(0x1234), decoded.header.type)
-    }
-
-    // ---- round trip for synthetic headers --------------------------------------------------------
-
-    @Test
-    fun `header and payload round trip through encode then decode`() {
-        val header = MessageHeader(type = MessageType.StateUpdate, declaredSize = 3, unknownA = 11, unknownB = 3)
-        val payload = byteArrayOf(0x01, 0x02, 0x03)
-        val frame = MessageHeaderCodec.encode(header, payload)
-        val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
-        assertEquals(header, decoded.header)
-        assertTrue(payload.contentEquals(decoded.payload))
-    }
-
-    @Test
-    fun `unknownA beyond one byte round trips via the 2-byte fallback form`() {
-        val header = MessageHeader(type = MessageType.Hello, declaredSize = 1, unknownA = 300, unknownB = 1)
-        val payload = byteArrayOf(0x00)
-        val frame = MessageHeaderCodec.encode(header, payload)
-        val decoded = assertSuccess(MessageHeaderCodec.decode(frame))
-        assertEquals(300L, decoded.header.unknownA)
-    }
-
-    // ---- malformed header: 3 distinct rejection cases --------------------------------------------
+    // ---- malformed header: 3 distinct rejection cases ---------------------------------------------
 
     @Test
     fun `rejects a frame shorter than the minimum possible header`() {
@@ -271,35 +234,44 @@ class MessageHeaderCodecTest {
 
     @Test
     fun `rejects a declared size that does not match the actual remaining bytes`() {
-        val header = MessageHeader(type = MessageType.Unknown(0), declaredSize = 100, unknownA = 11, unknownB = 1)
-        val frame = MessageHeaderCodec.encode(header, byteArrayOf(0xAA.toByte(), 0xBB.toByte()))
+        val frame = encodeInboundFrame(
+            type = 0L,
+            unknown = 11L,
+            payload = byteArrayOf(0xAA.toByte(), 0xBB.toByte()),
+            declaredSize = 100L,
+        )
         val result = MessageHeaderCodec.decode(frame)
         assertIs<TonexResult.Failure>(result)
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(100, error.expectedSize)
         assertEquals(2, error.actualSize)
+        assertEquals("message header body (MessageHeaderCodec.decode)", error.context)
     }
 
     @Test
     fun `rejects a declared size smaller than the actual remaining bytes too, not just truncation`() {
         // Strict equality, not a lower bound: too many trailing bytes is rejected exactly like
-        // too few, since `size` is confirmed to be an exact body length (see UPSTREAM_LITERALS).
-        val header = MessageHeader(type = MessageType.Unknown(0), declaredSize = 2, unknownA = 11, unknownB = 1)
-        val frame = MessageHeaderCodec.encode(header, byteArrayOf(0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte()))
+        // too few, since `size` is confirmed to be an exact body length.
+        val frame = encodeInboundFrame(
+            type = 0L,
+            unknown = 11L,
+            payload = byteArrayOf(0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte()),
+            declaredSize = 2L,
+        )
         val result = MessageHeaderCodec.decode(frame)
         assertIs<TonexResult.Failure>(result)
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(2, error.expectedSize)
         assertEquals(3, error.actualSize)
+        assertEquals("message header body (MessageHeaderCodec.decode)", error.context)
     }
 
     @Test
     fun `all three malformed cases are surfaced as distinct TonexError values`() {
         val tooShort = MessageHeaderCodec.decode(byteArrayOf(0xB9.toByte(), 0x03, 0x00, 0x00))
         val wrongPrefix = MessageHeaderCodec.decode(hex("b9 04 00 00 00 00 00 00"))
-        val mismatchHeader = MessageHeader(type = MessageType.Unknown(0), declaredSize = 100, unknownA = 11, unknownB = 1)
         val sizeMismatch = MessageHeaderCodec.decode(
-            MessageHeaderCodec.encode(mismatchHeader, byteArrayOf(0xAA.toByte())),
+            encodeInboundFrame(type = 0L, unknown = 11L, payload = byteArrayOf(0xAA.toByte()), declaredSize = 100L),
         )
         val errors = listOf(
             (tooShort as TonexResult.Failure).error,

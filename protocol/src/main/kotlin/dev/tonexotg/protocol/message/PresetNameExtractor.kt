@@ -83,6 +83,7 @@ object PresetNameExtractor {
         if (nameEnd > payload.size) {
             return TonexResult.Failure(
                 TonexError.UnexpectedBlobShape(
+                    context = "preset name field (PresetNameExtractor.extract)",
                     expectedSize = NAME_FIELD_LENGTH,
                     actualSize = (payload.size - nameStart).coerceAtLeast(0),
                 ),

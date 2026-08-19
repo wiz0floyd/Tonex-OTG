@@ -59,6 +59,15 @@ import dev.tonexotg.protocol.SessionId
  * [StateBlobPatcher] are this module's only defence against that, and they are a floor, not a
  * guarantee — see the offset-drift caveat above.
  *
+ * ### Confirmed against a real captured blob (issue #25, S20)
+ * All four offsets checked by hand against a real `GetState` response (160-byte `StateData`,
+ * `type=0x0306`) captured from an actual pedal, independently of this codebase's own
+ * `StateBlobReader` — CRC verified, header decoded from raw bytes with a throwaway script, then
+ * indexed at these exact offsets: `END_SLOT_A_PRESET`→`0`, `END_SLOT_B_PRESET`→`10`,
+ * `END_SLOT_C_PRESET`→`3`, `END_CURRENT_SLOT`→`1` (slot B). Slot B's preset (`10`) matches the
+ * harness's independently-reported active preset for that same session exactly. This is the one
+ * firmware/session this has been confirmed against, not a standing guarantee for every unit.
+ *
  * ### Fields intentionally NOT modelled here
  * Upstream's `set_preset_in_slot()` also touches `TONEX_STATE_OFFSET_START_STOMP_MODE` (line 106)
  * and `TONEX_STATE_OFFSET_END_DIRECT_MONITOR` (line 113) as unconditional side effects of

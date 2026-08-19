@@ -121,6 +121,7 @@ class PresetParameterExtractorTest {
         assertIs<TonexResult.Failure>(result)
         val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
         assertEquals(545, error.expectedSize)
+        assertEquals("preset parameter block (PresetParameterExtractor.extract)", error.context)
     }
 
     // ---- corrupt marker byte at a parameter position - the upstream bug we do NOT reproduce ------

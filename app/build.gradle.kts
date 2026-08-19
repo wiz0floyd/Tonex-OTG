@@ -80,6 +80,13 @@ dependencies {
     // been signed off yet, so no UI beyond a single empty Activity belongs here.
     implementation(project(":protocol"))
 
+    // `:protocol` declares kotlinx-coroutines-core as `implementation`, not `api` (deliberately —
+    // see its own build.gradle.kts), so it is not exposed transitively to `:app`'s compile
+    // classpath. `dev.tonexotg.app.probe` (S20 / issue #25) uses coroutines APIs directly
+    // (CoroutineScope, Channel, suspendCancellableCoroutine, ...), so this is declared explicitly
+    // rather than relied on incidentally via some other transitive dependency.
+    implementation(libs.kotlinx.coroutines.core)
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)

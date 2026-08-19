@@ -51,19 +51,27 @@ import dev.tonexotg.protocol.ParameterType
  *   `"MOD RO S"` (for SYNC and SPEED). Use `name` only for display; use
  *   `enumName` for identification.
  *
- * ## Known upstream inconsistencies — flagged for hardware verification (S20)
+ * ## Two apparent upstream inconsistencies — resolved by reading upstream, not hardware (S20/#25)
  *
- * Two discrepancies in the upstream table are marked with TODO comments and
- * should be verified against real hardware before finalising:
+ * Both were originally flagged as needing real-hardware verification. Neither actually did —
+ * both resolve from `Builty/TonexOneController` source alone:
  *
- * 1. **VIR M2X (index 31)**: max recorded as 2, while its counterpart VIR M1X
- *    (index 28) has max 10. Likely a typo, but unconfirmed.
+ * 1. **CABINET_TYPE (index 24)**: `tonex_params.h:92`'s comment on the *parameter-ID* enum entry
+ *    ("0 = disabled. 1 = VIR. 2 = Tone Model") does contradict the *value* enum,
+ *    `TonexCabinetTypes` (`tonex_params.h:51-55`: `TONEX_CABINET_TONE_MODEL, TONEX_CABINET_VIR,
+ *    TONEX_CABINET_DISABLED` — 0/1/2 by plain sequencing) — a real discrepancy, not imagined. But
+ *    `display_tonex.c:230-241`'s UI toggle logic (tested against physical hardware) uses that
+ *    enum's named constants directly, so whatever the enum says is what actually executes; the
+ *    stray comment is simply wrong. **0=Tone Model, 1=VIR, 2=Disabled is correct** — the ordering
+ *    already encoded below.
  *
- * 2. **CABINET_TYPE (index 24)**: Header comments conflict on ordering. The enum
- *    `TonexCabinetTypes` and table comment state: 0=Tone Model, 1=VIR,
- *    2=Disabled. A contradicting header comment says: 0=disabled, 1=VIR,
- *    2=Tone Model. The enum definition is encoded here, but the discrepancy
- *    warrants confirmation.
+ * 2. **VIR M2X (index 31)**: max recorded as 2, while its counterpart VIR M1X (index 28) has max
+ *    10. `tonex_params.c:86` writes `{0, 0, 2, ...}` explicitly and deliberately — not omitted,
+ *    not auto-derived from M1X — and nothing else in that repository suggests it should be 10.
+ *    vit3k/tonex_controller (the project's other upstream source) has no per-parameter table to
+ *    cross-check against at all. The "likely a typo" theory had no upstream corroboration; treat
+ *    the asymmetry with M1X as legitimate (a real difference in mic 2's usable X-axis range) and
+ *    the value below as correct.
  */
 object ParameterRegistry {
 
@@ -99,8 +107,9 @@ object ParameterRegistry {
         ParameterSpec(ParameterId(21), ParameterScope.PRESET, "MDL VOL", "MODEL_VOLUME", ParameterType.RANGE, 0f, 10f, 5f, ""),
         ParameterSpec(ParameterId(22), ParameterScope.PRESET, "MDL MIX", "MODEX_MIX", ParameterType.RANGE, 0f, 100f, 100f, "%"),
         ParameterSpec(ParameterId(23), ParameterScope.PRESET, "MDL CABU", "CABINET_UNKNOWN", ParameterType.SWITCH, 0f, 1f, 1f, ""),
-        // TODO: CABINET_TYPE ordering uncertain — header comments conflict. Enum and table comment agree on:
-        // 0=Tone Model, 1=VIR, 2=Disabled. Verify against real hardware (S20).
+        // Ordering: 0=Tone Model, 1=VIR, 2=Disabled — resolved against upstream source, not
+        // hardware; see this file's class KDoc for the conflicting-comment evidence and why the
+        // enum + its real usage wins over the stray comment.
         ParameterSpec(ParameterId(24), ParameterScope.PRESET, "MDL CAB", "CABINET_TYPE", ParameterType.SELECT, 0f, 2f, 0f, ""),
 
         // Virtual IR Cabinet (25–33)
@@ -110,8 +119,8 @@ object ParameterRegistry {
         ParameterSpec(ParameterId(28), ParameterScope.PRESET, "VIR M1X", "VIR_MIC_1_X", ParameterType.RANGE, 0f, 10f, 0f, ""),
         ParameterSpec(ParameterId(29), ParameterScope.PRESET, "VIR M1Z", "VIR_MIC_1_Z", ParameterType.RANGE, 0f, 10f, 0f, ""),
         ParameterSpec(ParameterId(30), ParameterScope.PRESET, "VIR M2", "VIR_MIC_2", ParameterType.SELECT, 0f, 2f, 0f, ""),
-        // TODO: VIR M2X max recorded as 2, but counterpart VIR M1X has max 10. Likely a typo, unconfirmed.
-        // Verify against real hardware (S20).
+        // max=2 (vs. VIR_MIC_1_X's 10) is written explicitly and deliberately in upstream's own
+        // table, not omitted or derived — treat the asymmetry as real; see this file's class KDoc.
         ParameterSpec(ParameterId(31), ParameterScope.PRESET, "VIR M2X", "VIR_MIC_2_X", ParameterType.RANGE, 0f, 2f, 0f, ""),
         ParameterSpec(ParameterId(32), ParameterScope.PRESET, "VIR M2Z", "VIR_MIC_2_Z", ParameterType.RANGE, 0f, 10f, 0f, ""),
         ParameterSpec(ParameterId(33), ParameterScope.PRESET, "VIR BLEND", "VIR_BLEND", ParameterType.RANGE, -100f, 100f, 0f, ""),

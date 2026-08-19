@@ -201,26 +201,26 @@ class ParameterRegistryTest {
     }
 
     @Test
-    fun `spot check cabinet type parameter (SELECT with known inconsistency)`() {
+    fun `spot check cabinet type parameter (SELECT, ordering resolved against upstream source)`() {
         val param = ParameterRegistry.byIndex(24)
         assertNotNull(param)
         assertEquals("MDL CAB", param.name)
         assertEquals("CABINET_TYPE", param.enumName)
         assertEquals(ParameterType.SELECT, param.type)
         assertEquals(0f, param.min)
-        assertEquals(2f, param.max) // 0=Tone Model, 1=VIR, 2=Disabled
+        assertEquals(2f, param.max) // 0=Tone Model, 1=VIR, 2=Disabled — see ParameterRegistry's class KDoc
         assertEquals(0f, param.default)
     }
 
     @Test
-    fun `spot check VIR M2X parameter (known inconsistency - max is 2 not 10)`() {
+    fun `spot check VIR M2X parameter (max is genuinely 2, not a typo for M1X's 10)`() {
         val param = ParameterRegistry.byIndex(31)
         assertNotNull(param)
         assertEquals("VIR M2X", param.name)
         assertEquals("VIR_MIC_2_X", param.enumName)
         assertEquals(ParameterType.RANGE, param.type)
         assertEquals(0f, param.min)
-        assertEquals(2f, param.max) // TODO: should verify against hardware if this is a typo
+        assertEquals(2f, param.max) // written explicitly in upstream's own table — see ParameterRegistry's class KDoc
         assertEquals(0f, param.default)
     }
 

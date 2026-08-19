@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backs the FileProvider used solely by dev.tonexotg.app.probe.ProbeActivity to hand a saved
+  probe-log file to another app via ACTION_SEND (issue #25's "dump to a file instead of
+  clipboard" fix — a full read/write test's log overflows the clipboard's transaction size
+  limit). external-files-path matches Context.getExternalFilesDir(null), where the log is
+  actually written.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path name="probe_logs" path="probe-logs/" />
+</paths>

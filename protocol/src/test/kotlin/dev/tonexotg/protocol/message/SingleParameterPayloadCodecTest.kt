@@ -232,7 +232,8 @@ class SingleParameterPayloadCodecTest {
     fun `decode fails typed when the marker is found but too few trailing bytes remain`() {
         val result = SingleParameterPayloadCodec.decode(hex("b9 04 02 00"))
         assertIs<TonexResult.Failure>(result)
-        assertIs<TonexError.UnexpectedBlobShape>(result.error)
+        val error = assertIs<TonexError.UnexpectedBlobShape>(result.error)
+        assertEquals("single-parameter payload float marker (SingleParameterPayloadCodec)", error.context)
     }
 
     @Test

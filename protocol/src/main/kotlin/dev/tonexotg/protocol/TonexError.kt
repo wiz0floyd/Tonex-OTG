@@ -137,28 +137,36 @@ sealed class TonexError {
     }
 
     /**
-     * A pedal state blob had an unexpected size or shape for the offsets a write path is about
-     * to patch.
+     * A pedal state blob, or any other length-prefixed structure this module decodes, had an
+     * unexpected size or shape for what the caller was about to do with it.
      *
-     * Surfacing this as a typed error — instead of patching blindly at fixed offsets from the
-     * end of the array — is the direct fix for the bug this project must not repeat (see
-     * [PedalState]): the patch offsets are firmware-version dependent, and a length mismatch
-     * means the offsets are not trustworthy for this blob.
+     * Surfacing this as a typed error — instead of patching or indexing blindly at fixed offsets
+     * — is the direct fix for the bug this project must not repeat (see [PedalState]): offsets
+     * are firmware-version dependent, and a length mismatch means they are not trustworthy.
      *
-     * Used by [dev.tonexotg.protocol.codec.MessageHeaderCodec] for a frame whose declared body
-     * length does not match the bytes actually present. [StateBlobPatcher] does **not** use this
-     * case — it has its own, more specific error types ([BlobTooShortToPatch],
+     * This case is shared across several structurally-similar-but-unrelated size checks —
+     * [dev.tonexotg.protocol.codec.MessageHeaderCodec] (a frame's declared body length vs. bytes
+     * actually present), [dev.tonexotg.protocol.message.PresetNameExtractor], [dev.tonexotg.protocol.message.PresetParameterExtractor],
+     * and [dev.tonexotg.protocol.message.SingleParameterPayloadCodec] — and a message reading
+     * only "expected N, got M" gives no way to tell which of those actually failed (issue #25,
+     * first real-hardware run: this ambiguity cost real debugging time telling a generic framing
+     * mismatch apart from an actual state-blob-shape problem). [context] exists to close that
+     * gap; every call site names the specific thing it was decoding. [StateBlobPatcher] does
+     * **not** use this case — it has its own, more specific error types ([BlobTooShortToPatch],
      * [BlobSizeChangedSinceHandshake], [ImplausibleStateBlobShape]) precisely because collapsing
      * "too short", "shape looks wrong", and "size changed since handshake" into one case with a
      * nullable [expectedSize] made it impossible for a caller — or a user reading [message] mid-
      * gig — to tell which of three very different problems actually happened (issue #12 review).
      *
+     * @property context short, stable identifier for what was being decoded (e.g. `"message
+     *   header body"`, `"preset name field"`), so [message] alone is enough to find the call
+     *   site without a stack trace — these are data, not thrown exceptions (see class KDoc).
      * @property expectedSize the size the caller expected, if it had a specific expectation.
      * @property actualSize the size the blob actually had.
      */
-    data class UnexpectedBlobShape(val expectedSize: Int?, val actualSize: Int) : TonexError() {
+    data class UnexpectedBlobShape(val context: String, val expectedSize: Int?, val actualSize: Int) : TonexError() {
         override val message: String
-            get() = "Unexpected state blob size: expected $expectedSize, got $actualSize"
+            get() = "Unexpected size decoding $context: expected $expectedSize, got $actualSize"
     }
 
     /**
