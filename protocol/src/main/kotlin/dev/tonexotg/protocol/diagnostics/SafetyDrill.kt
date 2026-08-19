@@ -1,6 +1,7 @@
 package dev.tonexotg.protocol.diagnostics
 
 import dev.tonexotg.protocol.PresetIndex
+import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
 import dev.tonexotg.protocol.TonexTransport
@@ -168,7 +169,7 @@ data class PresetChangeDrillResult(
  *   that is the drill *working*, not the drill failing to run.
  */
 suspend fun runPresetChangeByteDiffDrill(
-    controller: dev.tonexotg.protocol.TonexController,
+    controller: TonexController,
     transport: TonexTransport,
     tap: MessageCaptureTap,
     targetPreset: PresetIndex,
@@ -238,7 +239,7 @@ private const val PARAMETER_TOLERANCE = 1e-3f
  *   audit result" distinction.
  */
 suspend fun runRevertDrill(
-    controller: dev.tonexotg.protocol.TonexController,
+    controller: TonexController,
     transport: TonexTransport,
     tap: MessageCaptureTap,
     timeoutMillis: Long,
