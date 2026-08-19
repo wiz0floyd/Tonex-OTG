@@ -1230,4 +1230,44 @@ class StateBlobPatcherTest {
             StateBlobPatcher.restoreSlotAssignments(state, session, mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to PresetIndex(2)))
         }
     }
+
+    /**
+     * `restoreSlotAssignments`'s per-value out-of-range re-check IS reachable, unlike an earlier
+     * version of this file's reasoning claimed — verified against the compiled bytecode rather than
+     * assumed (Opus review, issue #36 round 1, SHOULD-FIX #3). `javap` on [PresetIndex] shows
+     * `box-impl(int)` invoking the `private` constructor directly, never `constructor-impl(int)` —
+     * the synthetic static method that actually runs `init { require(...) }` — so a caller who
+     * invokes the compiled `box-impl` method via reflection gets a genuinely boxed `PresetIndex`
+     * whose out-of-range `.value` never passed that check, fit to store directly as a `Map` value.
+     * Same class of bypass the two `patchSlotAssignment`/`selectPreset` reflection tests above
+     * already exercise for their own bare `PresetIndex` parameter — this is the `Map`-value-position
+     * equivalent.
+     */
+    private fun boxedPresetIndexOf(value: Int): PresetIndex {
+        val boxImpl = PresetIndex::class.java.getDeclaredMethod("box-impl", Int::class.javaPrimitiveType)
+        boxImpl.isAccessible = true
+        return boxImpl.invoke(null, value) as PresetIndex
+    }
+
+    @Test
+    fun `restoreSlotAssignments rejects an out-of-range boxed PresetIndex smuggled past its own guard, before consuming the read generation`() {
+        val session = SessionId.create()
+        val state = stateFor(session, plausibleBlob())
+        val forged = boxedPresetIndexOf(255)
+
+        val result = StateBlobPatcher.restoreSlotAssignments(
+            state,
+            session,
+            mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to forged, PresetSlot.C to PresetIndex(3)),
+        )
+
+        val error = result.assertFailure()
+        assertTrue(error is TonexError.InvalidPresetIndex, "expected InvalidPresetIndex, got $error")
+        assertEquals(255, (error as TonexError.InvalidPresetIndex).value)
+
+        // The read generation must NOT have been consumed - a genuine subsequent write against the
+        // same state must still succeed, proving the invalid-value rejection happened before
+        // prepareForPatch's generation-consuming step.
+        StateBlobPatcher.patchActiveSlot(state, session, PresetSlot.B).assertSuccess()
+    }
 }

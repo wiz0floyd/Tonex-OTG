@@ -412,19 +412,31 @@ sealed class TonexError {
 
     /**
      * [TonexController.restoreFootswitches] was called but the three footswitch slot assignments
-     * (A/B/C) were never successfully captured this session.
+     * (A/B/C) were never successfully captured this session, or the capture on hand no longer
+     * belongs to the live session.
      *
      * Per issue #36's own acceptance criteria, this must be a loud, typed refusal rather than a
      * silent no-op: a caller offering a "restore my footswitches" affordance needs to be able to
      * tell the difference between "nothing to restore because nothing changed" (not this case)
-     * and "there is nothing captured to restore *to*" (this case) — e.g. because the handshake's
-     * state blob failed to decode as a plausible slot region ([ImplausibleStateBlobShape] /
-     * [BlobTooShortToPatch] internally), or because [TonexController.restoreFootswitches] was
-     * called before a connection ever reached [ConnectionState.Ready].
+     * and "there is nothing captured to restore *to*" (this case).
      *
-     * A permanent member of the error taxonomy, not a placeholder: a session whose handshake blob
-     * failed to decode legitimately has no footswitch snapshot, and restore must still refuse
-     * loudly rather than guessing at what A/B/C used to be.
+     * ## Honest scope of when this is actually reachable
+     * [TonexController.restoreFootswitches] being called before a connection ever reached
+     * [ConnectionState.Ready] does **not** reach this case — that returns
+     * [ProtocolStateViolation] instead (guard 1 runs first). And the handshake blob failing to
+     * decode as a plausible slot region cannot happen for a *Ready* session either: reaching Ready
+     * at all requires [dev.tonexotg.protocol.state.StateBlobReader.activePreset] to have already
+     * decoded that exact blob successfully (`connect()`'s `initialActive` step), which runs the
+     * identical `looksLikeSlotRegion` structural check over the same three slot-assignment bytes
+     * plus the active-slot byte that footswitch-snapshot capture reads — so a `Ready` session's
+     * handshake blob is, by construction, always decodable for both purposes. The genuinely
+     * reachable case is narrower: a race between [DefaultTonexController.teardown] (which clears
+     * the captured snapshot without holding `operationMutex` when torn down via
+     * `onTransportEnded`, not [TonexController.disconnect]'s own locked path — see `teardown`'s own
+     * KDoc) and an in-flight `restoreFootswitches` call that already passed the `Ready` check.
+     * [DefaultTonexController.restoreFootswitches] compares the captured snapshot's `SessionId` by
+     * identity, not mere presence, so a torn-down/foreign-session snapshot is refused here rather
+     * than replayed. A permanent member of the error taxonomy for that reason, not a placeholder.
      */
     data object NoFootswitchSnapshotAvailable : TonexError() {
         override val message: String

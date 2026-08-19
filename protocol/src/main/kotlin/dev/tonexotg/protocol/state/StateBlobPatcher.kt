@@ -172,13 +172,17 @@ object StateBlobPatcher {
      *   is an internal-invariant violation caught by `require` (not a runtime
      *   [TonexResult.Failure]), because [FootswitchSnapshot]'s own constructor already guarantees
      *   completeness structurally; a caller reaching this function at all can only have gotten a
-     *   complete map. Unlike [patchSlotAssignment]/[selectPreset]'s bare `preset: PresetIndex`
-     *   parameter, there is deliberately no separate out-of-range re-check on the map's values
-     *   here: [PresetIndex]'s `@JvmInline` erasure gap (see its KDoc) only opens at a JVM method
-     *   boundary where the value class itself is the raw parameter type; boxed inside a `Map`
-     *   value position, a `PresetIndex` cannot exist with an out-of-range `.value` without its own
-     *   constructor's `init { require(...) }` having already run, so there is no equivalent gap
-     *   for this entry point to re-check.
+     *   complete map. Each value IS separately re-checked against [PresetIndex.VALID_RANGE] below,
+     *   the same defense-in-depth [patchSlotAssignment]/[selectPreset] apply to their own bare
+     *   `preset: PresetIndex` parameter — a boxed `PresetIndex` stored inside a `Map` value
+     *   position is **not** immune to the `@JvmInline` erasure gap [PresetIndex]'s KDoc describes:
+     *   `javap` on the compiled class shows `box-impl(int)` calling the `private` constructor
+     *   directly, never `constructor-impl(int)` — the synthetic static method that actually runs
+     *   `init { require(...) }` — so a caller who invokes the compiled `box-impl` method via
+     *   reflection (the same class of bypass the existing `patchSlotAssignment`/`selectPreset`
+     *   reflection tests already exercise) can hand this function a `Map` whose boxed values never
+     *   passed that check. An earlier version of this KDoc claimed boxing made this unreachable;
+     *   that was not verified against the actual bytecode and was wrong — corrected after review.
      * @param state a blob read from the pedal during [currentSession] — and, per [PedalState]'s
      *   freshness contract, the *most recent* such read this session has produced. See
      *   [patchSlotAssignment]'s KDoc for the identical freshness/single-use contract.
@@ -195,6 +199,16 @@ object StateBlobPatcher {
     ): TonexResult<ByteArray> {
         require(assignments.keys == PresetSlot.entries.toSet()) {
             "restoreSlotAssignments requires an assignment for every slot (${PresetSlot.entries}), got ${assignments.keys}"
+        }
+
+        // Defense-in-depth against @JvmInline erasure (see the KDoc above and PresetIndex's own),
+        // for all three values — checked here, BEFORE prepareForPatch's generation-consuming step,
+        // so an invalid value is rejected without spending the session's read generation on a patch
+        // that was never going to succeed.
+        for (preset in assignments.values) {
+            if (preset.value !in PresetIndex.VALID_RANGE) {
+                return TonexResult.Failure(TonexError.InvalidPresetIndex(preset.value))
+            }
         }
 
         val prepared = prepareForPatch(state, currentSession, preset = null)
