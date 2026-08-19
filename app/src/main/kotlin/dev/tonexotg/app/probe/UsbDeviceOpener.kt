@@ -22,8 +22,18 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  *
  * Finds, requests permission for, opens, and configures the ToneX One's USB connection, using
  * the device facts already verified and recorded on issue #16 (S11) rather than rediscovering
- * them: VID `0x1963`, PID `0x00D1`, CDC-ACM, interface index `0`, and "asserting DTR is what
- * matters, baud rate is cosmetic."
+ * them: VID `0x1963`, PID `0x00D1`, CDC-ACM, and "asserting DTR is what matters, baud rate is
+ * cosmetic."
+ *
+ * ### Correction to issue #16's "interface index 0" (found on real hardware, issue #25)
+ * Issue #16 recorded the pedal's CDC-ACM function as living on interface index `0`. On the real
+ * pedal that index is the CDC **Communications** interface (the control/notification interface a
+ * standard CDC-ACM function exposes), which carries at most one interrupt IN endpoint — not the
+ * bulk IN/OUT pair. The bulk pair lives on the CDC **Data** interface, a different interface
+ * index. Rather than hardcode a corrected-but-still-guessed index, [requestPermissionAndOpen]
+ * searches every interface the device reports and claims whichever one actually exposes both a
+ * bulk IN and a bulk OUT endpoint — the property this harness (and the real transport) actually
+ * needs, regardless of which interface index the OS happens to enumerate it under.
  */
 object UsbDeviceOpener {
 
@@ -32,9 +42,6 @@ object UsbDeviceOpener {
 
     /** ToneX One product ID, verified on issue #16. */
     const val PRODUCT_ID: Int = 0x00D1
-
-    /** Interface index the pedal's CDC-ACM function lives on, per issue #16. */
-    const val INTERFACE_INDEX: Int = 0
 
     private const val ACTION_USB_PERMISSION = "dev.tonexotg.app.probe.USB_PERMISSION"
 
@@ -66,9 +73,11 @@ object UsbDeviceOpener {
 
     /**
      * Requests USB permission for [device] (suspending until the user answers the system
-     * dialog, or a caller-supplied [timeoutMillis] elapses), then opens the connection, claims
-     * interface [INTERFACE_INDEX], sends the CDC line-coding/control-line dance to assert DTR,
-     * and returns the raw config descriptors alongside the opened connection and endpoints.
+     * dialog, or a caller-supplied [timeoutMillis] elapses), then opens the connection, finds
+     * and claims whichever interface exposes both a bulk IN and bulk OUT endpoint (see the class
+     * KDoc's correction note — this is not assumed to be interface index 0), sends the CDC
+     * line-coding/control-line dance to assert DTR, and returns the raw config descriptors
+     * alongside the opened connection and endpoints.
      *
      * Every step here is read-only / connection-setup — nothing in this function writes a
      * single byte to the pedal's own protocol; see issue #25's "do all reads first" safety
@@ -84,11 +93,13 @@ object UsbDeviceOpener {
             }
         }
 
-        val usbInterface = (0 until device.interfaceCount)
-            .map { device.getInterface(it) }
-            .firstOrNull { it.id == INTERFACE_INDEX }
+        val interfaces = (0 until device.interfaceCount).map { device.getInterface(it) }
+        val (usbInterface, inEndpoint, outEndpoint) = interfaces
+            .firstNotNullOfOrNull { candidate -> candidate.bulkInOutEndpoints()?.let { (i, o) -> Triple(candidate, i, o) } }
             ?: return OpenResult.Failure(
-                "No interface with id=$INTERFACE_INDEX found (device reports ${device.interfaceCount} interface(s))",
+                "None of the device's ${device.interfaceCount} interface(s) expose both a bulk IN " +
+                    "and bulk OUT endpoint (per-interface endpoint counts: " +
+                    interfaces.joinToString { "id=${it.id}:${it.endpointCount}" } + ")",
             )
 
         val connection = manager.openDevice(device)
@@ -98,23 +109,7 @@ object UsbDeviceOpener {
 
         if (!connection.claimInterface(usbInterface, true)) {
             connection.close()
-            return OpenResult.Failure("claimInterface(interface $INTERFACE_INDEX, force=true) returned false")
-        }
-
-        val inEndpoint = (0 until usbInterface.endpointCount)
-            .map { usbInterface.getEndpoint(it) }
-            .firstOrNull { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN }
-        val outEndpoint = (0 until usbInterface.endpointCount)
-            .map { usbInterface.getEndpoint(it) }
-            .firstOrNull { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT }
-
-        if (inEndpoint == null || outEndpoint == null) {
-            connection.releaseInterface(usbInterface)
-            connection.close()
-            return OpenResult.Failure(
-                "Interface $INTERFACE_INDEX did not expose both a bulk IN and bulk OUT endpoint " +
-                    "(found ${usbInterface.endpointCount} endpoint(s) total)",
-            )
+            return OpenResult.Failure("claimInterface(interface ${usbInterface.id}, force=true) returned false")
         }
 
         // Line coding is cosmetic per issue #16 ("both work"), but every known-working upstream
@@ -216,4 +211,21 @@ object UsbDeviceOpener {
         bytes.toList().chunked(16).joinToString("\n") { row ->
             row.joinToString(" ") { "%02X".format(it) }
         }
+
+    /**
+     * This interface's bulk IN and bulk OUT endpoint, or `null` if it doesn't have both. A CDC-ACM
+     * function normally splits across two interfaces — a Communications interface (at most one
+     * interrupt IN endpoint) and a Data interface (the bulk pair) — so this is the actual
+     * selection criterion, not "interface index 0"; see the class KDoc's correction note.
+     */
+    private fun UsbInterface.bulkInOutEndpoints(): Pair<UsbEndpoint, UsbEndpoint>? {
+        val endpoints = (0 until endpointCount).map { getEndpoint(it) }
+        val inEndpoint = endpoints.firstOrNull {
+            it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN
+        }
+        val outEndpoint = endpoints.firstOrNull {
+            it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT
+        }
+        return if (inEndpoint != null && outEndpoint != null) inEndpoint to outEndpoint else null
+    }
 }
