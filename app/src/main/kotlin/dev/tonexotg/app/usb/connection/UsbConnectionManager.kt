@@ -228,7 +228,15 @@ class UsbConnectionManager internal constructor(
         }
     }
 
-    /** Manual disconnect (e.g. a user-facing "disconnect" action). Safe to call regardless of current [state]. */
+    /**
+     * Manual disconnect (e.g. a user-facing "disconnect" action). Safe to call regardless of
+     * current [state]. Like [onDeviceAttached]/[onDeviceDetached], this queues behind [mutex] --
+     * if a connect attempt's permission wait is in flight (see "Serialization" above), this call
+     * does nothing observable until that attempt resolves, up to its own ~30s timeout. Correct
+     * (it still runs, and still tears down whatever the attempt produced), but worth knowing if a
+     * future screen ever wires this to a visible button: "tap disconnect, nothing happens for a
+     * while" is an expected consequence of this design, not a bug (PR #63 review).
+     */
     fun disconnect() {
         scope.launch {
             mutex.withLock {
