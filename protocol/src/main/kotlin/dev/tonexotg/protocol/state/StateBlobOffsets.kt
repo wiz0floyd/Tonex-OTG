@@ -69,12 +69,23 @@ import dev.tonexotg.protocol.SessionId
  * firmware/session this has been confirmed against, not a standing guarantee for every unit.
  *
  * ### Fields intentionally NOT modelled here
- * Upstream's `set_preset_in_slot()` also touches `TONEX_STATE_OFFSET_START_STOMP_MODE` (line 106)
- * and `TONEX_STATE_OFFSET_END_DIRECT_MONITOR` (line 113) as unconditional side effects of
- * selecting a preset — forcing A/B or stomp mode, and forcing direct monitor on. Per this
- * project's mandate (see [PedalState] and issue #12), those are side effects to strip, not to
- * port, so this module never writes them and does not even name their offsets as constants here
- * — there is nothing in this file capable of producing that write.
+ * Upstream's `set_preset_in_slot()` touches **three** offsets as side effects of selecting a
+ * preset, not two — confirmed by hand-reading the function itself (issue #27 pre-implementation
+ * comment), not merely its offset `#define`s:
+ * - `TONEX_STATE_OFFSET_START_STOMP_MODE` (line 106) — may force A/B or stomp mode.
+ * - `TONEX_STATE_OFFSET_END_DIRECT_MONITOR` (line 113) — unconditionally forces direct monitor on.
+ * - `TONEX_STATE_OFFSET_END_BYPASS_MODE` (line 116, end-relative `12`) — written whenever
+ *   upstream's `CONFIG_ITEM_TOGGLE_BYPASS` is enabled: toggled on a same-slot/same-preset
+ *   reselect, forced to `0` otherwise. Easy to miss because it is not adjacent to the other two in
+ *   the `#define` list — it sits between [END_CURRENT_SLOT] (`11`) and `END_SLOT_C_PRESET` (`14`).
+ *
+ * Per this project's mandate (see [PedalState] and issue #12), all three are side effects to
+ * strip, not to port, so this module never writes any of them and does not even name their
+ * offsets as constants here — there is nothing in this file capable of producing that write. An
+ * earlier version of this KDoc named only the first two; that was a documentation completeness
+ * gap, not a code gap — see [dev.tonexotg.protocol.diagnostics.PresetChangeAudit], whose
+ * exhaustive full-blob diff would have caught a write to any of the three regardless of whether
+ * this comment named it.
  */
 internal object StateBlobOffsets {
 

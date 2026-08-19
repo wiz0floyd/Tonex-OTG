@@ -7,9 +7,11 @@ import dev.tonexotg.protocol.state.StateBlobOffsets
  * the pedal's whole-device state blob (`GetState`, wire type `0x0306`).
  *
  * Deliberately compares **every** byte, not a spot-check of a few named fields: a spot-check can
- * never catch drift at a byte nobody thought to name (e.g. `DIRECT_MONITOR` or stomp/AB mode —
- * upstream side effects [dev.tonexotg.protocol.state.StateBlobPatcher] is documented to never
- * write, but never independently confirmed against a real captured blob until this drill).
+ * never catch drift at a byte nobody thought to name (e.g. `DIRECT_MONITOR`, stomp/AB mode, or
+ * bypass mode — the three confirmed upstream `set_preset_in_slot()` side effects
+ * [dev.tonexotg.protocol.state.StateBlobPatcher] is documented to never write, but never
+ * independently confirmed against a real captured blob until this drill; see
+ * [dev.tonexotg.protocol.state.StateBlobOffsets]'s "Fields intentionally NOT modelled here").
  * [differingIndices] is a concrete list of every start-relative index that changed, not a boolean
  * — so a genuinely unexpected drift is *nameable*, not merely detectable. See [PresetChangeAudit]
  * for the higher-level check that actually classifies each differing index as sanctioned or not.
