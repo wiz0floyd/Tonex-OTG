@@ -33,7 +33,9 @@ import dev.tonexotg.protocol.message.SetStateMessage
 import dev.tonexotg.protocol.message.SingleParameterPayloadCodec
 import dev.tonexotg.protocol.message.TonexMessage
 import dev.tonexotg.protocol.message.TonexMessageDecoder
+import dev.tonexotg.protocol.params.EffectiveParameterBounds
 import dev.tonexotg.protocol.params.ParameterRegistry
+import dev.tonexotg.protocol.params.SelfWideningParameterBounds
 import dev.tonexotg.protocol.state.StateBlobPatcher
 import dev.tonexotg.protocol.state.StateBlobReader
 import java.util.concurrent.atomic.AtomicBoolean
@@ -97,6 +99,19 @@ class DefaultTonexController(
     private val capabilities: FirmwareCapabilities,
     private val snapshotStore: SnapshotStore = InMemorySnapshotStore(),
     private val timeouts: ConnectionTimeouts = ConnectionTimeouts.DEFAULT,
+    /**
+     * The effective-bounds source (issue #80) for [ParameterRegistry.SELF_WIDENING_PARAMETER_IDS]
+     * — consulted by [writeParameterLocked]'s reject-if-out-of-range check,
+     * [revertActivePreset]'s snapshot pre-validation, and threaded into
+     * [dev.tonexotg.protocol.message.ParameterWriteMessage.encode] so a self-widened value isn't
+     * clamped back down right before it reaches the wire. `:app` constructs and owns the
+     * long-lived [SelfWideningParameterBounds] instance (seeded from its DataStore-persisted
+     * observations) and passes it in here; this class only ever reads from it via
+     * [EffectiveParameterBounds.effectiveMax] and writes to it via
+     * [SelfWideningParameterBounds.observeRead] — it never persists anything itself, keeping
+     * `:protocol` Android-free (issue #15).
+     */
+    private val effectiveBounds: SelfWideningParameterBounds = SelfWideningParameterBounds(),
 ) : TonexController {
 
     // ---- state -----------------------------------------------------------------------------
@@ -811,9 +826,18 @@ class DefaultTonexController(
      * and preserving GLOBAL-scoped ones (master volume is not part of any preset). Implements the
      * "preset load/change" half of [parameterValues]' documented contract — before S9b only
      * master volume and post-[setParameter] values ever landed there.
+     *
+     * This is also the self-widening read hook (issue #80): every value here came from a genuine
+     * pedal state read ([captureSnapshotLocked] → [PresetParameterExtractor]), never from the
+     * optimistic post-write cache update in [writeParameterLocked] — exactly the distinction the
+     * feature depends on (a write echoing back a caller-supplied value must never be allowed to
+     * widen its own ceiling). [SelfWideningParameterBounds.observeRead] is a no-op for every id
+     * outside [ParameterRegistry.SELF_WIDENING_PARAMETER_IDS], so this call is harmless for the
+     * other ~106 preset parameters.
      */
     private fun applyCapturedValues(values: FloatArray) {
         val captured = ParameterId.PRESET_RANGE.associate { ParameterId(it) to values[it] }
+        captured.forEach { (id, value) -> effectiveBounds.observeRead(id, value) }
         _parameterValues.update { previous ->
             previous.filterKeys { it.index in ParameterId.GLOBAL_RANGE } + captured
         }
@@ -964,13 +988,17 @@ class DefaultTonexController(
             )
 
         // Reject, do NOT clamp — TonexController.setParameter's contract is explicit about this.
-        if (value < spec.min || value > spec.max) {
-            return TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, spec.max))
+        // Bound against the EFFECTIVE max (issue #80: self-widened for the allowlisted VIR_*
+        // parameters), not the registry's static max — otherwise a previously-observed widened
+        // value could never be re-written.
+        val effectiveMax = effectiveBounds.effectiveMax(id)
+        if (value < spec.min || value > effectiveMax) {
+            return TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, effectiveMax))
         }
 
         val encoded: ByteArray = when {
             spec.scope == ParameterScope.PRESET ->
-                ParameterWriteMessage.encode(id, value, capabilities).orReturn { return it }
+                ParameterWriteMessage.encode(id, value, capabilities, effectiveBounds).orReturn { return it }
             spec.enumName == "MASTER_VOLUME" ->
                 MasterVolumeMessage.encode(value, capabilities).orReturn { return it }
             else -> return TonexResult.Failure(
@@ -1129,9 +1157,13 @@ class DefaultTonexController(
                 ),
             )
             val v = snapshot.valueOf(id)
-            if (v < spec.min || v > spec.max) {
+            // Effective max (issue #80): a snapshot captured from a genuine pedal read already
+            // widened the allowlisted VIR_* parameters via applyCapturedValues' observeRead call,
+            // so this must agree with that, not re-check against the static registry max.
+            val effectiveMax = effectiveBounds.effectiveMax(id)
+            if (v < spec.min || v > effectiveMax) {
                 return@withLock TonexResult.Failure(
-                    TonexError.ParameterValueOutOfRange(id, v, spec.min, spec.max),
+                    TonexError.ParameterValueOutOfRange(id, v, spec.min, effectiveMax),
                 )
             }
         }

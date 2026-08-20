@@ -122,6 +122,32 @@ import dev.tonexotg.protocol.ParameterType
  */
 object ParameterRegistry {
 
+    /**
+     * The self-widening allowlist (issue #80): parameter ids whose registered `max` is treated
+     * as a per-session-widenable floor — not a firmware constant — because a genuine pedal read
+     * observing a value above it is plausibly explained by installed third-party content (IR/cab
+     * packs, mic profiles), not a decode bug. See [EffectiveParameterBounds]/
+     * [SelfWideningParameterBounds], which are the only consumers of this set.
+     *
+     * - `25` (`VIR_CABINET_MODEL`) — hardware-confirmed: a real pedal's factory presets carry
+     *   values up to 38 against upstream's max of 10 (see this file's class KDoc). The original
+     *   evidence for this entry.
+     * - `27` (`VIR_MIC_1`), `30` (`VIR_MIC_2`) — added on the strength of category reasoning, not
+     *   direct observation (issue #80, second comment: "Scope widened"). Both are unlabeled
+     *   SELECT parameters in the same virtual-cabinet category as index 25, and a full survey of
+     *   this pedal's content library is not possible from a single probe dump or from a cloud
+     *   environment with no hardware access — waiting for a probe to independently "catch" each
+     *   one before covering it would just mean repeating the same discover-then-patch-release
+     *   cycle per parameter. This is a bounded, principled expansion by category, not a blanket
+     *   mechanism: every other parameter (including the fixed-enumeration `CABINET_TYPE` at index
+     *   24 and the six Sync Division `*_TS` selectors) keeps strict out-of-range rejection.
+     *
+     * Deliberately **not** a blanket "any SELECT read above max widens" rule and deliberately
+     * **not** mutable — adding an id here is a reviewed code change, exactly like any other
+     * registry edit, not something runtime state can do to itself.
+     */
+    val SELF_WIDENING_PARAMETER_IDS: Set<Int> = setOf(25, 27, 30)
+
     private val ALL_PARAMETERS: List<ParameterSpec> = listOf(
         // Noise Gate (0–4)
         ParameterSpec(ParameterId(0), ParameterScope.PRESET, "NG POST", "NOISE_GATE_POST", ParameterType.SWITCH, 0f, 1f, 0f, ""),
