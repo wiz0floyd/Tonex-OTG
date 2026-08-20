@@ -312,8 +312,15 @@ class TonexSessionHolder internal constructor(
             // once-per-process singleton -- see class KDoc) is the deliberately simple choice here,
             // matching this project's "don't over-build" calibration; there is no meaningful UI to
             // show before this resolves anyway; since the pedal has not been connected to yet.
+            //
+            // runCatching (Opus review, PR #81): a corrupted/unreadable prefs file must not turn
+            // this optional cache into an unrecoverable launch crash -- fall back to "nothing
+            // widened yet" (the same starting state as a first-ever launch) rather than letting
+            // an IOException from DataStore propagate out of build().
             val parameterBoundsDataStore = appContext.parameterBoundsDataStore
-            val widenedSeed = runBlocking { WidenedParameterBoundsStore.loadSeed(parameterBoundsDataStore) }
+            val widenedSeed = runCatching {
+                runBlocking { WidenedParameterBoundsStore.loadSeed(parameterBoundsDataStore) }
+            }.getOrElse { emptyMap() }
             val effectiveBounds = SelfWideningParameterBounds(initialWidened = widenedSeed)
             WidenedParameterBoundsStore.persistForward(scope, parameterBoundsDataStore, effectiveBounds)
 

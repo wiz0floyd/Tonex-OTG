@@ -139,10 +139,21 @@ class ParameterEditorViewModel(
         }
     }
 
-    /** Continuous slider input (D3 §3) — clamped, held as an optimistic override, and submitted through [throttler]. */
+    /**
+     * Continuous slider input (D3 §3) — clamped, held as an optimistic override, and submitted
+     * through [throttler].
+     *
+     * Clamps against [effectiveBounds], not `spec.max` directly (Opus review, PR #81) — the same
+     * class of gap [onDiscreteChange] was fixed for issue #80. Currently a no-op distinction in
+     * practice: all three self-widening allowlisted ids ([dev.tonexotg.protocol.params.ParameterRegistry.SELF_WIDENING_PARAMETER_IDS])
+     * are `SELECT` type, which only ever reaches a `Stepper`/[onDiscreteChange], never a
+     * `Slider`/this function — but fixing it here now avoids leaving the exact same
+     * static-vs-effective-bounds mismatch latent for a future RANGE-type addition to the allowlist
+     * to rediscover.
+     */
     fun onRangeDrag(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
-        val clamped = rawValue.coerceIn(spec.min, spec.max)
+        val clamped = rawValue.coerceIn(spec.min, effectiveBounds.effectiveMax(id))
         _overrides.update { it + (id to clamped) }
         throttler.submit(id, clamped)
     }
@@ -382,7 +393,7 @@ private fun buildRow(id: ParameterId, rawValue: Float, effectiveBounds: Effectiv
         // asked to display -- for the three self-widening allowlisted parameters this is normally
         // a no-op (their `effectiveBounds.effectiveMax` already covers the observed value, since
         // the read that produced [rawValue] is what widened it in the first place -- see
-        // DefaultTonexController.applyCapturedValues); for the other ~113 parameters, an
+        // DefaultTonexController.applyCapturedValues); for the other ~106 preset parameters, an
         // out-of-range read now visibly shows as an anomalous stepper value instead of a falsely
         // clamped "normal-looking" one -- the "fail loud" philosophy applied to display code, which
         // has no typed-error channel of its own to surface through.
