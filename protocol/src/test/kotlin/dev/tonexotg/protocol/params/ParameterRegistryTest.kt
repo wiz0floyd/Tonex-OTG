@@ -212,6 +212,36 @@ class ParameterRegistryTest {
         assertEquals(0f, param.default)
     }
 
+    /**
+     * Deliberately diverges from upstream `tonex_params.c` (which says max 10, at both the pinned
+     * commit and upstream `main`): a real pedal's factory presets carry 25.0..38.0 at this index.
+     * See ParameterRegistry's class KDoc for the raw-log citations.
+     *
+     * `max` is asserted as a **floor, not an exact value.** That is deliberate: 38 is the highest
+     * value observed so far, not a confirmed option count, and the class KDoc explicitly says to
+     * raise it if a higher one is ever seen. Pinning it exactly would contradict that guidance and
+     * force an unrelated test edit every time a new extremum turns up; what actually must never
+     * regress is the lower bound, because any preset whose captured value exceeds `max` becomes
+     * unrevertable (`DefaultTonexController`'s whole-snapshot pre-validation). Every other field
+     * stays exactly pinned — `max` is the only one expected to move.
+     */
+    @Test
+    fun `spot check VIR cabinet model parameter (max is a hardware floor of 38, not upstream's 10)`() {
+        val param = ParameterRegistry.byIndex(25)
+        assertNotNull(param)
+        assertEquals("VIR_CMDL", param.name)
+        assertEquals("VIR_CABINET_MODEL", param.enumName)
+        assertEquals(ParameterType.SELECT, param.type)
+        assertEquals(0f, param.min)
+        assertEquals(5f, param.default)
+        assertTrue(
+            param.max >= 38f,
+            "VIR_CABINET_MODEL's max must admit 38.0 — the highest value real hardware reports " +
+                "(preset 14 \"Medium Class\", probe-logs/tonexprobe20260819_220308.log.txt:11127). " +
+                "Was ${param.max}; presets 13/14/16 are unrevertable below 38.",
+        )
+    }
+
     @Test
     fun `spot check VIR M2X parameter (max is genuinely 2, not a typo for M1X's 10)`() {
         val param = ParameterRegistry.byIndex(31)
