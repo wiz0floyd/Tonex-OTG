@@ -3,6 +3,7 @@ package dev.tonexotg.protocol.message
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
+import dev.tonexotg.protocol.params.SelfWideningParameterBounds
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -169,5 +170,57 @@ class ParameterWriteMessageTest {
     @Test
     fun `FirmwareCapabilities NONE_CONFIRMED does not support single-parameter write`() {
         assertEquals(false, FirmwareCapabilities.NONE_CONFIRMED.supportsSingleParameterWrite)
+    }
+
+    // ---- effectiveBounds parameter (issue #80) --------------------------------------------------
+    // ParameterId(25) = VIR_CABINET_MODEL, registry static max 38 (a hardware-observed floor).
+
+    @Test
+    fun `with the default STATIC bounds, a value above the static max is still clamped to it`() {
+        val encoded = ParameterWriteMessage.encode(ParameterId(25), 50.0f)
+        assertEquals(38.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `a widened effectiveBounds raises the clamp ceiling above the static registry max`() {
+        val widened = SelfWideningParameterBounds()
+        widened.observeRead(ParameterId(25), 42f)
+
+        val encoded = ParameterWriteMessage.encode(ParameterId(25), 42f, effectiveBounds = widened)
+
+        assertEquals(42.0f, decodedValue(encoded), "a self-widened value must reach the wire unclamped, not truncated back to the static max 38")
+    }
+
+    @Test
+    fun `a widened effectiveBounds still clamps a value above the new widened ceiling`() {
+        val widened = SelfWideningParameterBounds()
+        widened.observeRead(ParameterId(25), 42f)
+
+        val encoded = ParameterWriteMessage.encode(ParameterId(25), 100f, effectiveBounds = widened)
+
+        assertEquals(42.0f, decodedValue(encoded))
+    }
+
+    @Test
+    fun `the three-arg capability-gated encode also threads a widened effectiveBounds through`() {
+        val widened = SelfWideningParameterBounds()
+        widened.observeRead(ParameterId(25), 42f)
+        val capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true)
+
+        val result = ParameterWriteMessage.encode(ParameterId(25), 42f, capabilities, widened)
+
+        assertIs<TonexResult.Success<ByteArray>>(result)
+        assertEquals(42.0f, decodedValue(result.value))
+    }
+
+    @Test
+    fun `widening one allowlisted id does not affect clamping of a different, non-widened id`() {
+        val widened = SelfWideningParameterBounds()
+        widened.observeRead(ParameterId(25), 42f) // only VIR_CABINET_MODEL widened
+
+        // ParameterId(2) = NOISE_GATE_THRESHOLD, static max 0 -- must still clamp normally.
+        val encoded = ParameterWriteMessage.encode(ParameterId(2), 50.0f, effectiveBounds = widened)
+
+        assertEquals(0.0f, decodedValue(encoded))
     }
 }
