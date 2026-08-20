@@ -215,7 +215,8 @@ class ParameterRegistryTest {
     /**
      * Deliberately diverges from upstream `tonex_params.c` (which says max 10, at both the pinned
      * commit and upstream `main`). Real hardware returned 25.0 for this parameter on factory-stock
-     * preset 0, observed twice in the S22 drill log — see ParameterRegistry's class KDoc. 25 is a
+     * preset 0 per the S22 drill summary on issue #27 (raw log not available to the session that
+     * made this change — see ParameterRegistry's class KDoc for exact provenance). 25 is a
      * hardware-observed floor, not a confirmed option count; raise it if a higher value is ever
      * seen. It must never regress below 25, or the pedal's own factory state becomes unrestorable.
      */

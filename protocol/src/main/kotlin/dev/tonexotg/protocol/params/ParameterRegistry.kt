@@ -80,13 +80,26 @@ import dev.tonexotg.protocol.ParameterType
  * This is the one entry in this table that deliberately **does not** match upstream. Upstream
  * `tonex_params.c` records `{5, 0, 10, "VIR_CMDL", MODELLER_PARAM_TYPE_SELECT, ...}` — checked
  * both at this table's pinned commit (`7079f157…`) and on upstream `main` as of 2026-08-19; both
- * say max 10. A real Tonex One nonetheless reports **25.0** on factory-stock preset 0
- * ("Modern Triple"), observed twice independently in the S22 safety-drill log
- * (`tonexprobe20260819_220308.log.txt`): once in the read-only full backup's per-preset parameter
- * dump, and again as the revert drill's pre-edit baseline. On that second read the pedal's own
- * value was refused by [dev.tonexotg.protocol.connection.DefaultTonexController]'s range guard —
- * i.e. the stale bound made the pedal's *unmodified factory state* unrestorable, which is a
- * revert-safety bug, not merely a cosmetic table error.
+ * say max 10. A real Tonex One nonetheless reported **25.0** for this parameter on factory-stock
+ * preset 0 ("Modern Triple") during the S22 safety drill.
+ *
+ * **Provenance, stated exactly:** the raw hardware log (`tonexprobe20260819_220308.log.txt`) is not
+ * present in this repository or in any environment available to the session that made this change.
+ * The value comes from the drill's *summary comment* on issue #27, which records: "Write guard
+ * validation: ✓ Correctly refused parameter 25 (VIR_CABINET_MODEL) write — pedal baseline (25.0)
+ * outside registry range (0..10)". That is a generated summary, not raw log text, and the exact
+ * code path that produced the refusal has not been identified in `ProbeSession` (its write test
+ * targets `EQ_MID`, and its revert drill targets `EQ_MID`/`EQ_BASS`/`EQ_TREBLE` — none of them
+ * index 25). Do not cite this KDoc as a byte-level log quotation.
+ *
+ * Why it is fixed here anyway: a captured value above `max` is not merely cosmetic. `revertActivePreset`
+ * pre-validates the *entire* 109-parameter snapshot against the registry before issuing a single
+ * write (`DefaultTonexController.kt:1112-1137`) and fails the whole revert with
+ * [dev.tonexotg.protocol.TonexError.ParameterValueOutOfRange] if any captured value is out of
+ * bounds. With `max = 10`, a snapshot of a preset carrying 25.0 here makes that preset
+ * **unrevertable** — the safety net refuses to restore the pedal's own untouched factory state.
+ * That comment block already anticipates this case in so many words ("that most likely means the
+ * registry's bounds are wrong for this pedal's firmware").
  *
  * `max` is therefore set to **25**: the highest value real hardware has actually been seen to
  * produce. That is a **floor, not a confirmed upper bound.** The true option count for this
