@@ -31,7 +31,9 @@ import dev.tonexotg.protocol.ParameterType
  * All values are transmitted as float32 on the wire, including switches and
  * enum selectors. For enum (SELECT) parameters, the numeric value is the
  * index into the option list — the [ParameterSpec.max] value equals the index
- * of the last option, so option count = max + 1.
+ * of the last option, so option count = max + 1. **Exception: index 25
+ * (`VIR_CABINET_MODEL`) — see below; its `max` is a hardware-observed floor,
+ * so `max + 1` is a lower bound on the option count, not the option count.**
  *
  * Index 109 is the upstream `"LAST"` sentinel and is deliberately omitted here;
  * [ParameterId] will reject it if constructed. Per-preset parameters occupy
@@ -72,6 +74,27 @@ import dev.tonexotg.protocol.ParameterType
  *    cross-check against at all. The "likely a typo" theory had no upstream corroboration; treat
  *    the asymmetry with M1X as legitimate (a real difference in mic 2's usable X-axis range) and
  *    the value below as correct.
+ *
+ * ## VIR_CABINET_MODEL (index 25) — upstream is provably wrong against real hardware (S22/#27)
+ *
+ * This is the one entry in this table that deliberately **does not** match upstream. Upstream
+ * `tonex_params.c` records `{5, 0, 10, "VIR_CMDL", MODELLER_PARAM_TYPE_SELECT, ...}` — checked
+ * both at this table's pinned commit (`7079f157…`) and on upstream `main` as of 2026-08-19; both
+ * say max 10. A real Tonex One nonetheless reports **25.0** on factory-stock preset 0
+ * ("Modern Triple"), observed twice independently in the S22 safety-drill log
+ * (`tonexprobe20260819_220308.log.txt`): once in the read-only full backup's per-preset parameter
+ * dump, and again as the revert drill's pre-edit baseline. On that second read the pedal's own
+ * value was refused by [dev.tonexotg.protocol.connection.DefaultTonexController]'s range guard —
+ * i.e. the stale bound made the pedal's *unmodified factory state* unrestorable, which is a
+ * revert-safety bug, not merely a cosmetic table error.
+ *
+ * `max` is therefore set to **25**: the highest value real hardware has actually been seen to
+ * produce. That is a **floor, not a confirmed upper bound.** The true option count for this
+ * firmware's VIR cabinet list is unknown — upstream carries no VIR-cabinet name enum to count, and
+ * IK publishes no count. If a preset is ever observed with a `VIR_CABINET_MODEL` above 25, raise
+ * this again rather than treating 25 as authoritative. Conversely, values 11..25 are permitted for
+ * *writes* on the strength of a read observation only; if the pedal rejects or ignores some of
+ * them, that is the expected way this bound gets tightened.
  */
 object ParameterRegistry {
 
@@ -113,7 +136,10 @@ object ParameterRegistry {
         ParameterSpec(ParameterId(24), ParameterScope.PRESET, "MDL CAB", "CABINET_TYPE", ParameterType.SELECT, 0f, 2f, 0f, ""),
 
         // Virtual IR Cabinet (25–33)
-        ParameterSpec(ParameterId(25), ParameterScope.PRESET, "VIR_CMDL", "VIR_CABINET_MODEL", ParameterType.SELECT, 0f, 10f, 5f, ""),
+        // max=25 is a HARDWARE-OBSERVED FLOOR, not upstream's value and not a confirmed option
+        // count — upstream `tonex_params.c` says max=10, and a real pedal returned 25.0. See this
+        // file's class KDoc ("VIR_CABINET_MODEL") for the evidence and the open question.
+        ParameterSpec(ParameterId(25), ParameterScope.PRESET, "VIR_CMDL", "VIR_CABINET_MODEL", ParameterType.SELECT, 0f, 25f, 5f, ""),
         ParameterSpec(ParameterId(26), ParameterScope.PRESET, "VIR_RESO", "VIR_RESO", ParameterType.RANGE, 0f, 10f, 0f, ""),
         ParameterSpec(ParameterId(27), ParameterScope.PRESET, "VIR M1", "VIR_MIC_1", ParameterType.SELECT, 0f, 2f, 0f, ""),
         ParameterSpec(ParameterId(28), ParameterScope.PRESET, "VIR M1X", "VIR_MIC_1_X", ParameterType.RANGE, 0f, 10f, 0f, ""),
