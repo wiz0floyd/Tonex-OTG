@@ -24,7 +24,8 @@ import dev.tonexotg.app.ui.theme.minTouchTarget
 
 /**
  * The stepper for a `SELECT` parameter with **no known option labels** (D3 §3.2) —
- * `VIR_CABINET_MODEL` (0-10), `VIR_MIC_1`/`VIR_MIC_2` (0-2 each), and the six `*_TS` "Sync
+ * `VIR_CABINET_MODEL` (0-max, max taken live from `ParameterSpec` in the registry, not hardcoded
+ * here), `VIR_MIC_1`/`VIR_MIC_2` (0-2 each), and the six `*_TS` "Sync
  * Division" selectors banked under every reverb/mod/delay model (0-17 each).
  *
  * D3 §3.2 is explicit about why this is a *third*, distinct pattern rather than reusing either of
