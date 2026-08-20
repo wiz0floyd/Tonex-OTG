@@ -112,6 +112,13 @@ import dev.tonexotg.protocol.ParameterType
  * this again rather than treating 38 as authoritative. Conversely, values 11..38 are permitted for
  * *writes* on the strength of read observations only; if the pedal rejects or ignores some of them,
  * that is the expected way this bound gets tightened.
+ *
+ * Likely explanation (unconfirmed — no IK/Tonex documentation enumerates this): this pedal has
+ * Tonex MAX plus third-party IR/cab packs and IK add-ons installed, which extend the virtual
+ * cabinet model list well beyond the ~11 stock models upstream's table assumes. That would make
+ * the true option count a function of installed content on this specific pedal, not a fixed
+ * firmware constant — consistent with values well above upstream's max, and with why upstream's
+ * own open-source project (written against the stock library) never needed to account for it.
  */
 object ParameterRegistry {
 
