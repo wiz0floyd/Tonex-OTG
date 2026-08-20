@@ -2,6 +2,7 @@ package dev.tonexotg.app.probe
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -10,6 +11,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * Robolectric coverage for [ProbeCrashHandler]/[installProbeCrashHandler] (issue #69). Covers
@@ -20,6 +22,15 @@ import org.robolectric.RobolectricTestRunner
  * Exercises [ProbeCrashHandler.uncaughtException] directly rather than actually crashing the
  * test JVM -- see that class's KDoc for why it's `internal`, not `private`.
  *
+ * Pinned to `sdk = [28]` (issue #71's API<29 fallback, plain-`File`-backed) purely so these tests
+ * can read the log back with the simplest possible backend -- [ProbeCrashHandler] itself only
+ * ever calls [ProbeLogFile.appendLine], which is exercised identically regardless of which storage
+ * backend is behind it, so one backend is enough here; the `MediaStore`-backed path's own
+ * read/write behavior is covered by [ProbeLogFileScopedStorageTest]. Reads back via
+ * `File(logFile.displayPath)`, never `logFile.shareUri` -- see [ProbeLogFileTest]'s KDoc for why
+ * touching `shareUri` on this fallback path breaks every Robolectric test after the first one in
+ * the same JVM (robolectric/robolectric#8773).
+ *
  * `Thread.setDefaultUncaughtExceptionHandler` is a JVM-static, process-wide field shared across
  * every test in this run (Robolectric's per-test sandboxing does not reset it, since
  * `java.lang.Thread` is a bootstrap class loaded once per JVM) -- every test here saves and
@@ -27,6 +38,7 @@ import org.robolectric.RobolectricTestRunner
  * or any test that happens to run after them in the same process.
  */
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28])
 class ProbeCrashHandlerTest {
 
     private var originalHandler: Thread.UncaughtExceptionHandler? = null
@@ -43,6 +55,8 @@ class ProbeCrashHandlerTest {
 
     private fun context(): Context = ApplicationProvider.getApplicationContext()
 
+    private fun readBack(logFile: ProbeLogFile): String = File(logFile.displayPath).readText()
+
     @Test
     fun uncaughtException_writesThreadNameExceptionAndFullStackTraceToTheLogFile() {
         val logFile = ProbeLogFile.create(context())
@@ -52,7 +66,7 @@ class ProbeCrashHandlerTest {
 
             handler.uncaughtException(Thread.currentThread(), exception)
 
-            val onDisk = logFile.file.readText()
+            val onDisk = readBack(logFile)
             assertTrue("expected the crashing thread's name", onDisk.contains(Thread.currentThread().name))
             assertTrue("expected the exception type", onDisk.contains("IllegalStateException"))
             assertTrue("expected the exception message", onDisk.contains("boom"))
@@ -102,7 +116,7 @@ class ProbeCrashHandlerTest {
             installed!!.uncaughtException(Thread.currentThread(), RuntimeException("boom"))
 
             assertTrue("previously installed handler should still run", previousInvoked)
-            assertTrue(logFile.file.readText().contains("boom"))
+            assertTrue(readBack(logFile).contains("boom"))
         } finally {
             logFile.close()
         }

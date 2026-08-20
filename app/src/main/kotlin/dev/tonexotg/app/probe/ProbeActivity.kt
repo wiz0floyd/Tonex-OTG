@@ -33,10 +33,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.PresetIndex
-import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -78,11 +76,11 @@ class ProbeActivity : ComponentActivity() {
         val logFile = ProbeLogFile.create(applicationContext)
         log.attachFileSink(logFile)
         installProbeCrashHandler(logFile)
-        log.info("Diagnostic log file opened: ${logFile.file.absolutePath}")
+        log.info("Diagnostic log file opened: ${logFile.displayPath}")
         setContent {
             TonexTheme {
                 Surface {
-                    ProbeScreen(scope, log, logFile.file)
+                    ProbeScreen(scope, log, logFile)
                 }
             }
         }
@@ -118,7 +116,7 @@ private class UsbConnectionHandles(
 )
 
 @Composable
-private fun ProbeScreen(scope: CoroutineScope, log: ProbeLog, logFile: File) {
+private fun ProbeScreen(scope: CoroutineScope, log: ProbeLog, logFile: ProbeLogFile) {
     val context = LocalContext.current
     val entries by log.entries.collectAsState()
     val probeSession = remember { ProbeSession(scope, log) }
@@ -293,13 +291,15 @@ private fun ProbeScreen(scope: CoroutineScope, log: ProbeLog, logFile: File) {
                 // Issue #69: share the already-current real-time log file directly instead of
                 // writing a fresh render()-based copy -- avoids two divergent copies of the same
                 // log, and this file has been kept current (flushed) since the screen opened.
+                // Issue #71: logFile.shareUri is already a usable content:// Uri -- the MediaStore
+                // insert Uri itself on API 29+, or a FileProvider Uri on the API<29 fallback (see
+                // ProbeLogFile.create) -- so no separate FileProvider call is needed here anymore.
                 log.info("Log shared: $logFile")
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.probelogprovider", logFile)
                 context.startActivity(
                     Intent.createChooser(
                         Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_STREAM, uri)
+                            putExtra(Intent.EXTRA_STREAM, logFile.shareUri)
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         },
                         "Share Tonex probe log",
