@@ -3,6 +3,7 @@ package dev.tonexotg.app.probe
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbRequest
+import android.util.Log
 import dev.tonexotg.protocol.TonexTransport
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -96,6 +97,31 @@ import kotlinx.coroutines.withContext
  * using [TransportKind.USB_REQUEST] logs reads that look truncated, garbled, or entirely silent
  * where [TransportKind.BULK_TRANSFER] on the same pedal does not, this assumption is the first place
  * to look — please note that contrast as a comment on issue #26.
+ *
+ * ## Issue #27: a cancelled request's completion must be reaped before its [UsbRequest] is freed
+ *
+ * A real S22 probe run hit a native SIGSEGV (tombstone confirmed — see issue #27) inside
+ * [UsbDeviceConnection.requestWait], caused by a use-after-free. [UsbRequest.cancel] only issues a
+ * kernel `USBDEVFS_DISCARDURB` — it does not synchronously wait for that URB's completion to be
+ * reaped via [UsbDeviceConnection.requestWait]/`REAPURB`. The original [eventLoop] `finally` block
+ * called `.cancel()` then immediately `.close()` on both [inRequest] and [outRequest], freeing their
+ * native structs regardless of whether the kernel still held a pending completion for either one.
+ * `ProbeSession`'s sequential S22 drills construct a fresh [UsbRequestTonexTransport] on the *same*
+ * [UsbDeviceConnection] for each drill; the next transport's own [loopThread] then calls
+ * `requestWait` on that shared connection and can reap a stale completion still carrying a pointer
+ * into the *previous* transport's already-freed [UsbRequest] — the use-after-free the tombstone
+ * showed.
+ *
+ * The fix ([drainCancelledRequests]) lives entirely in this class's own `close`/[eventLoop] path, not
+ * in `ProbeSession`: after cancelling both requests, [eventLoop]'s `finally` polls
+ * [UsbDeviceConnection.requestWait] a small bounded number of times, discarding whatever it returns,
+ * until every request that still had an outstanding URB ([inRequest], [outRequest], or neither —
+ * the class tracks which) has been observed completing, or the poll budget runs out — *before*
+ * either is closed. This keeps the hazard fully self-contained: any caller that
+ * reuses the same [UsbDeviceConnection] for a subsequent transport (as `ProbeSession` does) is
+ * protected without needing to know this class's internals. See [drainCancelledRequests]'s own KDoc
+ * for why the drain proceeds to close anyway, loudly logged, if the budget is exhausted without
+ * confirming both.
  */
 class UsbRequestTonexTransport(
     private val connection: UsbDeviceConnection,
@@ -111,6 +137,23 @@ class UsbRequestTonexTransport(
 
     /** The write currently queued on [outRequest], if any. Set by [write], cleared by [loopThread]. */
     private val inFlightWrite = AtomicReference<PendingWrite?>(null)
+
+    /**
+     * Whether [outRequest] may still have an un-reaped URB in the kernel — i.e. whether
+     * [drainCancelledRequests] actually has to wait for it (issue #27). Set by [write] immediately
+     * *before* it calls [UsbRequest.queue] (never after: the URB can complete and be reaped by
+     * [loopThread] before `queue()` returns, and a later `set(true)` would overwrite that reap's
+     * clear and strand this flag); cleared **only** by [loopThread] when it observes [outRequest]
+     * coming back from [UsbDeviceConnection.requestWait]. Errs toward `true` — a spurious `true`
+     * costs one bounded drain, a spurious `false` risks the use-after-free.
+     *
+     * Deliberately NOT derived from [inFlightWrite]: [write]'s `CancellationException` handler
+     * calls `outRequest.cancel()` and then clears [inFlightWrite] *without* waiting for the reap,
+     * so `inFlightWrite == null` does not imply "no URB outstanding" — that is precisely the case
+     * the drain must still cover. This flag tracks kernel-side URB ownership; [inFlightWrite]
+     * tracks the caller-visible write, and the two intentionally diverge on the cancel path.
+     */
+    private val outMaybeQueued = AtomicBoolean(false)
 
     private val inRequest = UsbRequest().apply {
         check(initialize(connection, inEndpoint)) { "UsbRequestTonexTransport: inRequest.initialize() failed" }
@@ -148,11 +191,17 @@ class UsbRequestTonexTransport(
      */
     private fun eventLoop() {
         val readBuffer = ByteBuffer.allocateDirect(READ_BUFFER_SIZE)
+        // Whether inRequest currently has an un-reaped URB in the kernel. Only this thread ever
+        // queues or reaps inRequest, so a plain local is sufficient (no atomic needed) -- unlike
+        // [outMaybeQueued], which write() sets from its own thread. Read by the finally block below
+        // to decide whether the drain actually has to wait for inRequest at all (issue #27).
+        var inMaybeQueued = false
         try {
             if (!inRequest.queue(readBuffer)) {
                 incomingChannel.close(IOException("UsbRequestTonexTransport: initial IN queue() failed"))
                 return
             }
+            inMaybeQueued = true
 
             while (!closed.get()) {
                 val completed = try {
@@ -168,6 +217,7 @@ class UsbRequestTonexTransport(
 
                 when {
                     completed === inRequest -> {
+                        inMaybeQueued = false // its URB has now been reaped by this requestWait
                         val n = readBuffer.position()
                         if (n > 0) {
                             readBuffer.flip()
@@ -176,12 +226,18 @@ class UsbRequestTonexTransport(
                             incomingChannel.trySend(bytes)
                         }
                         readBuffer.clear()
-                        if (!closed.get() && !inRequest.queue(readBuffer)) {
-                            incomingChannel.close(IOException("UsbRequestTonexTransport: re-queue of IN request failed"))
-                            break
+                        if (!closed.get()) {
+                            if (!inRequest.queue(readBuffer)) {
+                                incomingChannel.close(
+                                    IOException("UsbRequestTonexTransport: re-queue of IN request failed"),
+                                )
+                                break
+                            }
+                            inMaybeQueued = true
                         }
                     }
                     completed === outRequest -> {
+                        outMaybeQueued.set(false) // its URB has now been reaped by this requestWait
                         // No transferred-byte-count API exists for a completed UsbRequest -- see class
                         // KDoc's "no short-write detection" section. A successful completion is trusted
                         // to mean the whole buffer went out.
@@ -194,12 +250,109 @@ class UsbRequestTonexTransport(
         } finally {
             runCatching { inRequest.cancel() }
             runCatching { outRequest.cancel() }
+            // Must run BEFORE close() below -- see class KDoc's "Issue #27" section and this
+            // function's own KDoc. Cancelling does not synchronously reap the kernel's completion;
+            // closing before that reap is what produced the confirmed UAF tombstone. Only the
+            // requests that actually still have an outstanding URB are awaited, so the common
+            // teardown (no write in flight) neither burns the poll budget nor logs a false alarm.
+            drainCancelledRequests(awaitIn = inMaybeQueued, awaitOut = outMaybeQueued.get())
             runCatching { inRequest.close() }
             runCatching { outRequest.close() }
             inFlightWrite.getAndSet(null)?.completion?.completeExceptionally(
                 IOException("UsbRequestTonexTransport: transport closed with a write still in flight"),
             )
             incomingChannel.close()
+        }
+    }
+
+    /**
+     * Drains any kernel-level completion still pending for [inRequest]/[outRequest] after they were
+     * just cancelled, so [eventLoop]'s `finally` does not free either request's native struct while a
+     * completion for it might still be reaped later by a *different* [UsbRequestTonexTransport]'s
+     * [loopThread] sharing the same [connection] (issue #27's confirmed use-after-free — see class
+     * KDoc).
+     *
+     * [awaitIn]/[awaitOut] say which requests actually still have an un-reaped URB in the kernel —
+     * `inMaybeQueued` (a [eventLoop]-local, since only [loopThread] queues or reaps [inRequest]) and
+     * [outMaybeQueued] respectively. Only those are waited for. This matters: [outRequest] is queued
+     * only while a [write] is in flight, so on the large majority of `close()` calls there is no OUT
+     * URB to reap at all, and an unconditional "wait for both" would (a) burn the whole poll budget
+     * every teardown and (b) fire the [Log.e] below every teardown — destroying the diagnostic value
+     * of the one line whose entire job is to be the canary for a recurrence of issue #27's crash. It
+     * is also common for *neither* to be outstanding (a read that completes on the same iteration
+     * `closed` flips is not re-queued), in which case this function polls zero times and returns
+     * immediately.
+     *
+     * Polls [UsbDeviceConnection.requestWait] up to [DRAIN_MAX_POLLS] times with a short
+     * [DRAIN_POLL_TIMEOUT_MILLIS] bound each, discarding whatever request identity comes back, until
+     * every awaited request has been observed completing. Deliberately bounded rather
+     * than looped until both are confirmed: this class's own house rule (this project's CLAUDE.md,
+     * "fail fast and loud") is reject-and-explain, not an unbounded wait that could itself hang
+     * [close] -- and [close] already promises callers ([UsbTonexTransport]'s KDoc, referenced from
+     * this class's own [close]) that it returns within a bounded window because the very next thing a
+     * caller like `ProbeSession` does is reuse the same [connection]. A cancelled URB's completion is
+     * a near-instant kernel-side event (not a network round trip), so [DRAIN_MAX_POLLS] short polls is
+     * a generous budget for it to surface if it is ever going to.
+     *
+     * An *awaited* request not being drained by the time the budget runs out is exactly the
+     * hazardous case: a completion still sitting in the kernel's queue that a later
+     * [UsbRequestTonexTransport] on this same [connection] could reap after the native struct is
+     * freed. Rather than silently hoping for the best, or leaking the native struct forever (this
+     * class is reconstructed once per probe drill -- see `ProbeSession` -- so an unbounded leak here
+     * would accumulate across a session), this function logs loudly via [Log.e] and proceeds to
+     * close anyway, so a real occurrence is visible in logcat/the probe log's real-time file sink
+     * (issue #69). Because only genuinely-outstanding URBs are awaited, that line firing is a real
+     * signal, not routine noise.
+     *
+     * Known residual gap (pre-existing, not introduced here): a [write] racing `close()` can queue
+     * [outRequest] after [awaitOut] was sampled, in which case its URB is not awaited. That window
+     * is the same close-vs-write race [write] already documents; closing it needs the same
+     * per-URB/generation machinery the class KDoc declines to build for a diagnostic-only class.
+     * See issue #27.
+     */
+    private fun drainCancelledRequests(awaitIn: Boolean, awaitOut: Boolean) {
+        var inDrained = !awaitIn
+        var outDrained = !awaitOut
+        var pollsUsed = 0
+        while (pollsUsed < DRAIN_MAX_POLLS && !(inDrained && outDrained)) {
+            pollsUsed++
+            val completed = try {
+                connection.requestWait(DRAIN_POLL_TIMEOUT_MILLIS)
+            } catch (t: TimeoutException) {
+                null // nothing completed within this poll window; try again if polls remain
+            } catch (t: Throwable) {
+                // The connection is very likely already invalid (e.g. the device was detached
+                // concurrently) -- nothing further can be drained through it. Stop polling rather
+                // than spin through the remaining budget on a connection that cannot answer.
+                Log.w(
+                    TAG,
+                    "UsbRequestTonexTransport: drain aborted after $pollsUsed poll(s), " +
+                        "requestWait threw (${t.javaClass.simpleName}: ${t.message}) -- connection " +
+                        "likely already invalid; closing UsbRequest(s) anyway",
+                )
+                return
+            }
+            // Identity comparison (===), not structural -- matching every other demux in this
+            // file (see class KDoc's "one dedicated thread" section). UsbRequest doesn't override
+            // equals() so `==` would behave the same today, but this function's whole job is
+            // identity matching and should say so explicitly rather than rely on that coincidence.
+            when {
+                completed === inRequest -> inDrained = true
+                completed === outRequest -> outDrained = true
+                else -> Unit // a completion for some other/stale request; not ours to track
+            }
+        }
+        if (!inDrained || !outDrained) {
+            Log.e(
+                TAG,
+                "UsbRequestTonexTransport: drain incomplete after $pollsUsed poll(s) " +
+                    "(awaitIn=$awaitIn, inDrained=$inDrained, awaitOut=$awaitOut, " +
+                    "outDrained=$outDrained) -- closing native UsbRequest(s) " +
+                    "anyway. A cancelled request's completion may still be pending in the kernel and " +
+                    "could later be reaped by a different UsbRequestTonexTransport sharing this " +
+                    "UsbDeviceConnection, dereferencing this now-freed UsbRequest (issue #27). If this " +
+                    "fires and is followed by a native crash, that is the mechanism -- see issue #27.",
+            )
         }
     }
 
@@ -214,6 +367,15 @@ class UsbRequestTonexTransport(
             }
             val completion = CompletableDeferred<Int>()
             inFlightWrite.set(PendingWrite(bytes.size, completion))
+            // Published BEFORE queue(), for the same reason inFlightWrite is set before it: the URB
+            // can complete and be reaped by loopThread before queue() even returns here, and
+            // loopThread clears this flag on reap. Setting it afterwards could overwrite that clear
+            // and strand the flag at `true` with nothing outstanding. The two failure paths below
+            // deliberately leave it `true`: a spurious `true` costs a bounded 150ms drain plus one
+            // loud log, while a spurious `false` risks issue #27's use-after-free -- and on the ISE
+            // "this request is currently queued" branch a *prior* URB genuinely is still
+            // outstanding, so clearing there would be actively wrong. See outMaybeQueued's KDoc.
+            outMaybeQueued.set(true)
             // Safe to call from this (IO dispatcher) thread concurrently with loopThread's
             // requestWait -- see class KDoc's "why write queues its own OUT request directly".
             val queued = try {
@@ -256,9 +418,12 @@ class UsbRequestTonexTransport(
      * [UsbTonexTransport.close]'s KDoc for why this join is load-bearing (the same physical
      * [connection] is reused by the probe's next reconnect cycle moments later) and identically
      * applicable here. [loopThread] never blocks longer than [LOOP_WAIT_TIMEOUT_MILLIS] per
-     * `requestWait` call regardless of whether [Thread.interrupt] takes effect, so this bound
-     * reliably completes well inside that budget. Does NOT close [connection] — same lifecycle
-     * split as [UsbTonexTransport]; the probe Activity/session owns that.
+     * `requestWait` call regardless of whether [Thread.interrupt] takes effect, plus
+     * [drainCancelledRequests]'s own small bounded budget ([DRAIN_MAX_POLLS] *
+     * [DRAIN_POLL_TIMEOUT_MILLIS], issue #27) that now runs in [eventLoop]'s `finally` before the
+     * requests are closed, so this join bound reliably completes well inside that combined budget.
+     * Does NOT close [connection] — same lifecycle split as [UsbTonexTransport]; the probe
+     * Activity/session owns that.
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
@@ -267,6 +432,8 @@ class UsbRequestTonexTransport(
     }
 
     companion object {
+        private const val TAG = "UsbRequestTonexTransport"
+
         private const val READ_BUFFER_SIZE: Int = 4096
 
         /**
@@ -277,5 +444,23 @@ class UsbRequestTonexTransport(
          * again next iteration, it is not failed.
          */
         private const val LOOP_WAIT_TIMEOUT_MILLIS: Long = 500L
+
+        /**
+         * Per-poll timeout used by [drainCancelledRequests] while draining a just-cancelled request's
+         * completion -- see issue #27. Deliberately much shorter than [LOOP_WAIT_TIMEOUT_MILLIS]: a
+         * cancelled URB's completion, if it is coming at all, is a near-instant kernel-side event, not
+         * something worth a full poll cycle to wait for, and [close] needs this whole drain to stay
+         * well inside its own documented bound.
+         */
+        private const val DRAIN_POLL_TIMEOUT_MILLIS: Long = 50L
+
+        /**
+         * Maximum number of [DRAIN_POLL_TIMEOUT_MILLIS]-bounded polls [drainCancelledRequests] will
+         * issue per [close] before giving up and closing anyway (loudly logged) -- see issue #27. Not
+         * unbounded, matching this project's "fail fast and loud" house philosophy over an
+         * open-ended wait; 3 polls at 50ms is a generous 150ms budget for a same-kernel completion
+         * that should surface in microseconds if it is going to.
+         */
+        private const val DRAIN_MAX_POLLS: Int = 3
     }
 }
