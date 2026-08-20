@@ -5,7 +5,8 @@ applies to the orchestrating session and every dispatched agent alike.
 
 ## Requirements
 
-Find/Install android-sdk at the start of any session.
+- Find/Install android-sdk at the start of any session.
+- ALWAYS make sure main is in sync with origin before branching
 
 ## What this project is
 
