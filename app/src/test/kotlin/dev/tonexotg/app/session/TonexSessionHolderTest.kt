@@ -125,11 +125,11 @@ class TonexSessionHolderTest {
         assertEquals(1, controller.connectCallCount)
         controller.setConnectionState(ConnectionState.Ready)
 
-        // A second Connected emission for the same attachment while the controller is already
-        // Ready and the FGS gate stays up (e.g. some *other* unrelated flow value briefly
-        // recomputing) must not re-enter connect() while already Ready, and must not tear
-        // anything down -- there was no gate loss and no controller failure here.
-        foregroundActive.value = true // no-op re-assignment; StateFlow conflates, asserting intent
+        // A second, genuinely distinct Connected emission (fresh TonexUsbTransport instance, so
+        // the StateFlow does not conflate it away) for the same attachment while the controller is
+        // already Ready and the FGS gate stays up must not re-enter connect() while already Ready,
+        // and must not tear anything down -- there was no gate loss and no controller failure here.
+        usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
         advanceUntilIdle()
 
         assertEquals(1, controller.connectCallCount)
@@ -138,20 +138,22 @@ class TonexSessionHolderTest {
     }
 
     @Test
-    fun reconnectAfterControllerError_reopensOnceUsbStateReflectsDisconnected() = runTest {
-        // PR #75 review, blocker B: a controller-side connect failure (handshake timeout, decode
-        // error) used to leave UsbConnectionManager's own state at Connected forever, so
-        // UsbConnectionDecisions.shouldConnect() refused every later attach/reconnect for the same
-        // deviceId and the Reconnect button was a permanent dead end. The fix: TonexSessionHolder
-        // must react to ConnectionState.Error by tearing down through disconnectUsb() (the
-        // production UsbConnectionManager.disconnect()), not just leave a note in blockedReason.
+    fun controllerError_leavesErrorVisibleAndDoesNotTearDownUntilReconnectRequested() = runTest {
+        // PR #75 review + a follow-up finding while implementing the fix: a controller-side
+        // connect failure (handshake timeout, decode error) must recover on Reconnect (blocker B),
+        // but it must NOT auto-teardown the instant it happens -- that would demote
+        // ConnectionUiState.ErrorState (and its FR11 ErrorPresentation: title/detail/advice) to
+        // ConnectionUiState.NotConnected before the player ever sees why the connection failed,
+        // and risks a hot connect-fail-teardown-reconnect-fail loop against a persistently failing
+        // pedal. observe() must leave Error alone; only tearDownStaleErrorBeforeReconnect() (called
+        // from requestReconnect(), see that function's KDoc) may tear it down.
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         val usbState = MutableStateFlow<UsbConnectionState>(UsbConnectionState.Disconnected)
         val foregroundActive = MutableStateFlow(true)
         val controller = FakeTonexController()
         val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
         val disconnectUsb = FakeDisconnectUsb(usbState)
-        buildHolder(usbState, foregroundActive, controller, scope, disconnectUsb)
+        val holder = buildHolder(usbState, foregroundActive, controller, scope, disconnectUsb)
         advanceUntilIdle()
 
         controller.failNextConnect = true
@@ -159,11 +161,17 @@ class TonexSessionHolderTest {
         advanceUntilIdle()
 
         assertEquals(1, controller.connectCallCount)
-        // Note: we can't observe the transient ConnectionState.Error itself here -- under
-        // UnconfinedTestDispatcher, advanceUntilIdle() runs the whole cascading reaction
-        // (Error -> disconnectUsb() -> usbState=Disconnected -> controller.disconnect() -> Idle)
-        // to completion before returning control to this test. The assertions below confirm the
-        // cascade actually happened, which is the thing that matters for recoverability.
+        // Error is genuinely still visible -- nothing raced ahead of it.
+        assertEquals(ConnectionState.Error::class, controller.connectionState.value::class)
+        assertEquals(0, disconnectUsb.callCount)
+        assertEquals(UsbConnectionState.Connected::class, usbState.value::class)
+        assertNull(holder.blockedReason.value)
+
+        // The equivalent of the user tapping Reconnect: TonexSessionHolder.requestReconnect()
+        // calls this before restarting the service.
+        holder.tearDownStaleErrorBeforeReconnect()
+        advanceUntilIdle()
+
         // The holder must have torn the manager's state down itself -- this is what actually
         // unblocks a future shouldConnect() for the same deviceId.
         assertEquals(1, disconnectUsb.callCount)
@@ -172,12 +180,38 @@ class TonexSessionHolderTest {
         // Disconnected branch's controller.disconnect() call), not stayed wedged in Error.
         assertEquals(ConnectionState.Idle, controller.connectionState.value)
 
-        // The equivalent of the user tapping Reconnect and the service reopening the still-
-        // attached pedal: a fresh Connected emission for the same deviceId.
+        // The equivalent of the service restart's onStartCommand reopening the still-attached
+        // pedal: a fresh Connected emission for the same deviceId.
         usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
         advanceUntilIdle()
 
         assertEquals(2, controller.connectCallCount)
+        assertEquals(ConnectionState.Ready, controller.connectionState.value)
+        scope.cancel()
+    }
+
+    @Test
+    fun tearDownStaleErrorBeforeReconnect_isANoOpWhenControllerIsNotInError() = runTest {
+        // requestReconnect() calls tearDownStaleErrorBeforeReconnect() unconditionally on every
+        // tap -- including the ordinary "was never connected" and "already Ready" cases, where
+        // there is nothing stale to tear down. Must not disconnect a perfectly good session.
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val usbState = MutableStateFlow<UsbConnectionState>(UsbConnectionState.Disconnected)
+        val foregroundActive = MutableStateFlow(true)
+        val controller = FakeTonexController()
+        val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
+        val disconnectUsb = FakeDisconnectUsb(usbState)
+        val holder = buildHolder(usbState, foregroundActive, controller, scope, disconnectUsb)
+        advanceUntilIdle()
+
+        usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Ready, controller.connectionState.value)
+
+        holder.tearDownStaleErrorBeforeReconnect()
+        advanceUntilIdle()
+
+        assertEquals(0, disconnectUsb.callCount)
         assertEquals(ConnectionState.Ready, controller.connectionState.value)
         scope.cancel()
     }
