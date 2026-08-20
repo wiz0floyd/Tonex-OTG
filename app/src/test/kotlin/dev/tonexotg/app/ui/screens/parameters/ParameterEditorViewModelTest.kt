@@ -386,4 +386,133 @@ class ParameterEditorViewModelTest {
         assertEquals(listOf(virCabinetModel to 38f), controller.setParameterCalls)
         vm.onCleared()
     }
+
+    // ---- silent parameter-write failure (issue #22 follow-up bug fix) --------------------------
+
+    @Test
+    fun `a failed parameter write surfaces a readable error instead of silently reverting with no feedback`() = runTest {
+        val controller = FakeTonexController()
+        controller.nextSetParameterResult = TonexResult.Failure(TonexError.TransportFailure(RuntimeException("USB disconnected")))
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onNumericEntryOpen(gain)
+        runCurrent()
+        vm.onNumericEntrySet(9f) // a discrete, non-throttled write path; MODEL_GAIN's registry default is 5f
+
+        runCurrent()
+
+        assertNotNull("a failed write must surface an error, not fail silently", vm.uiState.value.writeError)
+        // The optimistic override must still be cleared on failure - it must fall back to the
+        // registry default (5f), not keep pretending the rejected write of 9f actually landed.
+        val gainCard = vm.uiState.value.quickTier.first { it.row.id == gain }
+        assertEquals(5f, gainCard.row.value)
+
+        vm.onWriteErrorDismissed()
+        runCurrent()
+        assertNull(vm.uiState.value.writeError)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a throttled slider write that succeeds after an earlier failure on the same parameter clears the write error`() = runTest {
+        val controller = FakeTonexController()
+        controller.nextSetParameterResult = TonexResult.Failure(TonexError.TransportFailure(RuntimeException("USB disconnected")))
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        // First conflated write to Gain fails.
+        vm.onRangeDrag(gain, 3f)
+        runCurrent()
+        assertNotNull("the failed drag must surface an error", vm.uiState.value.writeError)
+
+        // A later drag on the SAME parameter succeeds (nextSetParameterResult was consumed by the
+        // first call, so this one hits the fake's default Success) - this is the throttler's
+        // normal case (conflated writes to one slider), not an edge case, per the reported bug
+        // being specifically about knobs/sliders.
+        vm.onRangeDrag(gain, 7f)
+        runCurrent()
+
+        assertNull(
+            "a later successful write for the same parameter must clear its own earlier failure",
+            vm.uiState.value.writeError,
+        )
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a successful write for one parameter does not clobber a still-unresolved failure for a different parameter`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        // Gain's write fails and is surfaced.
+        controller.nextSetParameterResult = TonexResult.Failure(TonexError.TransportFailure(RuntimeException("USB disconnected")))
+        vm.onRangeDrag(gain, 3f)
+        runCurrent()
+        assertNotNull(vm.uiState.value.writeError)
+
+        // Bass's write succeeds - single error slot, but it is tagged with Gain's id, so Bass
+        // succeeding must not silently wipe out Gain's still-live failure dialog.
+        vm.onRangeDrag(bass, 4f)
+        runCurrent()
+
+        assertNotNull(
+            "an unrelated parameter's success must not clear a still-unresolved failure for a different parameter",
+            vm.uiState.value.writeError,
+        )
+        vm.onCleared()
+    }
+
+    @Test
+    fun `dragging a known write-unsupported global parameter never reaches the controller and shows a plain message`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        val tuningReference = ParameterId(114) // TUNING_REFERENCE - GLOBAL scope, no :protocol write path
+        vm.onRangeDrag(tuningReference, 450f)
+        runCurrent()
+
+        assertTrue(
+            "a deterministically-rejected write must never attempt the round trip",
+            controller.setParameterCalls.isEmpty(),
+        )
+        val message = vm.uiState.value.writeError
+        assertNotNull(message)
+        assertFalse(
+            "the raw :protocol ProtocolStateViolation prose must not leak to the UI",
+            message!!.contains("StateBlobOffsets") || message.contains("global parameter other than master volume"),
+        )
+        vm.onCleared()
+    }
+
+    @Test
+    fun `toggling a known write-unsupported global switch never reaches the controller and shows a plain message`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        val cabsimBypass = ParameterId(112) // CABSIM_BYPASS - GLOBAL scope, no :protocol write path
+        vm.onSwitchToggle(cabsimBypass, true)
+        runCurrent()
+
+        assertTrue(controller.setParameterCalls.isEmpty())
+        assertNotNull(vm.uiState.value.writeError)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `master volume, the one GLOBAL parameter protocol can write, is not blocked as unsupported`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(ParameterCatalog.masterVolumeId, -6f)
+        runCurrent()
+
+        assertEquals(listOf(ParameterCatalog.masterVolumeId to -6f), controller.setParameterCalls)
+        assertNull(vm.uiState.value.writeError)
+        vm.onCleared()
+    }
 }

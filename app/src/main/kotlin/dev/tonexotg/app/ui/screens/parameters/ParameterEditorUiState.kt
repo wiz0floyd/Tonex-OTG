@@ -104,6 +104,7 @@ data class ParameterEditorUiState(
     val firstWriteWarningVisible: Boolean,
     val revertConfirmVisible: Boolean,
     val revertError: String?,
+    val writeError: String?,
     val externalPresetChangeMessage: String?,
 ) {
     companion object {
@@ -119,6 +120,7 @@ data class ParameterEditorUiState(
             firstWriteWarningVisible = false,
             revertConfirmVisible = false,
             revertError = null,
+            writeError = null,
             externalPresetChangeMessage = null,
         )
     }
