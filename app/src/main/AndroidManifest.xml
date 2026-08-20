@@ -127,9 +127,15 @@
         <!--
           Backs ProbeActivity's "Save & share log" button (issue #25): a full read/write test's
           log overflows ClipboardManager's Binder transaction limit, so it's written to a file
-          under getExternalFilesDir(null) instead and handed to another app via a content:// Uri
-          from this provider, per androidx's FileProvider requirement (a raw file:// Uri would
-          throw FileUriExposedException on API 24+).
+          instead and handed to another app via a content:// Uri, per androidx's FileProvider
+          requirement (a raw file:// Uri would throw FileUriExposedException on API 24+).
+
+          Issue #71: on API 29+ the log now lives in MediaStore (Documents/tonex-logs/), whose
+          insert() already returns a usable content:// Uri directly; see ProbeLogFile.create.
+          This provider is only reached on the API 26-28 fallback path (below the scoped-storage
+          cutover at 29), which still writes a plain File under getExternalFilesDir(null) the way
+          #69 originally did. Kept, not removed, because minSdk is 26 and that range still needs
+          a working "Save & share log"; the real target hardware (API 36) never exercises it.
         -->
         <provider
             android:name="androidx.core.content.FileProvider"
