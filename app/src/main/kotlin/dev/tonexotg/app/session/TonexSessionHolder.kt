@@ -311,7 +311,7 @@ class TonexSessionHolder internal constructor(
             // read of a small Preferences file at process/session startup (this holder itself is a
             // once-per-process singleton -- see class KDoc) is the deliberately simple choice here,
             // matching this project's "don't over-build" calibration; there is no meaningful UI to
-            // show before this resolves anyway; since the pedal has not been connected to yet.
+            // show before this resolves anyway, since the pedal has not been connected to yet.
             //
             // runCatching (Opus review, PR #81): a corrupted/unreadable prefs file must not turn
             // this optional cache into an unrecoverable launch crash -- fall back to "nothing

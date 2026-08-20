@@ -164,12 +164,16 @@ class EffectiveParameterBoundsTest {
         assert(n + 1f > effectiveMax) { "N+1 must still be rejected" }
     }
 
-    // ---- finiteness guard (Opus review, PR #81): NaN/Infinity/huge-finite reads never widen anything ----
+    // ---- plausibility guard (Opus review, PR #81): NaN/Infinity/huge-finite/non-integer reads never widen anything ----
     // A naive `if (value <= staticMax) return` guard is not enough: comparisons against NaN are
     // always false in IEEE 754, so a NaN read would fall through, get stored as the "ceiling," and
     // then silently defeat every downstream `value > effectiveMax` check and every
     // `coerceIn(min, effectiveMax)` clamp that consults it (both comparisons are also false
     // against a NaN bound). This must be caught here, at the source, not merely downstream.
+    // isFinite() alone also does not bound magnitude -- a finite-but-absurd value like 1e30 has
+    // the identical durable-corruption risk (it survives the seed filter and gets persisted to
+    // DataStore forever, same as Infinity), so the guard additionally rejects anything outside a
+    // generous plausible SELECT-option-index range.
 
     @Test
     fun `observeRead rejects NaN outright - it must never become the ceiling`() {
@@ -207,20 +211,63 @@ class EffectiveParameterBoundsTest {
 
     @Test
     fun `observeRead rejects an implausibly huge but technically finite value`() {
-        // isFinite() alone does not bound magnitude -- this is a deliberate design choice
-        // documented on observeRead's KDoc, not a gap: an offset-drift-produced 1e30 is exactly
-        // as untrustworthy as NaN/Infinity as a "widened ceiling," so this asserts the current,
-        // intentional behavior (accepted, since it IS finite) so a future change to add a
-        // magnitude cap is a deliberate decision, not an accidental regression either way.
+        // 1e30 is finite (isFinite() alone would accept it) but far outside any plausible SELECT
+        // option index -- the plausibility cap (MAX_PLAUSIBLE_SELF_WIDENING_VALUE) closes this
+        // off, since a finite-but-absurd value is just as durably corrupting as NaN/Infinity once
+        // persisted (see observeRead's KDoc).
         val bounds = SelfWideningParameterBounds()
 
         bounds.observeRead(virCabinetModel.id, 1e30f)
 
         assertEquals(
-            1e30f,
+            virCabinetModel.max,
             bounds.effectiveMax(virCabinetModel.id),
-            "1e30 is finite, so it IS accepted by the current isFinite()-only guard -- see this test's own KDoc",
+            "an implausibly huge finite value must be rejected, not accepted as the new ceiling",
         )
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `observeRead rejects a value just above the plausibility cap`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, 1000f) // MAX_PLAUSIBLE_SELF_WIDENING_VALUE is 999
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `observeRead accepts a value exactly at the plausibility cap`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, 999f)
+
+        assertEquals(999f, bounds.effectiveMax(virCabinetModel.id))
+    }
+
+    @Test
+    fun `observeRead rejects a non-integer value - SELECT option indices are always whole numbers`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, 42.5f)
+
+        assertEquals(
+            virCabinetModel.max,
+            bounds.effectiveMax(virCabinetModel.id),
+            "a fractional value can never be a genuine SELECT option index -- reject it, don't round it",
+        )
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `observeRead rejects a negative value`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, -5f)
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
     }
 
     @Test
@@ -243,10 +290,11 @@ class EffectiveParameterBoundsTest {
         assertEquals(emptyMap(), bounds.widenedMaxima.value)
     }
 
-    // ---- finiteness guard applies to construction-time seeding too (Opus review, PR #81) ----
+    // ---- plausibility guard applies to construction-time seeding too (Opus review, PR #81) ----
     // Same rationale as observeRead: a seed value is not more trustworthy than a live read just
-    // because it came from :app's DataStore -- a corrupted prefs file or a NaN that somehow
-    // reached disk before this fix must not resurrect the write-path bypass on load.
+    // because it came from :app's DataStore -- a corrupted prefs file, or a NaN/Infinity/huge
+    // value that somehow reached disk before this fix, must not resurrect the write-path bypass
+    // on load.
 
     @Test
     fun `seeding with NaN is silently ignored, not stored as the ceiling`() {
@@ -272,5 +320,13 @@ class EffectiveParameterBoundsTest {
 
         assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id), "the NaN entry must not poison the map construction")
         assertEquals(5f, bounds.effectiveMax(virMic1.id))
+    }
+
+    @Test
+    fun `seeding with an implausibly huge finite value is also silently ignored`() {
+        val bounds = SelfWideningParameterBounds(initialWidened = mapOf(virCabinetModel.id to 1e30f))
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
     }
 }
