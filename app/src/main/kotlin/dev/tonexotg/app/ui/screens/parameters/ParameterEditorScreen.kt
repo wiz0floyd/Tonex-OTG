@@ -183,6 +183,17 @@ fun ParameterEditorScreen(
             text = { Text(message) },
         )
     }
+
+    uiState.writeError?.let { message ->
+        AlertDialog(
+            onDismissRequest = viewModel::onWriteErrorDismissed,
+            confirmButton = {
+                TextButton(onClick = viewModel::onWriteErrorDismissed) { Text("OK") }
+            },
+            title = { Text("Couldn't update parameter") },
+            text = { Text(message) },
+        )
+    }
 }
 
 @Composable

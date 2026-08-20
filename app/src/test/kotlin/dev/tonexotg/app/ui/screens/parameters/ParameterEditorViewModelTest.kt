@@ -386,4 +386,31 @@ class ParameterEditorViewModelTest {
         assertEquals(listOf(virCabinetModel to 38f), controller.setParameterCalls)
         vm.onCleared()
     }
+
+    // ---- silent parameter-write failure (issue #22 follow-up bug fix) --------------------------
+
+    @Test
+    fun `a failed parameter write surfaces a readable error instead of silently reverting with no feedback`() = runTest {
+        val controller = FakeTonexController()
+        controller.nextSetParameterResult = TonexResult.Failure(TonexError.TransportFailure(RuntimeException("USB disconnected")))
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onNumericEntryOpen(gain)
+        runCurrent()
+        vm.onNumericEntrySet(9f) // a discrete, non-throttled write path; MODEL_GAIN's registry default is 5f
+
+        runCurrent()
+
+        assertNotNull("a failed write must surface an error, not fail silently", vm.uiState.value.writeError)
+        // The optimistic override must still be cleared on failure - it must fall back to the
+        // registry default (5f), not keep pretending the rejected write of 9f actually landed.
+        val gainCard = vm.uiState.value.quickTier.first { it.row.id == gain }
+        assertEquals(5f, gainCard.row.value)
+
+        vm.onWriteErrorDismissed()
+        runCurrent()
+        assertNull(vm.uiState.value.writeError)
+        vm.onCleared()
+    }
 }

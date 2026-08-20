@@ -85,6 +85,7 @@ class ParameterEditorViewModel(
     private val _firstWriteWarningVisible = MutableStateFlow(false)
     private val _revertConfirmVisible = MutableStateFlow(false)
     private val _revertError = MutableStateFlow<String?>(null)
+    private val _writeError = MutableStateFlow<String?>(null)
     private val _externalPresetChangeMessage = MutableStateFlow<String?>(null)
 
     private val controllerSnapshot = combine(
@@ -108,9 +109,10 @@ class ParameterEditorViewModel(
         _firstWriteWarningVisible,
         _revertConfirmVisible,
         _revertError,
+        _writeError,
         _externalPresetChangeMessage,
-    ) { firstWrite, revertConfirm, revertError, externalMessage ->
-        DialogState(firstWrite, revertConfirm, revertError, externalMessage)
+    ) { firstWrite, revertConfirm, revertError, writeError, externalMessage ->
+        DialogState(firstWrite, revertConfirm, revertError, writeError, externalMessage)
     }
 
     val uiState: StateFlow<ParameterEditorUiState> =
@@ -234,6 +236,11 @@ class ParameterEditorViewModel(
         _revertError.value = null
     }
 
+    /** Dismisses a surfaced parameter-write failure. */
+    fun onWriteErrorDismissed() {
+        _writeError.value = null
+    }
+
     /** Stops every in-flight/buffered throttled write. Call from the caller's own teardown (e.g. `onDispose`). */
     fun onCleared() {
         throttler.cancelAll()
@@ -259,10 +266,18 @@ class ParameterEditorViewModel(
      * On success [TonexController.parameterValues] now carries this exact value, so the override
      * would be redundant; on failure, falling back to the controller's own last-known value is
      * this project's "fail fast and loud" philosophy applied here — a local override must never
-     * keep *pretending* a rejected write actually landed on the pedal.
+     * keep *pretending* a rejected write actually landed on the pedal. A failure is also surfaced
+     * to the user via [_writeError], the same pattern [onRevertConfirmed] uses for
+     * [TonexController.revertActivePreset] failures — silently reverting the control with no
+     * explanation is exactly the "responds visually but doesn't stick, with zero feedback" bug
+     * this exists to prevent.
      */
-    private fun handleWriteResult(id: ParameterId, @Suppress("UNUSED_PARAMETER") value: Float, @Suppress("UNUSED_PARAMETER") result: TonexResult<Unit>) {
+    private fun handleWriteResult(id: ParameterId, @Suppress("UNUSED_PARAMETER") value: Float, result: TonexResult<Unit>) {
         _overrides.update { it - id }
+        when (result) {
+            is TonexResult.Success -> Unit
+            is TonexResult.Failure -> _writeError.value = result.error.message
+        }
     }
 
     private fun buildUiState(controllerSnapshot: ControllerSnapshot, localEditState: LocalEditState, dialogState: DialogState): ParameterEditorUiState {
@@ -291,6 +306,7 @@ class ParameterEditorViewModel(
             firstWriteWarningVisible = dialogState.firstWriteWarningVisible,
             revertConfirmVisible = dialogState.revertConfirmVisible,
             revertError = dialogState.revertError,
+            writeError = dialogState.writeError,
             externalPresetChangeMessage = dialogState.externalPresetChangeMessage,
         )
     }
@@ -363,6 +379,7 @@ class ParameterEditorViewModel(
         val firstWriteWarningVisible: Boolean,
         val revertConfirmVisible: Boolean,
         val revertError: String?,
+        val writeError: String?,
         val externalPresetChangeMessage: String?,
     )
 }
