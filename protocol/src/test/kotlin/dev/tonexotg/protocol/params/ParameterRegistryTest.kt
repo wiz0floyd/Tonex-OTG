@@ -214,25 +214,31 @@ class ParameterRegistryTest {
 
     /**
      * Deliberately diverges from upstream `tonex_params.c` (which says max 10, at both the pinned
-     * commit and upstream `main`). Real hardware returned 25.0 for this parameter on factory-stock
-     * preset 0 per the S22 drill summary on issue #27 (raw log not available to the session that
-     * made this change — see ParameterRegistry's class KDoc for exact provenance). 25 is a
-     * hardware-observed floor, not a confirmed option count; raise it if a higher value is ever
-     * seen. It must never regress below 25, or the pedal's own factory state becomes unrestorable.
+     * commit and upstream `main`): a real pedal's factory presets carry 25.0..38.0 at this index.
+     * See ParameterRegistry's class KDoc for the raw-log citations.
+     *
+     * `max` is asserted as a **floor, not an exact value.** That is deliberate: 38 is the highest
+     * value observed so far, not a confirmed option count, and the class KDoc explicitly says to
+     * raise it if a higher one is ever seen. Pinning it exactly would contradict that guidance and
+     * force an unrelated test edit every time a new extremum turns up; what actually must never
+     * regress is the lower bound, because any preset whose captured value exceeds `max` becomes
+     * unrevertable (`DefaultTonexController`'s whole-snapshot pre-validation). Every other field
+     * stays exactly pinned — `max` is the only one expected to move.
      */
     @Test
-    fun `spot check VIR cabinet model parameter (max 25 from hardware, not upstream's 10)`() {
+    fun `spot check VIR cabinet model parameter (max is a hardware floor of 38, not upstream's 10)`() {
         val param = ParameterRegistry.byIndex(25)
         assertNotNull(param)
         assertEquals("VIR_CMDL", param.name)
         assertEquals("VIR_CABINET_MODEL", param.enumName)
         assertEquals(ParameterType.SELECT, param.type)
         assertEquals(0f, param.min)
-        assertEquals(25f, param.max)
         assertEquals(5f, param.default)
         assertTrue(
-            param.max >= 25f,
-            "VIR_CABINET_MODEL's max must admit the 25.0 a real pedal reports on stock preset 0",
+            param.max >= 38f,
+            "VIR_CABINET_MODEL's max must admit 38.0 — the highest value real hardware reports " +
+                "(preset 14 \"Medium Class\", probe-logs/tonexprobe20260819_220308.log.txt:11127). " +
+                "Was ${param.max}; presets 13/14/16 are unrevertable below 38.",
         )
     }
 

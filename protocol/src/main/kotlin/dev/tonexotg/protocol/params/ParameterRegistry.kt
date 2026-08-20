@@ -80,34 +80,38 @@ import dev.tonexotg.protocol.ParameterType
  * This is the one entry in this table that deliberately **does not** match upstream. Upstream
  * `tonex_params.c` records `{5, 0, 10, "VIR_CMDL", MODELLER_PARAM_TYPE_SELECT, ...}` — checked
  * both at this table's pinned commit (`7079f157…`) and on upstream `main` as of 2026-08-19; both
- * say max 10. A real Tonex One nonetheless reported **25.0** for this parameter on factory-stock
- * preset 0 ("Modern Triple") during the S22 safety drill.
+ * say max 10. A real Tonex One's factory-stock presets nonetheless carry values from **25.0 up to
+ * 38.0** here.
  *
- * **Provenance, stated exactly:** the raw hardware log (`tonexprobe20260819_220308.log.txt`) is not
- * present in this repository or in any environment available to the session that made this change.
- * The value comes from the drill's *summary comment* on issue #27, which records: "Write guard
- * validation: ✓ Correctly refused parameter 25 (VIR_CABINET_MODEL) write — pedal baseline (25.0)
- * outside registry range (0..10)". That is a generated summary, not raw log text, and the exact
- * code path that produced the refusal has not been identified in `ProbeSession` (its write test
- * targets `EQ_MID`, and its revert drill targets `EQ_MID`/`EQ_BASS`/`EQ_TREBLE` — none of them
- * index 25). Do not cite this KDoc as a byte-level log quotation.
+ * **Provenance — raw log, archived in-repo:** `probe-logs/tonexprobe20260819_220308.log.txt` (S22
+ * safety drill, 2026-08-19). `runSafetyBackup` dumps all 109 parameters for each of the 20 presets;
+ * index 25 across that dump is:
  *
- * Why it is fixed here anyway: a captured value above `max` is not merely cosmetic. `revertActivePreset`
+ * - 25.0 on 17 of 20 presets (e.g. preset 0 "Modern Triple", log line 11113 — also re-read
+ *   independently as the revert drill's pre-edit baseline at line 19310)
+ * - **38.0 on preset 14 "Medium Class" (line 11127) — the highest value observed anywhere**
+ * - 36.0 on preset 13 "BS 800RB" (line 11126) and preset 16 "Boogie 400 2" (line 11129)
+ *
+ * The vector's alignment is confirmed by the same rows, ruling out an index shift: positions 12/15/17
+ * read 300.0/750.0/1900.0, exactly the registered `EQ_BASS_FREQ`/`EQ_MID_FREQ`/`EQ_TREBLE_FREQ`
+ * values, and each dump holds exactly 109 entries.
+ *
+ * Why it matters: a captured value above `max` is not merely cosmetic. `revertActivePreset`
  * pre-validates the *entire* 109-parameter snapshot against the registry before issuing a single
  * write (`DefaultTonexController.kt:1112-1137`) and fails the whole revert with
  * [dev.tonexotg.protocol.TonexError.ParameterValueOutOfRange] if any captured value is out of
- * bounds. With `max = 10`, a snapshot of a preset carrying 25.0 here makes that preset
- * **unrevertable** — the safety net refuses to restore the pedal's own untouched factory state.
- * That comment block already anticipates this case in so many words ("that most likely means the
- * registry's bounds are wrong for this pedal's firmware").
+ * bounds. With `max = 10`, **all 20** factory presets are unrevertable; at `max = 25`, three of them
+ * (13, 14, 16) still are — the safety net would refuse to restore the pedal's own untouched factory
+ * state. That comment block already anticipates this case in so many words ("that most likely means
+ * the registry's bounds are wrong for this pedal's firmware").
  *
- * `max` is therefore set to **25**: the highest value real hardware has actually been seen to
+ * `max` is therefore set to **38**: the highest value real hardware has actually been seen to
  * produce. That is a **floor, not a confirmed upper bound.** The true option count for this
  * firmware's VIR cabinet list is unknown — upstream carries no VIR-cabinet name enum to count, and
- * IK publishes no count. If a preset is ever observed with a `VIR_CABINET_MODEL` above 25, raise
- * this again rather than treating 25 as authoritative. Conversely, values 11..25 are permitted for
- * *writes* on the strength of a read observation only; if the pedal rejects or ignores some of
- * them, that is the expected way this bound gets tightened.
+ * IK publishes no count. If a preset is ever observed with a `VIR_CABINET_MODEL` above 38, raise
+ * this again rather than treating 38 as authoritative. Conversely, values 11..38 are permitted for
+ * *writes* on the strength of read observations only; if the pedal rejects or ignores some of them,
+ * that is the expected way this bound gets tightened.
  */
 object ParameterRegistry {
 
@@ -149,10 +153,11 @@ object ParameterRegistry {
         ParameterSpec(ParameterId(24), ParameterScope.PRESET, "MDL CAB", "CABINET_TYPE", ParameterType.SELECT, 0f, 2f, 0f, ""),
 
         // Virtual IR Cabinet (25–33)
-        // max=25 is a HARDWARE-OBSERVED FLOOR, not upstream's value and not a confirmed option
-        // count — upstream `tonex_params.c` says max=10, and a real pedal returned 25.0. See this
-        // file's class KDoc ("VIR_CABINET_MODEL") for the evidence and the open question.
-        ParameterSpec(ParameterId(25), ParameterScope.PRESET, "VIR_CMDL", "VIR_CABINET_MODEL", ParameterType.SELECT, 0f, 25f, 5f, ""),
+        // max=38 is a HARDWARE-OBSERVED FLOOR, not upstream's value and not a confirmed option
+        // count — upstream `tonex_params.c` says max=10, while the factory presets on a real pedal
+        // carry 25.0..38.0 here. See this file's class KDoc ("VIR_CABINET_MODEL") for the raw-log
+        // evidence and the still-open question of the true upper bound.
+        ParameterSpec(ParameterId(25), ParameterScope.PRESET, "VIR_CMDL", "VIR_CABINET_MODEL", ParameterType.SELECT, 0f, 38f, 5f, ""),
         ParameterSpec(ParameterId(26), ParameterScope.PRESET, "VIR_RESO", "VIR_RESO", ParameterType.RANGE, 0f, 10f, 0f, ""),
         ParameterSpec(ParameterId(27), ParameterScope.PRESET, "VIR M1", "VIR_MIC_1", ParameterType.SELECT, 0f, 2f, 0f, ""),
         ParameterSpec(ParameterId(28), ParameterScope.PRESET, "VIR M1X", "VIR_MIC_1_X", ParameterType.RANGE, 0f, 10f, 0f, ""),
