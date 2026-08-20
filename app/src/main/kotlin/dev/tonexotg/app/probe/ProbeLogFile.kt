@@ -71,6 +71,13 @@ import java.util.Locale
  * `ContentValues` this class inserts (the part that's actually undocumented-but-real, per
  * commonsware's "Scoped Storage Stories" -- see [scopedStorageInsertValues]) rather than
  * attempting to fake the rest of the round trip end to end.
+ *
+ * Known limitation, not a bug: `MediaProvider`'s `SIZE` column generally isn't refreshed until the
+ * fd is closed or the file is rescanned, so a file manager checked mid-probe-session may show this
+ * file as 0 bytes even though `appendLine` has already durably flushed real content to it. Doesn't
+ * affect correctness (the bytes are genuinely on disk, and this file's actual content is always
+ * readable), but is worth knowing before concluding "browsable at all" (#71's acceptance
+ * criterion) failed from a stale size shown mid-session alone.
  */
 class ProbeLogFile private constructor(
     /** Human-readable location for log messages -- a `Documents/...` relative path on API 29+, an absolute path on the API<29 fallback. */
