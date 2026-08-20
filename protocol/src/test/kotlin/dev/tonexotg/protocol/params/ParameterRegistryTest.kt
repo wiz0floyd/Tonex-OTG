@@ -434,6 +434,29 @@ class ParameterRegistryTest {
         assertEquals("Hz", param.unit)
     }
 
+    // ---- self-widening allowlist (issue #80) --------------------------------------------------
+
+    @Test
+    fun `self-widening allowlist is exactly VIR_CABINET_MODEL, VIR_MIC_1, VIR_MIC_2`() {
+        assertEquals(setOf(25, 27, 30), ParameterRegistry.SELF_WIDENING_PARAMETER_IDS)
+        assertEquals("VIR_CABINET_MODEL", ParameterRegistry.byIndex(25)?.enumName)
+        assertEquals("VIR_MIC_1", ParameterRegistry.byIndex(27)?.enumName)
+        assertEquals("VIR_MIC_2", ParameterRegistry.byIndex(30)?.enumName)
+    }
+
+    @Test
+    fun `self-widening allowlist does not leak to CABINET_TYPE or any other neighboring parameter`() {
+        // CABINET_TYPE (24) is a fixed 3-way mode selector, not a content list — issue #80's
+        // second follow-up comment is explicit this stays strict. Spot-check it plus every other
+        // preset parameter is excluded.
+        assertEquals("CABINET_TYPE", ParameterRegistry.byIndex(24)?.enumName)
+        val nonAllowlisted = (0..108).filter { it !in ParameterRegistry.SELF_WIDENING_PARAMETER_IDS }
+        assertEquals(106, nonAllowlisted.size, "expected 109 preset params minus the 3 allowlisted")
+        assertTrue(24 in nonAllowlisted)
+        assertTrue(26 in nonAllowlisted) // VIR_RESO, adjacent to the allowlisted ids, must stay strict
+        assertTrue(28 in nonAllowlisted) // VIR_MIC_1_X, adjacent, must stay strict
+    }
+
     @Test
     fun `all parameters with negative min values are properly bounded`() {
         val paramsWithNegativeMin = ParameterRegistry.all().filter { it.min < 0 }

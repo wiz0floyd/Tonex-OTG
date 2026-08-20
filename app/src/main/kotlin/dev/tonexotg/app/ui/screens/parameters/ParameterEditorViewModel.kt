@@ -9,6 +9,7 @@ import dev.tonexotg.protocol.PresetInfo
 import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexEvent
 import dev.tonexotg.protocol.TonexResult
+import dev.tonexotg.protocol.params.EffectiveParameterBounds
 import dev.tonexotg.protocol.params.ParameterRegistry
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
@@ -57,10 +58,20 @@ import kotlinx.coroutines.launch
  * stays on this screen permanently. The first-destructive-write dialog needs no bookkeeping of
  * its own here at all: [TonexController] already gates it end-to-end via `SnapshotStore` (S9b) —
  * this class only listens for [TonexEvent.FirstDestructiveWrite] and flips a visibility flag.
+ *
+ * ## Effective bounds, not just the static registry (issue #80)
+ * [effectiveBounds] defaults to [EffectiveParameterBounds.STATIC] (the registry's own static
+ * `max`, unchanged behaviour) but the production caller (`TonexSessionHolder`) supplies its
+ * session-scoped `SelfWideningParameterBounds` instance so the three self-widening allowlisted
+ * parameters ([dev.tonexotg.protocol.params.ParameterRegistry.SELF_WIDENING_PARAMETER_IDS]) get
+ * a widened write-clamp ([onDiscreteChange]) and a widened stepper `range` ([buildRow]) that
+ * track `DefaultTonexController`'s own effective bounds exactly — see that class's KDoc for why
+ * this must be one shared source, not a UI-only cosmetic widening.
  */
 class ParameterEditorViewModel(
     private val controller: TonexController,
     private val scope: CoroutineScope,
+    private val effectiveBounds: EffectiveParameterBounds = EffectiveParameterBounds.STATIC,
 ) {
     private val throttler = ParameterWriteThrottler(
         scope = scope,
@@ -128,10 +139,21 @@ class ParameterEditorViewModel(
         }
     }
 
-    /** Continuous slider input (D3 §3) — clamped, held as an optimistic override, and submitted through [throttler]. */
+    /**
+     * Continuous slider input (D3 §3) — clamped, held as an optimistic override, and submitted
+     * through [throttler].
+     *
+     * Clamps against [effectiveBounds], not `spec.max` directly (Opus review, PR #81) — the same
+     * class of gap [onDiscreteChange] was fixed for issue #80. Currently a no-op distinction in
+     * practice: all three self-widening allowlisted ids ([dev.tonexotg.protocol.params.ParameterRegistry.SELF_WIDENING_PARAMETER_IDS])
+     * are `SELECT` type, which only ever reaches a `Stepper`/[onDiscreteChange], never a
+     * `Slider`/this function — but fixing it here now avoids leaving the exact same
+     * static-vs-effective-bounds mismatch latent for a future RANGE-type addition to the allowlist
+     * to rediscover.
+     */
     fun onRangeDrag(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
-        val clamped = rawValue.coerceIn(spec.min, spec.max)
+        val clamped = rawValue.coerceIn(spec.min, effectiveBounds.effectiveMax(id))
         _overrides.update { it + (id to clamped) }
         throttler.submit(id, clamped)
     }
@@ -219,7 +241,11 @@ class ParameterEditorViewModel(
 
     private fun onDiscreteChange(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
-        val clamped = rawValue.coerceIn(spec.min, spec.max)
+        // Effective max (issue #80): the write-clamp must track the same widened ceiling
+        // DefaultTonexController's own setParameter validation uses, or a value the UI's widened
+        // stepper range permits (buildRow) could never actually reach the pedal — clamped back
+        // down to the static max right here, one step before the write.
+        val clamped = rawValue.coerceIn(spec.min, effectiveBounds.effectiveMax(id))
         _overrides.update { it + (id to clamped) }
         scope.launch {
             val result = controller.setParameter(id, clamped)
@@ -247,7 +273,7 @@ class ParameterEditorViewModel(
 
         val quickTier = ParameterCatalog.quickTier.map { item -> buildQuickTierCard(item, ::effectiveValue) }
         val masterVolume = buildRangeRow(ParameterCatalog.masterVolumeId, effectiveValue(ParameterCatalog.masterVolumeId))
-        val categories = ParameterCatalog.categories.map { buildCategory(it, ::effectiveValue) }
+        val categories = ParameterCatalog.categories.map { buildCategory(it, ::effectiveValue, effectiveBounds) }
         val presetName = controllerSnapshot.activePreset
             ?.let { idx -> controllerSnapshot.presets.firstOrNull { it.index == idx }?.pedalName }
             .orEmpty()
@@ -288,12 +314,12 @@ class ParameterEditorViewModel(
             }
         }
 
-    private fun buildCategory(category: ParameterCatalog.Category, effectiveValue: (ParameterId) -> Float): CategoryUiState {
+    private fun buildCategory(category: ParameterCatalog.Category, effectiveValue: (ParameterId) -> Float, effectiveBounds: EffectiveParameterBounds): CategoryUiState {
         val bank = category.modelBank
         if (bank == null) {
             return CategoryUiState.Flat(
                 title = category.title,
-                rows = category.flatIds.map { buildRow(it, effectiveValue(it)) },
+                rows = category.flatIds.map { buildRow(it, effectiveValue(it), effectiveBounds) },
             )
         }
 
@@ -303,7 +329,7 @@ class ParameterEditorViewModel(
 
         val alwaysOnRows = category.alwaysOnIds
             .filter { it != bank.selectorId } // the selector renders as its own chip row below, not a generic row
-            .map { buildRow(it, effectiveValue(it)) }
+            .map { buildRow(it, effectiveValue(it), effectiveBounds) }
 
         val selector = ModelSelectorUiState(
             id = bank.selectorId,
@@ -315,7 +341,7 @@ class ParameterEditorViewModel(
 
         // D3 §2.1: only the selected model's rows exist here at all — nothing else is grayed,
         // collapsed, or otherwise present-but-hidden for the other models.
-        val modelRows = bank.modelFor(selectedIndex).parameterIds.map { buildRow(it, effectiveValue(it)) }
+        val modelRows = bank.modelFor(selectedIndex).parameterIds.map { buildRow(it, effectiveValue(it), effectiveBounds) }
 
         return CategoryUiState.Banked(category.title, alwaysOnRows, selector, modelRows)
     }
@@ -341,7 +367,7 @@ class ParameterEditorViewModel(
     )
 }
 
-private fun buildRow(id: ParameterId, rawValue: Float): ParameterRow {
+private fun buildRow(id: ParameterId, rawValue: Float, effectiveBounds: EffectiveParameterBounds): ParameterRow {
     val spec = ParameterRegistry.byIndex(id.index) ?: error("No ParameterSpec for $id")
     return when (spec.type) {
         ParameterType.RANGE -> buildRangeRow(id, rawValue)
@@ -356,13 +382,30 @@ private fun buildRow(id: ParameterId, rawValue: Float): ParameterRow {
         // Every SELECT reaching this function is one of D3 §3.2's *unlabeled* selectors — the 4
         // known-label model selectors are always filtered out before this is called and rendered
         // as a ModelSelectorUiState chip row instead (see buildCategory).
+        //
+        // ## No coercion of the displayed value (issue #80 bug fix)
+        // Previously `value = rawValue.toInt().coerceIn(range.first, range.last)` silently
+        // falsified the displayed value for any genuinely-read out-of-range value (e.g. a real
+        // VIR_CABINET_MODEL read of 42 displayed as a clamped 38) -- the UI misreported real pedal
+        // state instead of surfacing the discrepancy. `value` below is always the raw read,
+        // unmodified; `range` widens (in either direction, never narrows below the static min/max)
+        // just enough to keep the Stepper widget internally consistent with whatever value it is
+        // asked to display -- for the three self-widening allowlisted parameters this is normally
+        // a no-op (their `effectiveBounds.effectiveMax` already covers the observed value, since
+        // the read that produced [rawValue] is what widened it in the first place -- see
+        // DefaultTonexController.applyCapturedValues); for the other ~106 preset parameters, an
+        // out-of-range read now visibly shows as an anomalous stepper value instead of a falsely
+        // clamped "normal-looking" one -- the "fail loud" philosophy applied to display code, which
+        // has no typed-error channel of its own to surface through.
         ParameterType.SELECT -> {
-            val range = spec.min.toInt()..spec.max.toInt()
+            val rawInt = rawValue.toInt()
+            val effectiveMax = effectiveBounds.effectiveMax(id)
+            val range = minOf(spec.min.toInt(), rawInt)..maxOf(effectiveMax.toInt(), rawInt)
             ParameterRow.Stepper(
                 id = id,
                 label = friendlyLabel(spec.enumName),
                 abbreviation = abbreviationFor(spec, id),
-                value = rawValue.toInt().coerceIn(range.first, range.last),
+                value = rawInt,
                 range = range,
             )
         }

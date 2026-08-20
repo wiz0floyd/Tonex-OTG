@@ -6,6 +6,8 @@ import androidx.core.content.ContextCompat
 import dev.tonexotg.app.data.alias.DataStorePresetAliasStore
 import dev.tonexotg.app.data.alias.PresetAliasStore
 import dev.tonexotg.app.data.alias.presetAliasDataStore
+import dev.tonexotg.app.data.params.WidenedParameterBoundsStore
+import dev.tonexotg.app.data.params.parameterBoundsDataStore
 import dev.tonexotg.app.usb.connection.UsbConnectionManager
 import dev.tonexotg.app.usb.connection.UsbConnectionService
 import dev.tonexotg.app.usb.connection.UsbConnectionState
@@ -13,6 +15,8 @@ import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.connection.DefaultTonexController
 import dev.tonexotg.protocol.message.FirmwareCapabilities
+import dev.tonexotg.protocol.params.EffectiveParameterBounds
+import dev.tonexotg.protocol.params.SelfWideningParameterBounds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -134,6 +139,16 @@ class TonexSessionHolder internal constructor(
     val controller: TonexController,
     val aliasStore: PresetAliasStore,
     private val scope: CoroutineScope,
+    /**
+     * The effective-bounds source (issue #80) [ParameterEditorViewModel] must be constructed
+     * with, so its UI range and write-clamp track the exact same widened ceiling [controller]'s
+     * own write-path validates against — see that class's KDoc, "Effective bounds, not just the
+     * static registry." Defaults to [EffectiveParameterBounds.STATIC] purely so
+     * [TonexSessionHolderTest]'s existing `internal constructor` calls (which predate this
+     * feature and have no reason to exercise it) keep compiling unchanged; [build] always
+     * supplies a real, DataStore-seeded [SelfWideningParameterBounds] in production.
+     */
+    val effectiveBounds: EffectiveParameterBounds = EffectiveParameterBounds.STATIC,
     /**
      * Tears down [UsbConnectionManager]'s own state (production:
      * [UsbConnectionManager.disconnect]) -- see class KDoc, "Recovering from a controller-side
@@ -288,12 +303,34 @@ class TonexSessionHolder internal constructor(
         private fun build(appContext: Context): TonexSessionHolder {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val usbConnectionManager = UsbConnectionManager.getInstance(appContext)
+
+            // Issue #80: load whatever widened ceiling(s) a prior session persisted BEFORE
+            // constructing SelfWideningParameterBounds -- this is what makes "persists across app
+            // restart" actually true, rather than requiring a fresh out-of-range read every launch
+            // before a previously-reachable high index becomes writable again. A single blocking
+            // read of a small Preferences file at process/session startup (this holder itself is a
+            // once-per-process singleton -- see class KDoc) is the deliberately simple choice here,
+            // matching this project's "don't over-build" calibration; there is no meaningful UI to
+            // show before this resolves anyway, since the pedal has not been connected to yet.
+            //
+            // runCatching (Opus review, PR #81): a corrupted/unreadable prefs file must not turn
+            // this optional cache into an unrecoverable launch crash -- fall back to "nothing
+            // widened yet" (the same starting state as a first-ever launch) rather than letting
+            // an IOException from DataStore propagate out of build().
+            val parameterBoundsDataStore = appContext.parameterBoundsDataStore
+            val widenedSeed = runCatching {
+                runBlocking { WidenedParameterBoundsStore.loadSeed(parameterBoundsDataStore) }
+            }.getOrElse { emptyMap() }
+            val effectiveBounds = SelfWideningParameterBounds(initialWidened = widenedSeed)
+            WidenedParameterBoundsStore.persistForward(scope, parameterBoundsDataStore, effectiveBounds)
+
             return TonexSessionHolder(
                 usbState = usbConnectionManager.state,
                 foregroundActive = UsbConnectionService.foregroundActive,
-                controller = DefaultTonexController(scope = scope, capabilities = CAPABILITIES),
+                controller = DefaultTonexController(scope = scope, capabilities = CAPABILITIES, effectiveBounds = effectiveBounds),
                 aliasStore = DataStorePresetAliasStore(appContext.presetAliasDataStore),
                 scope = scope,
+                effectiveBounds = effectiveBounds,
                 disconnectUsb = usbConnectionManager::disconnect,
             )
         }

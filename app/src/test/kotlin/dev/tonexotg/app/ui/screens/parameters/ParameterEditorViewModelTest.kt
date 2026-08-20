@@ -6,6 +6,7 @@ import dev.tonexotg.protocol.PresetInfo
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexEvent
 import dev.tonexotg.protocol.TonexResult
+import dev.tonexotg.protocol.params.SelfWideningParameterBounds
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -312,6 +313,77 @@ class ParameterEditorViewModelTest {
         vm.onRevertErrorDismissed()
         runCurrent()
         assertNull(vm.uiState.value.revertError)
+        vm.onCleared()
+    }
+
+    // ---- self-widening effective bounds (issue #80) --------------------------------------------
+
+    @Test
+    fun `a genuinely out-of-range SELECT read is displayed as its true raw value, not silently coerced`() = runTest {
+        // MODULATION_CHORUS_TS (index 67), a non-allowlisted unlabeled SELECT with static max 17,
+        // in the default-selected Chorus model's rows (ParameterCatalog.modulationBank defaults
+        // to model 0). A value of 25 here can only mean a decode bug -- the old bug silently
+        // displayed this as a falsely-clamped 17; the fix must show 25 verbatim.
+        val controller = FakeTonexController()
+        controller.seedParameterValue(ParameterId(67), 25f)
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        val modulation = vm.uiState.value.categories.filterIsInstance<CategoryUiState.Banked>().first { it.title == "Modulation" }
+        val row = modulation.modelRows.filterIsInstance<ParameterRow.Stepper>().first { it.id == ParameterId(67) }
+
+        assertEquals("the displayed value must be the true raw read, never silently clamped", 25, row.value)
+        assertTrue("range must widen to keep the stepper consistent with the value it displays", 25 in row.range)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a widened self-widening bounds instance raises both the UI range and the write-clamp for VIR_CABINET_MODEL`() = runTest {
+        val virCabinetModel = ParameterId(25)
+        val effectiveBounds = SelfWideningParameterBounds()
+        effectiveBounds.observeRead(virCabinetModel, 42f) // simulates the same widening a genuine controller read would perform
+
+        val controller = FakeTonexController()
+        controller.seedParameterValue(ParameterId(24), 1f) // CABINET_TYPE = VIR, discloses ids 25-33
+        controller.seedParameterValue(virCabinetModel, 42f) // the same value the (fake) controller "observed"
+        val vm = ParameterEditorViewModel(controller, backgroundScope, effectiveBounds)
+        runCurrent()
+
+        val cabinet = vm.uiState.value.categories.filterIsInstance<CategoryUiState.Banked>().first { it.title == "Cabinet" }
+        val row = cabinet.modelRows.filterIsInstance<ParameterRow.Stepper>().first { it.id == virCabinetModel }
+        assertEquals(42, row.value)
+        assertEquals("range must reach exactly the widened ceiling, not the static max 38", 42, row.range.last)
+
+        // The write-clamp (onStepperChange -> onDiscreteChange) must track the same widened ceiling.
+        vm.onStepperChange(virCabinetModel, 42)
+        runCurrent()
+        assertEquals(listOf(virCabinetModel to 42f), controller.setParameterCalls)
+
+        vm.onStepperChange(virCabinetModel, 43) // one above the widened ceiling
+        runCurrent()
+        assertEquals(
+            "a value above the widened ceiling must still be clamped, exactly at that ceiling",
+            listOf(virCabinetModel to 42f, virCabinetModel to 42f),
+            controller.setParameterCalls,
+        )
+        vm.onCleared()
+    }
+
+    @Test
+    fun `with the default STATIC bounds, VIR_CABINET_MODEL's write-clamp and UI range stay at the static max`() = runTest {
+        val virCabinetModel = ParameterId(25)
+        val controller = FakeTonexController()
+        controller.seedParameterValue(ParameterId(24), 1f) // CABINET_TYPE = VIR
+        val vm = ParameterEditorViewModel(controller, backgroundScope) // no effectiveBounds supplied -> STATIC
+        runCurrent()
+
+        val cabinet = vm.uiState.value.categories.filterIsInstance<CategoryUiState.Banked>().first { it.title == "Cabinet" }
+        val row = cabinet.modelRows.filterIsInstance<ParameterRow.Stepper>().first { it.id == virCabinetModel }
+        assertEquals("unchanged behaviour with the default bounds: range still ends at the static max 38", 38, row.range.last)
+
+        vm.onStepperChange(virCabinetModel, 50)
+        runCurrent()
+        assertEquals(listOf(virCabinetModel to 38f), controller.setParameterCalls)
         vm.onCleared()
     }
 }
