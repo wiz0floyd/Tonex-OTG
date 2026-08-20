@@ -285,9 +285,13 @@ class UsbRequestTonexTransport(
                 )
                 return
             }
-            when (completed) {
-                inRequest -> inDrained = true
-                outRequest -> outDrained = true
+            // Identity comparison (===), not structural -- matching every other demux in this
+            // file (see class KDoc's "one dedicated thread" section). UsbRequest doesn't override
+            // equals() so `==` would behave the same today, but this function's whole job is
+            // identity matching and should say so explicitly rather than rely on that coincidence.
+            when {
+                completed === inRequest -> inDrained = true
+                completed === outRequest -> outDrained = true
                 else -> Unit // a completion for some other/stale request; not ours to track
             }
         }
