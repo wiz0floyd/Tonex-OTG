@@ -2,6 +2,7 @@ package dev.tonexotg.app.ui.screens.parameters
 
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
+import dev.tonexotg.protocol.ParameterScope
 import dev.tonexotg.protocol.ParameterSpec
 import dev.tonexotg.protocol.ParameterType
 import dev.tonexotg.protocol.PresetIndex
@@ -85,7 +86,10 @@ class ParameterEditorViewModel(
     private val _firstWriteWarningVisible = MutableStateFlow(false)
     private val _revertConfirmVisible = MutableStateFlow(false)
     private val _revertError = MutableStateFlow<String?>(null)
-    private val _writeError = MutableStateFlow<String?>(null)
+
+    /** A write failure, tagged with which [ParameterId] it was for — see [handleWriteResult]. */
+    private data class WriteError(val id: ParameterId, val message: String)
+    private val _writeError = MutableStateFlow<WriteError?>(null)
     private val _externalPresetChangeMessage = MutableStateFlow<String?>(null)
 
     private val controllerSnapshot = combine(
@@ -112,7 +116,7 @@ class ParameterEditorViewModel(
         _writeError,
         _externalPresetChangeMessage,
     ) { firstWrite, revertConfirm, revertError, writeError, externalMessage ->
-        DialogState(firstWrite, revertConfirm, revertError, writeError, externalMessage)
+        DialogState(firstWrite, revertConfirm, revertError, writeError?.message, externalMessage)
     }
 
     val uiState: StateFlow<ParameterEditorUiState> =
@@ -155,6 +159,10 @@ class ParameterEditorViewModel(
      */
     fun onRangeDrag(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
+        if (isWriteUnsupported(spec)) {
+            _writeError.value = WriteError(id, UNSUPPORTED_WRITE_MESSAGE)
+            return
+        }
         val clamped = rawValue.coerceIn(spec.min, effectiveBounds.effectiveMax(id))
         _overrides.update { it + (id to clamped) }
         throttler.submit(id, clamped)
@@ -248,6 +256,10 @@ class ParameterEditorViewModel(
 
     private fun onDiscreteChange(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
+        if (isWriteUnsupported(spec)) {
+            _writeError.value = WriteError(id, UNSUPPORTED_WRITE_MESSAGE)
+            return
+        }
         // Effective max (issue #80): the write-clamp must track the same widened ceiling
         // DefaultTonexController's own setParameter validation uses, or a value the UI's widened
         // stepper range permits (buildRow) could never actually reach the pedal — clamped back
@@ -261,6 +273,24 @@ class ParameterEditorViewModel(
     }
 
     /**
+     * True for the 6 `GLOBAL`-scope parameters (everything except `MASTER_VOLUME`, wire indices
+     * 110-115: `BPM`, `INPUT_TRIM`, `CABSIM_BYPASS`, `TEMPO_SOURCE`, `TUNING_REFERENCE`, `BYPASS`)
+     * that [dev.tonexotg.protocol.connection.DefaultTonexController.writeParameterLocked]
+     * *deterministically* rejects — `:protocol` has no write path for them yet (upstream patches
+     * the full state blob at offsets `StateBlobOffsets` deliberately does not model). Mirrors that
+     * function's own routing condition (`scope == PRESET`, else `enumName == "MASTER_VOLUME"`,
+     * else reject) so this never drifts out of sync with it.
+     *
+     * Checked before ever calling [TonexController.setParameter] for these ids: since the
+     * rejection is deterministic, there is nothing to gain from a doomed round trip, and skipping
+     * it also means the user never sees `:protocol`'s raw internal `ProtocolStateViolation` prose
+     * (`"$enumName is a global parameter other than master volume; :protocol has no write path
+     * for it..."`) — [UNSUPPORTED_WRITE_MESSAGE] is shown instead.
+     */
+    private fun isWriteUnsupported(spec: ParameterSpec): Boolean =
+        spec.scope == ParameterScope.GLOBAL && spec.enumName != "MASTER_VOLUME"
+
+    /**
      * Shared by both write paths ([throttler]'s `onResult` and [onDiscreteChange]'s own call):
      * whether [id]'s write just succeeded or failed, its optimistic override is no longer needed.
      * On success [TonexController.parameterValues] now carries this exact value, so the override
@@ -271,13 +301,24 @@ class ParameterEditorViewModel(
      * [TonexController.revertActivePreset] failures — silently reverting the control with no
      * explanation is exactly the "responds visually but doesn't stick, with zero feedback" bug
      * this exists to prevent.
+     *
+     * [_writeError] is tagged with [id] so a later *success* only clears an error that was for
+     * this same parameter — e.g. a throttler-conflated write to Gain that fails, followed by
+     * Gain's own next conflated write succeeding, must clear the dialog; a concurrent, unrelated
+     * failure on Bass must not be wiped out by Gain's success just because they share one error
+     * slot. (Two different parameters failing at the same time still only surfaces the more recent
+     * one's message — an accepted single-dialog-at-a-time limitation, not a per-id queue.)
      */
     private fun handleWriteResult(id: ParameterId, @Suppress("UNUSED_PARAMETER") value: Float, result: TonexResult<Unit>) {
         _overrides.update { it - id }
         when (result) {
-            is TonexResult.Success -> Unit
-            is TonexResult.Failure -> _writeError.value = result.error.message
+            is TonexResult.Success -> _writeError.update { current -> if (current?.id == id) null else current }
+            is TonexResult.Failure -> _writeError.value = WriteError(id, result.error.message)
         }
+    }
+
+    private companion object {
+        const val UNSUPPORTED_WRITE_MESSAGE = "This parameter isn't supported yet."
     }
 
     private fun buildUiState(controllerSnapshot: ControllerSnapshot, localEditState: LocalEditState, dialogState: DialogState): ParameterEditorUiState {
