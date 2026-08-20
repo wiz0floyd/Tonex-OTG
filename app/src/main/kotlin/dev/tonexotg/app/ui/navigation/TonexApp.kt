@@ -1,7 +1,9 @@
 package dev.tonexotg.app.ui.navigation
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -17,6 +19,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -74,9 +77,17 @@ fun TonexApp(
     val parameterEditorViewModel = remember(sessionHolder.controller) {
         ParameterEditorViewModel(sessionHolder.controller, editorScope)
     }
+    // Memoized independently of recomposition so identity is stable for
+    // rememberConnectionStatusViewModel's own remember(controller, onReconnectRequested) key --
+    // an inline lambda literal here would otherwise be a fresh identity on every recomposition of
+    // this composable, silently rebuilding the VM (and its stateIn flow) far more often than the
+    // "constructed once, for the life of the process" invariant this file's own KDoc claims.
+    val onReconnectRequested = remember(sessionHolder, context) {
+        { sessionHolder.requestReconnect(context) }
+    }
     val connectionStatusViewModel = rememberConnectionStatusViewModel(
         controller = sessionHolder.controller,
-        onReconnectRequested = { sessionHolder.requestReconnect(context) },
+        onReconnectRequested = onReconnectRequested,
     )
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -85,6 +96,14 @@ fun TonexApp(
             uiState = connectionUiState,
             onReconnect = connectionStatusViewModel::reconnect,
         )
+
+        // Doc §3.4, consequence 1: a live USB attachment with no foreground-service protection
+        // must surface as a visible reason, not just silently withhold the connection. The
+        // banner is additive chrome in the shell, not a new ConnectionUiState variant -- widening
+        // that sealed type would drag ConnectionStatusScreenTest's fully-enumerated variant
+        // coverage in for no benefit (see doc §3.4 / advisor note on this story).
+        val blockedReason by sessionHolder.blockedReason.collectAsState()
+        blockedReason?.let { reason -> BlockedReasonBanner(reason = reason) }
 
         NavHost(
             navController = navController,
@@ -109,6 +128,25 @@ fun TonexApp(
             }
         }
     }
+}
+
+/**
+ * Doc §3.4, consequence 1: a live USB attachment with no foreground-service protection produces a
+ * non-null [TonexSessionHolder.blockedReason] instead of opening a protocol session -- this is
+ * the only place that reason is rendered. Sits below [ConnectionStatusBar] in the shell, visible
+ * on every route, same as that bar.
+ */
+@Composable
+private fun BlockedReasonBanner(reason: String, modifier: Modifier = Modifier) {
+    Text(
+        text = reason,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    )
 }
 
 /**
