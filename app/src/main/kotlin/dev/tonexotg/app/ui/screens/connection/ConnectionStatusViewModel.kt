@@ -12,9 +12,8 @@ import kotlinx.coroutines.flow.stateIn
 
 /**
  * Screen-agnostic connection-status state holder, built against [TonexController]'s interface
- * only — per this story's scope, S11's real Android USB transport doesn't exist yet, so this
- * class never constructs a [TonexTransport] itself; it is handed a [transportFactory] that
- * knows how to produce one when a real transport implementation lands.
+ * only. Opening a session is not this class's job — see [onReconnectRequested] below for how
+ * reconnection is actually driven (S23, issue #74).
  *
  * Deliberately a plain class, not an `androidx.lifecycle.ViewModel` subclass: `:app` has no
  * `lifecycle-viewmodel-compose` dependency yet (only `lifecycle-runtime-ktx`), and adding one

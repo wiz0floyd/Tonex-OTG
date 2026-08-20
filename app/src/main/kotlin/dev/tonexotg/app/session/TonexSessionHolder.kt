@@ -46,6 +46,37 @@ import kotlinx.coroutines.sync.withLock
  * "fail loud," per the house philosophy, rather than silently bypassing issue #18's product
  * decision that a pedal session never runs unprotected.
  *
+ * ## Recovering from a controller-side failure, and FGS loss mid-session (PR #75 review, blocker
+ * B + open question A)
+ * [observe] also folds [TonexController.connectionState] into its `combine` -- not just
+ * [usbState]/[foregroundActive]. Two cases that live *entirely* on the controller side (or on the
+ * service side, invisible to [UsbConnectionState]) used to be unrecoverable without a physical
+ * unplug/replug or an app kill:
+ *
+ * 1. **[ConnectionState.Error] while [UsbConnectionState.Connected].** [DefaultTonexController]
+ *    already closes its transport on the way into `Error` (see that class's `teardown`/`orFinish`),
+ *    but [UsbConnectionManager]'s own `_state` is untouched by that -- it only ever moves off
+ *    [UsbConnectionState.Connected] via attach/detach/[UsbConnectionManager.disconnect]. Left
+ *    alone, [UsbConnectionDecisions.shouldConnect] sees the *same* `deviceId` still "connected" and
+ *    refuses every future attach/reconnect, so tapping Reconnect was a permanent no-op.
+ * 2. **[UsbConnectionService.foregroundActive] dropping to `false` while the controller is
+ *    already `Ready`.** The old code only set [blockedReason] here and left the controller running
+ *    unprotected -- issue #18's FGS/wakelock guarantee silently gone mid-session, with the banner
+ *    contradicting the still-live parameter editor.
+ *
+ * Both are handled the same way: [observe] calls [disconnectUsb] (production:
+ * [UsbConnectionManager.disconnect]), not just [TonexController.disconnect]. This is deliberate,
+ * not a shortcut -- calling only `controller.disconnect()` would leave [UsbConnectionManager]
+ * still reporting [UsbConnectionState.Connected] over an already-closed transport, so the *next*
+ * reconnect would call [TonexController.connect] against dead I/O and land right back in `Error`
+ * (see PR #75 review for the exact trace). Tearing down through the manager instead makes its
+ * `_state` genuinely flip to [UsbConnectionState.Disconnected]; the existing `Disconnected` branch
+ * below then calls [TonexController.disconnect] (safe from any state, including `Error` --
+ * see that method's own KDoc), resetting the controller to `Idle`. From there,
+ * [UsbConnectionDecisions.shouldConnect] correctly returns `true` for the same still-attached
+ * `deviceId`, so [requestReconnect]'s existing `connectToAttachedDeviceIfPresent()` call reopens a
+ * *fresh* transport -- the normal reattach path, not a bespoke retry.
+ *
  * ## `FirmwareCapabilities` (doc §5, escalated and resolved)
  * [CAPABILITIES] ships `supportsSingleParameterWrite = true`. This reflects an already-observed
  * fact, not a new hardware assumption: issue #25's hardware probe log reports "Per-parameter
@@ -72,6 +103,14 @@ class TonexSessionHolder internal constructor(
     val controller: TonexController,
     val aliasStore: PresetAliasStore,
     private val scope: CoroutineScope,
+    /**
+     * Tears down [UsbConnectionManager]'s own state (production:
+     * [UsbConnectionManager.disconnect]) -- see class KDoc, "Recovering from a controller-side
+     * failure, and FGS loss mid-session." A plain fire-and-forget callback, not the manager type
+     * itself, so `TonexSessionHolderTest` can assert on it without constructing a real
+     * [UsbConnectionManager] (which needs a `Context`).
+     */
+    private val disconnectUsb: () -> Unit,
 ) {
 
     private val mutex = Mutex()
@@ -84,19 +123,49 @@ class TonexSessionHolder internal constructor(
     }
 
     private suspend fun observe() {
-        combine(usbState, foregroundActive) { usb, fgs -> usb to fgs }.collect { (usb, fgs) ->
+        combine(
+            usbState,
+            foregroundActive,
+            controller.connectionState,
+        ) { usb, fgs, controllerState -> Triple(usb, fgs, controllerState) }.collect { (usb, fgs, controllerState) ->
             mutex.withLock {
                 when (usb) {
-                    is UsbConnectionState.Connected -> {
-                        if (fgs) {
+                    is UsbConnectionState.Connected -> when {
+                        controllerState is ConnectionState.Error -> {
+                            // See class KDoc, "Recovering from a controller-side failure": the
+                            // controller already closed its own transport on the way into Error;
+                            // tear down the *manager's* state too so a future attach/reconnect for
+                            // this same deviceId is not permanently refused by
+                            // UsbConnectionDecisions.shouldConnect.
                             _blockedReason.value = null
-                            if (controller.connectionState.value.let { it is ConnectionState.Idle || it is ConnectionState.Error }) {
+                            disconnectUsb()
+                        }
+
+                        !fgs && controllerState !is ConnectionState.Idle -> {
+                            // See class KDoc, "FGS loss mid-session": the controller has actually
+                            // touched this transport (it's Ready, or mid-handshake) -- do not
+                            // merely note the reason and leave it running unprotected. Tear down
+                            // through the manager here too, for the same reason as the Error case
+                            // above: leaving _state at Connected over a transport the controller
+                            // may still be using/about to close would wedge the next reconnect the
+                            // same way.
+                            _blockedReason.value = BLOCKED_NO_FOREGROUND_SERVICE
+                            disconnectUsb()
+                        }
+
+                        !fgs -> {
+                            // The controller is still Idle -- it never touched this transport, so
+                            // there is nothing to unwind. Just block; once the service (re)starts
+                            // and this flips fgs back to true, the `else` branch below connects
+                            // normally.
+                            _blockedReason.value = BLOCKED_NO_FOREGROUND_SERVICE
+                        }
+
+                        else -> {
+                            _blockedReason.value = null
+                            if (controllerState is ConnectionState.Idle) {
                                 controller.connect(usb.transport)
                             }
-                        } else {
-                            _blockedReason.value = BLOCKED_NO_FOREGROUND_SERVICE
-                            // Do not connect. See class KDoc and doc §3.4: a live USB attachment
-                            // with no foreground-service protection must never reach the pedal.
                         }
                     }
 
@@ -153,12 +222,14 @@ class TonexSessionHolder internal constructor(
 
         private fun build(appContext: Context): TonexSessionHolder {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val usbConnectionManager = UsbConnectionManager.getInstance(appContext)
             return TonexSessionHolder(
-                usbState = UsbConnectionManager.getInstance(appContext).state,
+                usbState = usbConnectionManager.state,
                 foregroundActive = UsbConnectionService.foregroundActive,
                 controller = DefaultTonexController(scope = scope, capabilities = CAPABILITIES),
                 aliasStore = DataStorePresetAliasStore(appContext.presetAliasDataStore),
                 scope = scope,
+                disconnectUsb = usbConnectionManager::disconnect,
             )
         }
     }

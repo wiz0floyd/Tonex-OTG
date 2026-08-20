@@ -54,8 +54,8 @@ import dev.tonexotg.protocol.ParameterId
 @Composable
 fun ParameterEditorScreen(
     viewModel: ParameterEditorViewModel,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
-    onBack: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }

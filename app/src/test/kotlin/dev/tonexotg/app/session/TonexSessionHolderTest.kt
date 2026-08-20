@@ -39,14 +39,15 @@ class TonexSessionHolderTest {
         usbState: MutableStateFlow<UsbConnectionState>,
         foregroundActive: MutableStateFlow<Boolean>,
         controller: FakeTonexController,
-        dispatcher: kotlinx.coroutines.CoroutineDispatcher,
         scope: kotlinx.coroutines.CoroutineScope,
+        disconnectUsb: FakeDisconnectUsb = FakeDisconnectUsb(usbState),
     ): TonexSessionHolder = TonexSessionHolder(
         usbState = usbState,
         foregroundActive = foregroundActive,
         controller = controller,
         aliasStore = FakePresetAliasStore(),
         scope = scope,
+        disconnectUsb = disconnectUsb,
     )
 
     @Test
@@ -56,7 +57,7 @@ class TonexSessionHolderTest {
         val foregroundActive = MutableStateFlow(false)
         val controller = FakeTonexController()
         val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
-        buildHolder(usbState, foregroundActive, controller, dispatcher, scope)
+        buildHolder(usbState, foregroundActive, controller, scope)
         advanceUntilIdle()
 
         foregroundActive.value = true
@@ -74,7 +75,7 @@ class TonexSessionHolderTest {
         val foregroundActive = MutableStateFlow(false)
         val controller = FakeTonexController()
         val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
-        val holder = buildHolder(usbState, foregroundActive, controller, dispatcher, scope)
+        val holder = buildHolder(usbState, foregroundActive, controller, scope)
         advanceUntilIdle()
 
         usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
@@ -92,7 +93,7 @@ class TonexSessionHolderTest {
         val foregroundActive = MutableStateFlow(true)
         val controller = FakeTonexController()
         val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
-        val holder = buildHolder(usbState, foregroundActive, controller, dispatcher, scope)
+        val holder = buildHolder(usbState, foregroundActive, controller, scope)
         advanceUntilIdle()
 
         usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
@@ -115,7 +116,8 @@ class TonexSessionHolderTest {
         val foregroundActive = MutableStateFlow(true)
         val controller = FakeTonexController()
         val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
-        buildHolder(usbState, foregroundActive, controller, dispatcher, scope)
+        val disconnectUsb = FakeDisconnectUsb(usbState)
+        buildHolder(usbState, foregroundActive, controller, scope, disconnectUsb)
         advanceUntilIdle()
 
         usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
@@ -123,16 +125,113 @@ class TonexSessionHolderTest {
         assertEquals(1, controller.connectCallCount)
         controller.setConnectionState(ConnectionState.Ready)
 
-        // A second Connected emission for the same attachment (e.g. foregroundActive toggling
-        // false-then-true again with the USB state unchanged) must not re-enter connect() while
-        // already Ready.
-        foregroundActive.value = false
-        advanceUntilIdle()
-        foregroundActive.value = true
+        // A second Connected emission for the same attachment while the controller is already
+        // Ready and the FGS gate stays up (e.g. some *other* unrelated flow value briefly
+        // recomputing) must not re-enter connect() while already Ready, and must not tear
+        // anything down -- there was no gate loss and no controller failure here.
+        foregroundActive.value = true // no-op re-assignment; StateFlow conflates, asserting intent
         advanceUntilIdle()
 
         assertEquals(1, controller.connectCallCount)
+        assertEquals(0, disconnectUsb.callCount)
         scope.cancel()
+    }
+
+    @Test
+    fun reconnectAfterControllerError_reopensOnceUsbStateReflectsDisconnected() = runTest {
+        // PR #75 review, blocker B: a controller-side connect failure (handshake timeout, decode
+        // error) used to leave UsbConnectionManager's own state at Connected forever, so
+        // UsbConnectionDecisions.shouldConnect() refused every later attach/reconnect for the same
+        // deviceId and the Reconnect button was a permanent dead end. The fix: TonexSessionHolder
+        // must react to ConnectionState.Error by tearing down through disconnectUsb() (the
+        // production UsbConnectionManager.disconnect()), not just leave a note in blockedReason.
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val usbState = MutableStateFlow<UsbConnectionState>(UsbConnectionState.Disconnected)
+        val foregroundActive = MutableStateFlow(true)
+        val controller = FakeTonexController()
+        val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
+        val disconnectUsb = FakeDisconnectUsb(usbState)
+        buildHolder(usbState, foregroundActive, controller, scope, disconnectUsb)
+        advanceUntilIdle()
+
+        controller.failNextConnect = true
+        usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
+        advanceUntilIdle()
+
+        assertEquals(1, controller.connectCallCount)
+        // Note: we can't observe the transient ConnectionState.Error itself here -- under
+        // UnconfinedTestDispatcher, advanceUntilIdle() runs the whole cascading reaction
+        // (Error -> disconnectUsb() -> usbState=Disconnected -> controller.disconnect() -> Idle)
+        // to completion before returning control to this test. The assertions below confirm the
+        // cascade actually happened, which is the thing that matters for recoverability.
+        // The holder must have torn the manager's state down itself -- this is what actually
+        // unblocks a future shouldConnect() for the same deviceId.
+        assertEquals(1, disconnectUsb.callCount)
+        assertEquals(UsbConnectionState.Disconnected, usbState.value)
+        // ...and the controller must have followed the manager back down to Idle (the existing
+        // Disconnected branch's controller.disconnect() call), not stayed wedged in Error.
+        assertEquals(ConnectionState.Idle, controller.connectionState.value)
+
+        // The equivalent of the user tapping Reconnect and the service reopening the still-
+        // attached pedal: a fresh Connected emission for the same deviceId.
+        usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
+        advanceUntilIdle()
+
+        assertEquals(2, controller.connectCallCount)
+        assertEquals(ConnectionState.Ready, controller.connectionState.value)
+        scope.cancel()
+    }
+
+    @Test
+    fun foregroundServiceLostWhileReady_tearsDownThroughTheManagerNotJustTheController() = runTest {
+        // PR #75 review, open question A: a service death (degradeAfterFailedStartForeground's
+        // stopSelf(), or the OS reclaiming the process) mid-session must not leave the manager
+        // reporting Connected over a transport the controller is about to close out from under it
+        // -- that's exactly the naive fix the review warned against (controller.disconnect() alone
+        // would close the transport while UsbConnectionManager._state still says Connected,
+        // wedging the *next* reconnect the same way as blocker B).
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        val usbState = MutableStateFlow<UsbConnectionState>(UsbConnectionState.Disconnected)
+        val foregroundActive = MutableStateFlow(true)
+        val controller = FakeTonexController()
+        val scope = kotlinx.coroutines.CoroutineScope(dispatcher)
+        val disconnectUsb = FakeDisconnectUsb(usbState)
+        buildHolder(usbState, foregroundActive, controller, scope, disconnectUsb)
+        advanceUntilIdle()
+
+        usbState.value = UsbConnectionState.Connected(1, "ToneX One", fakeTransport())
+        advanceUntilIdle()
+        assertEquals(1, controller.connectCallCount)
+        assertEquals(ConnectionState.Ready, controller.connectionState.value)
+
+        // The service dies mid-session: foregroundActive flips false with the pedal still
+        // physically attached (usbState untouched by this -- UsbConnectionState knows nothing
+        // about the service's lifecycle).
+        foregroundActive.value = false
+        advanceUntilIdle()
+
+        assertEquals(1, disconnectUsb.callCount)
+        assertEquals(UsbConnectionState.Disconnected, usbState.value)
+        assertEquals(1, controller.disconnectCallCount)
+        assertEquals(ConnectionState.Idle, controller.connectionState.value)
+    }
+}
+
+/**
+ * Fakes [UsbConnectionManager.disconnect]'s one externally-visible effect (flip [usbState] to
+ * [UsbConnectionState.Disconnected]) without constructing a real [UsbConnectionManager], which
+ * needs a `Context`. Counts invocations so tests can assert the holder actually called it, per
+ * the PR #75 review's "tear down through the manager, not just the controller" requirement.
+ */
+private class FakeDisconnectUsb(
+    private val usbState: MutableStateFlow<UsbConnectionState>,
+) : () -> Unit {
+    var callCount: Int = 0
+        private set
+
+    override fun invoke() {
+        callCount++
+        usbState.value = UsbConnectionState.Disconnected
     }
 }
 
@@ -174,17 +273,38 @@ private class FakeTonexController(
     var disconnectCallCount: Int = 0
         private set
 
+    /**
+     * When `true`, the next [connect] call lands in [ConnectionState.Error] instead of
+     * [ConnectionState.Ready] and resets itself back to `false` -- a minimal "fail on next
+     * connect" seam (PR #75 review nit) for exercising [TonexSessionHolder]'s controller-side
+     * failure recovery without a full suspending/coroutine-controlled fake.
+     */
+    var failNextConnect: Boolean = false
+
     fun setConnectionState(state: ConnectionState) {
         _connectionState.value = state
     }
 
     override suspend fun connect(transport: TonexTransport): TonexResult<Unit> {
         connectCallCount++
-        _connectionState.value = ConnectionState.Ready
-        return TonexResult.Success(Unit)
+        return if (failNextConnect) {
+            failNextConnect = false
+            val error = TonexError.Timeout(operation = "hello", timeoutMillis = 1_000L)
+            _connectionState.value = ConnectionState.Error(error)
+            TonexResult.Failure(error)
+        } else {
+            _connectionState.value = ConnectionState.Ready
+            TonexResult.Success(Unit)
+        }
     }
 
     override suspend fun disconnect() {
+        // Mirrors DefaultTonexController.disconnect()'s own early-return: "safe to call from any
+        // state" is documented as a no-op once already Idle, not an unconditional re-publish. The
+        // holder's combine now includes connectionState itself, so without this guard a fake that
+        // recounts/republishes on every call would make TonexSessionHolder's Disconnected/Failed
+        // branches (which call this unconditionally) loop or over-count.
+        if (_connectionState.value is ConnectionState.Idle) return
         disconnectCallCount++
         _connectionState.value = ConnectionState.Idle
     }

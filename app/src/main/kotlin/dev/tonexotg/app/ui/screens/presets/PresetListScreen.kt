@@ -48,8 +48,8 @@ import dev.tonexotg.protocol.TonexError
 @Composable
 fun PresetListScreen(
     viewModel: PresetListViewModel,
+    onPresetOpened: (PresetIndex) -> Unit,
     modifier: Modifier = Modifier,
-    onPresetOpened: (PresetIndex) -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var editingIndex by rememberSaveable { mutableStateOf<Int?>(null) }
