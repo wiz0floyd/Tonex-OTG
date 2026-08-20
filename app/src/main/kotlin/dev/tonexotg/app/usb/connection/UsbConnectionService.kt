@@ -26,6 +26,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
@@ -248,6 +251,8 @@ class UsbConnectionService : Service() {
             return START_NOT_STICKY
         }
 
+        _foregroundActive.value = true
+
         if (!hasStartedObserving) {
             hasStartedObserving = true
             // Idempotent/harmless via the production getInstance() path (already started -- see
@@ -283,6 +288,7 @@ class UsbConnectionService : Service() {
 
     override fun onDestroy() {
         // Point 3: never manager.stop() or manager.disconnect() here -- see class KDoc.
+        _foregroundActive.value = false
         observeJob?.cancel()
         serviceScope.cancel()
         releaseWakeLockIfHeld()
@@ -338,6 +344,7 @@ class UsbConnectionService : Service() {
     }
 
     private fun degradeAfterFailedStartForeground(e: Exception) {
+        _foregroundActive.value = false
         Log.e(
             TAG,
             "startForeground(FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) failed -- the " +
@@ -486,6 +493,26 @@ class UsbConnectionService : Service() {
         private const val CHANNEL_ID = "usb_connection"
         private const val NOTIFICATION_ID = 1
         private const val WAKE_LOCK_TAG = "TonexOTG:UsbConnectionWakeLock"
+
+        private val _foregroundActive = MutableStateFlow(false)
+
+        /**
+         * `true` exactly while this service holds an active `startForeground()` promotion (S23,
+         * issue #74, doc `docs/architecture/s23-ui-wiring.md` §3.4) -- the gate
+         * [dev.tonexotg.app.session.TonexSessionHolder] uses to decide whether a live
+         * [UsbConnectionState.Connected] transport is safe to hand to a [TonexUsbTransport]-backed
+         * controller session. Companion-scoped (not instance-scoped) because the holder must be
+         * able to observe it without holding a reference to a specific [Service] instance, which
+         * Android does not guarantee it a stable handle to.
+         *
+         * Set `true` only after [startForegroundSafely] actually returns `true`; set `false` in
+         * [onDestroy] and in [degradeAfterFailedStartForeground]. Note: if the OS reclaims this
+         * service process without running [onDestroy] (e.g. a low-memory kill), this flag can stay
+         * stale at `true` until the process is gone entirely -- an accepted fail-open gap, not
+         * masked here; see this class's KDoc and issue #18 for the broader FGS-lifetime caveats
+         * this already lives with.
+         */
+        val foregroundActive: StateFlow<Boolean> = _foregroundActive.asStateFlow()
 
         /**
          * Deliberately distinct from [UsbTonexDeviceOpener]'s own `ACTION_USB_PERMISSION` -- see
