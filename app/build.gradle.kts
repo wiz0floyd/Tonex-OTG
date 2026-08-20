@@ -97,6 +97,10 @@ dependencies {
     implementation(libs.androidx.material3)
     debugImplementation(libs.androidx.ui.tooling)
 
+    // S23 (issue #74): the real app's navigation graph (preset list <-> parameter editor <->
+    // about). See docs/architecture/s23-ui-wiring.md for the route graph this backs.
+    implementation(libs.androidx.navigation.compose)
+
     // S14 (issue #19): local preset-alias store, DataStore-backed.
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.core)

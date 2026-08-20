@@ -48,6 +48,7 @@ import dev.tonexotg.protocol.TonexError
 @Composable
 fun PresetListScreen(
     viewModel: PresetListViewModel,
+    onPresetOpened: (PresetIndex) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -55,7 +56,13 @@ fun PresetListScreen(
 
     PresetListContent(
         uiState = uiState,
-        onPresetClick = viewModel::selectPreset,
+        onPresetClick = { index ->
+            // S23 (issue #74; docs/architecture/s23-ui-wiring.md §2.2): select and navigate fire
+            // together, unconditionally, on the same tap -- do not await the write result before
+            // navigating.
+            viewModel.selectPreset(index)
+            onPresetOpened(index)
+        },
         onEditAliasRequested = { index -> editingIndex = index.value },
         modifier = modifier,
     )

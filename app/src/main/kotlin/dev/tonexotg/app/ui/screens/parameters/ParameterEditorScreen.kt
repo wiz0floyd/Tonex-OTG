@@ -52,7 +52,11 @@ import dev.tonexotg.protocol.ParameterId
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ParameterEditorScreen(viewModel: ParameterEditorViewModel, modifier: Modifier = Modifier) {
+fun ParameterEditorScreen(
+    viewModel: ParameterEditorViewModel,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -73,6 +77,18 @@ fun ParameterEditorScreen(viewModel: ParameterEditorViewModel, modifier: Modifie
                         text = uiState.presetName.ifBlank { "Parameter Editor" },
                         style = MaterialTheme.typography.titleLarge,
                     )
+                },
+                navigationIcon = {
+                    // TextButton, not an arrow-icon IconButton: this project has no
+                    // material-icons-extended dependency and no other Icons.* usage anywhere in
+                    // `:app` (S23, issue #74) -- a text affordance sidesteps that question
+                    // entirely rather than adding a new dependency for one glyph.
+                    TextButton(
+                        onClick = onBack,
+                        modifier = Modifier.testTag("parameterEditor.backButton"),
+                    ) {
+                        Text("Back")
+                    }
                 },
             )
         },

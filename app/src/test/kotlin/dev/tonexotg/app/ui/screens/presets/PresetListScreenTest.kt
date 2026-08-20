@@ -52,7 +52,7 @@ class PresetListScreenTest {
                     controller = controller,
                     aliasStore = DataStorePresetAliasStore(InMemoryPreferencesDataStore()),
                 )
-                PresetListScreen(viewModel = viewModel)
+                PresetListScreen(viewModel = viewModel, onPresetOpened = {})
             }
         }
         return viewModel

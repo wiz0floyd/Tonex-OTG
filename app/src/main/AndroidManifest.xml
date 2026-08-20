@@ -36,9 +36,11 @@
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <!--
-          Placeholder scaffold only (S10 / issue #15). Real screens land in S15-S19 once the
-          design gate is signed off; this Activity exists solely to prove the AGP/Compose
-          wiring assembles and runs.
+          The real entry point (S23, issue #74). Hosts TonexApp's NavHost (preset list, parameter
+          editor, about) inside TonexTheme, starts UsbConnectionService from onStart, and never
+          opens a pedal session itself; see MainActivity's own KDoc and
+          docs/architecture/s23-ui-wiring.md §3.4/§3.5 for why every connection path goes through
+          that service instead.
 
           android:taskAffinity is explicit (and distinct from ProbeActivity's below) because both
           activities declare their own MAIN/LAUNCHER intent-filter, giving each its own icon in

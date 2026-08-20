@@ -19,7 +19,6 @@ import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.TonexError
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -216,13 +215,21 @@ class ConnectionStatusScreenTest {
     }
 
     @Test
-    fun reconnectButton_wiredThroughTheRealViewModel_callsControllerConnectWithAFreshTransport() {
+    fun reconnectButton_wiredThroughTheRealViewModel_invokesTheReconnectCallback() {
+        // S23 (issue #74; docs/architecture/s23-ui-wiring.md §3.6): ConnectionStatusViewModel no
+        // longer opens a protocol session itself -- controller.connect(transportFactory()) from
+        // the UI layer bypassed the foreground-service gate entirely. reconnect() now just
+        // invokes an injected callback; this test asserts that callback fires, replacing the
+        // old assertion that pinned the now-removed direct-connect behavior.
         val fake = FakeTonexController(initialState = ConnectionState.Idle)
-        val transport = NoOpTonexTransport()
+        var reconnectRequests = 0
 
         composeTestRule.setContent {
             TonexTheme {
-                val viewModel = rememberConnectionStatusViewModel(controller = fake, transportFactory = { transport })
+                val viewModel = rememberConnectionStatusViewModel(
+                    controller = fake,
+                    onReconnectRequested = { reconnectRequests++ },
+                )
                 val uiState by viewModel.uiState.collectAsState()
                 ConnectionStatusBar(uiState = uiState, onReconnect = viewModel::reconnect)
             }
@@ -231,9 +238,9 @@ class ConnectionStatusScreenTest {
         composeTestRule.onNodeWithText("Reconnect").performClick()
         composeTestRule.waitForIdle()
 
-        assertEquals(1, fake.connectCallCount)
-        assertEquals(1, fake.disconnectCallCount)
-        assertSame(transport, fake.lastConnectTransport)
+        assertEquals(1, reconnectRequests)
+        assertEquals(0, fake.connectCallCount)
+        assertEquals(0, fake.disconnectCallCount)
     }
 
     // ---- Disconnect mid-edit: content survives, user's place is not lost ----------------------

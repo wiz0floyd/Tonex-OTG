@@ -59,7 +59,7 @@ class ParameterEditorScreenTest {
 
         composeTestRule.setContent {
             TonexTheme {
-                ParameterEditorScreen(viewModel)
+                ParameterEditorScreen(viewModel, onBack = {})
             }
         }
 
@@ -86,7 +86,7 @@ class ParameterEditorScreenTest {
 
         composeTestRule.setContent {
             TonexTheme {
-                ParameterEditorScreen(viewModel)
+                ParameterEditorScreen(viewModel, onBack = {})
             }
         }
 
@@ -107,7 +107,7 @@ class ParameterEditorScreenTest {
 
         composeTestRule.setContent {
             TonexTheme {
-                ParameterEditorScreen(viewModel)
+                ParameterEditorScreen(viewModel, onBack = {})
             }
         }
 
