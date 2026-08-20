@@ -75,7 +75,7 @@ fun TonexApp(
         aliasStore = sessionHolder.aliasStore,
     )
     val parameterEditorViewModel = remember(sessionHolder.controller) {
-        ParameterEditorViewModel(sessionHolder.controller, editorScope)
+        ParameterEditorViewModel(sessionHolder.controller, editorScope, sessionHolder.effectiveBounds)
     }
     // Memoized independently of recomposition so identity is stable for
     // rememberConnectionStatusViewModel's own remember(controller, onReconnectRequested) key --
