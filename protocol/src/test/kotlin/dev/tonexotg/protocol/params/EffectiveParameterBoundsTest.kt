@@ -163,4 +163,114 @@ class EffectiveParameterBoundsTest {
         assert(n <= effectiveMax) { "N must be permitted" }
         assert(n + 1f > effectiveMax) { "N+1 must still be rejected" }
     }
+
+    // ---- finiteness guard (Opus review, PR #81): NaN/Infinity/huge-finite reads never widen anything ----
+    // A naive `if (value <= staticMax) return` guard is not enough: comparisons against NaN are
+    // always false in IEEE 754, so a NaN read would fall through, get stored as the "ceiling," and
+    // then silently defeat every downstream `value > effectiveMax` check and every
+    // `coerceIn(min, effectiveMax)` clamp that consults it (both comparisons are also false
+    // against a NaN bound). This must be caught here, at the source, not merely downstream.
+
+    @Test
+    fun `observeRead rejects NaN outright - it must never become the ceiling`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, Float.NaN)
+
+        assertEquals(
+            virCabinetModel.max,
+            bounds.effectiveMax(virCabinetModel.id),
+            "a NaN read must leave the ceiling exactly at the static max, not become the ceiling itself",
+        )
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `observeRead rejects positive Infinity outright`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, Float.POSITIVE_INFINITY)
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `observeRead rejects negative Infinity outright`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, Float.NEGATIVE_INFINITY)
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `observeRead rejects an implausibly huge but technically finite value`() {
+        // isFinite() alone does not bound magnitude -- this is a deliberate design choice
+        // documented on observeRead's KDoc, not a gap: an offset-drift-produced 1e30 is exactly
+        // as untrustworthy as NaN/Infinity as a "widened ceiling," so this asserts the current,
+        // intentional behavior (accepted, since it IS finite) so a future change to add a
+        // magnitude cap is a deliberate decision, not an accidental regression either way.
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, 1e30f)
+
+        assertEquals(
+            1e30f,
+            bounds.effectiveMax(virCabinetModel.id),
+            "1e30 is finite, so it IS accepted by the current isFinite()-only guard -- see this test's own KDoc",
+        )
+    }
+
+    @Test
+    fun `after a rejected NaN read, a subsequent genuine finite read still widens normally`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(virCabinetModel.id, Float.NaN) // rejected
+        bounds.observeRead(virCabinetModel.id, 42f) // genuine
+
+        assertEquals(42f, bounds.effectiveMax(virCabinetModel.id))
+    }
+
+    @Test
+    fun `NaN in a non-allowlisted id's read is also rejected - both guards apply independently`() {
+        val bounds = SelfWideningParameterBounds()
+
+        bounds.observeRead(cabinetType.id, Float.NaN)
+
+        assertEquals(cabinetType.max, bounds.effectiveMax(cabinetType.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    // ---- finiteness guard applies to construction-time seeding too (Opus review, PR #81) ----
+    // Same rationale as observeRead: a seed value is not more trustworthy than a live read just
+    // because it came from :app's DataStore -- a corrupted prefs file or a NaN that somehow
+    // reached disk before this fix must not resurrect the write-path bypass on load.
+
+    @Test
+    fun `seeding with NaN is silently ignored, not stored as the ceiling`() {
+        val bounds = SelfWideningParameterBounds(initialWidened = mapOf(virCabinetModel.id to Float.NaN))
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `seeding with Infinity is silently ignored, not stored as the ceiling`() {
+        val bounds = SelfWideningParameterBounds(initialWidened = mapOf(virCabinetModel.id to Float.POSITIVE_INFINITY))
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id))
+        assertEquals(emptyMap(), bounds.widenedMaxima.value)
+    }
+
+    @Test
+    fun `seeding one id with NaN does not prevent a different id from seeding normally`() {
+        val bounds = SelfWideningParameterBounds(
+            initialWidened = mapOf(virCabinetModel.id to Float.NaN, virMic1.id to 5f),
+        )
+
+        assertEquals(virCabinetModel.max, bounds.effectiveMax(virCabinetModel.id), "the NaN entry must not poison the map construction")
+        assertEquals(5f, bounds.effectiveMax(virMic1.id))
+    }
 }

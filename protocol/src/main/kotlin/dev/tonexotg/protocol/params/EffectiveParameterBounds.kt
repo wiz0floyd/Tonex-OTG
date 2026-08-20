@@ -64,7 +64,7 @@ fun interface EffectiveParameterBounds {
  * Calling [observeRead] for a non-allowlisted id is a harmless no-op: this class does not widen
  * anything outside [ParameterRegistry.SELF_WIDENING_PARAMETER_IDS], by design (CLAUDE.md's
  * "Review rigor" section — a blanket "any out-of-range read widens its bound" mechanism would
- * swallow real state-blob decode bugs on the other ~113 parameters instead of surfacing
+ * swallow real state-blob decode bugs on the other ~106 preset parameters instead of surfacing
  * [dev.tonexotg.protocol.TonexError.ParameterValueOutOfRange] loudly).
  *
  * @param initialWidened a seed map of already-observed values (typically loaded from `:app`'s
@@ -81,6 +81,11 @@ class SelfWideningParameterBounds(
         initialWidened
             .filterKeys { it.index in ParameterRegistry.SELF_WIDENING_PARAMETER_IDS }
             .mapNotNull { (id, value) ->
+                // Same finiteness guard as observeRead (see that function's KDoc) — a seed value
+                // is not a "genuine pedal read" this class trusts more than a live one; a stray
+                // NaN/Infinity that somehow reached a persisted DataStore entry (or a corrupted
+                // prefs file) must not resurrect the write-path bypass this guard exists to close.
+                if (!value.isFinite()) return@mapNotNull null
                 val staticMax = ParameterRegistry.byIndex(id.index)?.max ?: return@mapNotNull null
                 if (value > staticMax) id to value else null
             }
@@ -104,11 +109,28 @@ class SelfWideningParameterBounds(
 
     /**
      * Records a genuine pedal read of [value] for [id]. A no-op unless [id] is in
-     * [ParameterRegistry.SELF_WIDENING_PARAMETER_IDS] and [value] exceeds the current effective
-     * max — the ceiling only ever grows, never shrinks, and never for a non-allowlisted id.
+     * [ParameterRegistry.SELF_WIDENING_PARAMETER_IDS], [value] is finite, and [value] exceeds the
+     * current effective max — the ceiling only ever grows, never shrinks, and never for a
+     * non-allowlisted id.
+     *
+     * ## Finiteness guard (Opus review, PR #81)
+     * `NaN`/`Infinity` must be rejected outright, not merely fail to widen. Both `<=` and `>`
+     * comparisons against `NaN` are always `false` in IEEE 754 (and by extension Kotlin `Float`),
+     * so the naive `if (value <= staticMax) return` guard alone would let a `NaN` [value] fall
+     * through and get stored as the ceiling — [effectiveMax] would then return `NaN`, which
+     * silently defeats *every* downstream upper-bound check that consults it:
+     * `DefaultTonexController.writeParameterLocked`'s `value > effectiveMax` is `false` for any
+     * `value` when `effectiveMax` is `NaN` (upper-bound validation fully bypassed), and
+     * `ParameterWriteMessage.encode`'s `value.coerceIn(spec.min, effectiveMax)` returns the value
+     * unmodified — `coerceIn`'s own `minimumValue > maximumValue` guard is likewise `false`
+     * against a `NaN` `maximumValue`. This is not theoretical: `Varint`'s float decode has no
+     * downstream finiteness check, so a state-blob offset drift (the same failure class as S5/S8)
+     * on one of the three allowlisted ids would produce exactly this. `isFinite()` also rejects a
+     * finite-but-implausibly-huge value (e.g. `1e30`) reaching the wire as a "widened ceiling."
      */
     fun observeRead(id: ParameterId, value: Float) {
         if (id.index !in ParameterRegistry.SELF_WIDENING_PARAMETER_IDS) return
+        if (!value.isFinite()) return
         val staticMax = ParameterRegistry.byIndex(id.index)?.max ?: return
         if (value <= staticMax) return
         _widenedMaxima.update { current ->

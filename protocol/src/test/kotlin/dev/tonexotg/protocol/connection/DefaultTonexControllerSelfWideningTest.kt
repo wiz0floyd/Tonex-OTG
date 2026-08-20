@@ -164,6 +164,32 @@ class DefaultTonexControllerSelfWideningTest {
         )
     }
 
+    // ---- finiteness guard end-to-end (Opus review, PR #81) -----------------------------------
+    // A NaN/Infinity captured value is exactly what a state-blob offset drift (the S5/S8 failure
+    // class) could produce for one of the three allowlisted ids. This confirms the fix actually
+    // protects the write path, not just SelfWideningParameterBounds in isolation.
+
+    @Test
+    fun `a captured NaN value for VIR_CABINET_MODEL does not disable setParameter's upper-bound check`() = runTest {
+        val fake = FakeTonexTransport()
+        val effectiveBounds = SelfWideningParameterBounds()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+            effectiveBounds = effectiveBounds,
+        )
+        val captured = snapshotValues().also { it[25] = Float.NaN } // simulates an offset-drift decode producing garbage
+        connectToReady(controller, fake, captureValues = captured)
+
+        // Without the finiteness guard, effectiveMax(25) would be NaN, and `value > NaN` is always
+        // false -- an absurd write like this would have been wrongly accepted.
+        val result = controller.setParameter(virCabinetModelId, 1e9f)
+
+        val error = (result as TonexResult.Failure).error
+        assertIs<TonexError.ParameterValueOutOfRange>(error, "a NaN-poisoned ceiling must never disable upper-bound validation")
+        assertEquals(staticMax, effectiveBounds.effectiveMax(virCabinetModelId), "the ceiling must remain the static max, not NaN")
+    }
+
     // ---- shared setup -------------------------------------------------------------------------
 
     private suspend fun TestScope.connectToReady(
