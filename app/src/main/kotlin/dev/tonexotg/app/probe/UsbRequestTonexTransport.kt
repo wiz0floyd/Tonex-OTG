@@ -140,9 +140,12 @@ class UsbRequestTonexTransport(
 
     /**
      * Whether [outRequest] may still have an un-reaped URB in the kernel — i.e. whether
-     * [drainCancelledRequests] actually has to wait for it (issue #27). Set by [write] on every
-     * successful [UsbRequest.queue]; cleared **only** by [loopThread] when it observes [outRequest]
-     * coming back from [UsbDeviceConnection.requestWait].
+     * [drainCancelledRequests] actually has to wait for it (issue #27). Set by [write] immediately
+     * *before* it calls [UsbRequest.queue] (never after: the URB can complete and be reaped by
+     * [loopThread] before `queue()` returns, and a later `set(true)` would overwrite that reap's
+     * clear and strand this flag); cleared **only** by [loopThread] when it observes [outRequest]
+     * coming back from [UsbDeviceConnection.requestWait]. Errs toward `true` — a spurious `true`
+     * costs one bounded drain, a spurious `false` risks the use-after-free.
      *
      * Deliberately NOT derived from [inFlightWrite]: [write]'s `CancellationException` handler
      * calls `outRequest.cancel()` and then clears [inFlightWrite] *without* waiting for the reap,
@@ -364,6 +367,15 @@ class UsbRequestTonexTransport(
             }
             val completion = CompletableDeferred<Int>()
             inFlightWrite.set(PendingWrite(bytes.size, completion))
+            // Published BEFORE queue(), for the same reason inFlightWrite is set before it: the URB
+            // can complete and be reaped by loopThread before queue() even returns here, and
+            // loopThread clears this flag on reap. Setting it afterwards could overwrite that clear
+            // and strand the flag at `true` with nothing outstanding. The two failure paths below
+            // deliberately leave it `true`: a spurious `true` costs a bounded 150ms drain plus one
+            // loud log, while a spurious `false` risks issue #27's use-after-free -- and on the ISE
+            // "this request is currently queued" branch a *prior* URB genuinely is still
+            // outstanding, so clearing there would be actively wrong. See outMaybeQueued's KDoc.
+            outMaybeQueued.set(true)
             // Safe to call from this (IO dispatcher) thread concurrently with loopThread's
             // requestWait -- see class KDoc's "why write queues its own OUT request directly".
             val queued = try {
@@ -383,10 +395,6 @@ class UsbRequestTonexTransport(
                 inFlightWrite.set(null)
                 throw IOException("UsbRequestTonexTransport.write: OUT queue() failed")
             }
-            // The kernel now owns a URB for outRequest. Cleared only by loopThread when it reaps it
-            // -- NOT on the cancellation path below, which cancels without waiting for the reap.
-            // See outMaybeQueued's KDoc and drainCancelledRequests (issue #27).
-            outMaybeQueued.set(true)
             try {
                 completion.await()
             } catch (c: CancellationException) {
