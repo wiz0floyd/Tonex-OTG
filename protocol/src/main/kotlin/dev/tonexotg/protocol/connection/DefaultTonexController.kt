@@ -983,16 +983,32 @@ class DefaultTonexController(
      * Assigns [preset] to [slot] without changing which slot is active — see [TonexController]'s
      * KDoc for the contrast with [selectPreset].
      *
+     * ## Move/swap semantics (issue #85 — supersedes an earlier "refuse if already assigned"
+     * design)
+     * A preset may occupy at most one slot at a time. The wire protocol has no "empty slot"
+     * concept — every slot byte must hold a valid preset index — so there is no way to merely
+     * "clear" a preset's old slot; the only invariant-preserving move is a **swap**: if [preset]
+     * is currently assigned to a different slot ([slot]'s "source slot"), that source slot takes
+     * on whichever preset [slot] held right before this call, [slot] takes on [preset], and the
+     * third (untouched) slot's byte is carried over unchanged — three bytes patched, one of them
+     * to the same value it already had. Two other cases short-circuit before any write:
+     * - [slot] already holds [preset] — a no-op, [TonexResult.Success] with nothing written.
+     * - [preset] is not assigned to any slot — the common case (most of the 20 presets are not on
+     *   any footswitch) — a plain single-byte [StateBlobPatcher.patchSlotAssignment] write.
+     *
      * ## [selfInitiatedPreset] is armed CONDITIONALLY, only when this write actually changes the
      * active preset
      * Reassigning a slot other than the currently active one never changes [_activePreset] — the
-     * active-slot byte is untouched and the active slot's own preset assignment doesn't move.
-     * But reassigning the *currently active* slot's preset DOES change what's active, because the
-     * active preset is defined as "whatever preset the active slot currently points at" (see
-     * [StateBlobReader.activePreset]). So [selfInitiatedPreset] must be armed exactly when `slot`
-     * is the pedal's active slot — the same conditional-arm rule [restoreFootswitches] follows
-     * (its KDoc has the full rationale for why arming it unconditionally would leave the latch
-     * stranded and swallow a later genuine [TonexEvent.ExternalPresetChange]). Unlike
+     * active-slot byte is untouched, and neither the active slot's own assignment (the swap's
+     * "third, untouched slot" case) nor its own byte value moves when the active slot is not
+     * involved in this call's [slot]/source-slot pair. But reassigning the *currently active*
+     * slot's preset DOES change what's active, because the active preset is defined as "whatever
+     * preset the active slot currently points at" (see [StateBlobReader.activePreset]) — and in
+     * the swap case, the active slot can be either [slot] or the source slot, each of which gets a
+     * new preset value. So [selfInitiatedPreset] must be armed exactly when the active slot is one
+     * of the slots actually being rewritten — the same conditional-arm rule [restoreFootswitches]
+     * follows (its KDoc has the full rationale for why arming it unconditionally would leave the
+     * latch stranded and swallow a later genuine [TonexEvent.ExternalPresetChange]). Unlike
      * [selectPreset], there is no short-circuit here that makes "always arm" safe.
      */
     override suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit> =
@@ -1024,15 +1040,30 @@ class DefaultTonexController(
             }.orReturn { return@withLock it }
 
             val bytes = fresh.copyOfBytes()
-            val current = StateBlobReader.presetInSlot(bytes, slot).orReturn { return@withLock it }
+            val assignments = StateBlobReader.slotAssignments(bytes).orReturn { return@withLock it }
+            val targetCurrent = assignments.getValue(slot)
 
-            // Already assigned — verified against a read taken moments ago. No write sent.
-            if (current == preset) return@withLock TonexResult.Success(Unit)
+            // Case 1: already assigned — verified against a read taken moments ago. No write sent.
+            if (targetCurrent == preset) return@withLock TonexResult.Success(Unit)
 
             val activeSlot = StateBlobReader.activeSlot(bytes).orReturn { return@withLock it }
-            val changesActivePreset = slot == activeSlot
+            val sourceSlot = assignments.entries.firstOrNull { it.key != slot && it.value == preset }?.key
 
-            val patched = StateBlobPatcher.patchSlotAssignment(fresh, s, slot, preset).orReturn { return@withLock it }
+            val (patched, touchedSlots) = if (sourceSlot == null) {
+                // Case 2: preset is not on any slot — plain single-byte write.
+                val result = StateBlobPatcher.patchSlotAssignment(fresh, s, slot, preset).orReturn { return@withLock it }
+                result to setOf(slot)
+            } else {
+                // Case 3: preset currently sits on a different slot — move/swap. sourceSlot takes
+                // on whatever slot previously held; the third slot carries its current value over
+                // unchanged. restoreSlotAssignments requires exactly one entry per slot.
+                val newAssignments = assignments.toMutableMap()
+                newAssignments[slot] = preset
+                newAssignments[sourceSlot] = targetCurrent
+                val result = StateBlobPatcher.restoreSlotAssignments(fresh, s, newAssignments).orReturn { return@withLock it }
+                result to setOf(slot, sourceSlot)
+            }
+            val changesActivePreset = activeSlot in touchedSlots
 
             // Set AFTER the re-read, BEFORE the write — identical ordering rule to selectPreset's
             // own comment: setting it earlier would misread the re-read's own StateUpdate.

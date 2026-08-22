@@ -151,14 +151,25 @@ interface TonexController {
      * side effect of doing so. This is the direct "edit what footswitch slot B plays" operation.
      *
      * Never changes which *slot* is active — the active-slot byte is not part of this write. It
-     * does, however, change [activePreset] in the one case where [slot] **is** the currently
-     * active slot, since the active preset is by definition whatever the active slot points at;
-     * assigning to any other slot leaves [activePreset] untouched.
+     * does, however, change [activePreset] whenever the slot whose byte actually changes (see
+     * below) **is** the currently active slot, since the active preset is by definition whatever
+     * the active slot points at.
+     *
+     * ## Move/swap behavior: a preset occupies at most one slot at a time
+     * A preset can only ever be assigned to one footswitch slot. If [preset] is already assigned
+     * to a *different* slot than [slot], this is not a plain single-byte write: [preset] moves to
+     * [slot], and the slot it moved *from* takes on whatever preset [slot] previously held — a
+     * swap, not a refusal. This is the only way to satisfy "never occupy more than one slot"
+     * without inventing a placeholder "empty slot" value the wire protocol has no concept of. The
+     * third footswitch slot (neither [slot] nor the one preset moved from) is included in the
+     * underlying write but its byte value is left unchanged. If [preset] is not currently assigned
+     * to any slot (the common case), this is a plain single-byte write of [slot]'s assignment. If
+     * [slot] already holds [preset], this is a no-op — [TonexResult.Success] with nothing written.
      *
      * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation]
-     * otherwise. Implemented as a read-modify-write against the pedal's current state blob
-     * (patching only [slot]'s one assignment byte), the same [PedalState] freshness discipline
-     * [selectPreset] follows — see its KDoc for why that distinction is load-bearing.
+     * otherwise. Implemented as a read-modify-write against the pedal's current state blob, the
+     * same [PedalState] freshness discipline [selectPreset] follows — see its KDoc for why that
+     * distinction is load-bearing.
      */
     suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit>
 
