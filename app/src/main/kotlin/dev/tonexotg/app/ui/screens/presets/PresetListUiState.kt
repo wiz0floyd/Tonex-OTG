@@ -100,7 +100,7 @@ internal fun buildPresetListItem(
     localAlias: String?,
     activePreset: PresetIndex?,
     isLive: Boolean,
-    slotAssignments: Map<PresetSlot, PresetIndex> = emptyMap(),
+    slotAssignments: Map<PresetSlot, PresetIndex>,
 ): PresetListItem {
     val pedalName = pedalInfo?.pedalName
     return PresetListItem(

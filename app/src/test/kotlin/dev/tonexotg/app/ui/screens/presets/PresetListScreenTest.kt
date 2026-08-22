@@ -2,6 +2,9 @@ package dev.tonexotg.app.ui.screens.presets
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -179,6 +182,18 @@ class PresetListScreenTest {
 
         composeTestRule.onNodeWithTag("presetList").performScrollToIndex(2)
         composeTestRule.onNodeWithContentDescription("Assigned to footswitch A, B").assertIsDisplayed()
+        // The description alone doesn't prove the chips themselves rendered -- it's authored on
+        // the wrapper Row, a sibling of the forEach that actually emits the badge Text nodes.
+        // Scope to this row's subtree (unmerged, since the row's own clickable merges
+        // descendants) and assert each chip's own text exists.
+        composeTestRule.onNode(
+            hasTestTag("presetRow.2").and(hasAnyDescendant(hasText("A"))),
+            useUnmergedTree = true,
+        ).assertExists()
+        composeTestRule.onNode(
+            hasTestTag("presetRow.2").and(hasAnyDescendant(hasText("B"))),
+            useUnmergedTree = true,
+        ).assertExists()
     }
 
     @Test
@@ -189,6 +204,10 @@ class PresetListScreenTest {
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithContentDescription("Assigned to footswitch A").assertDoesNotExist()
+        composeTestRule.onNode(
+            hasTestTag("presetRow.0").and(hasAnyDescendant(hasText("A"))),
+            useUnmergedTree = true,
+        ).assertDoesNotExist()
     }
 
     // ---- Inline alias editing -------------------------------------------------------------------
