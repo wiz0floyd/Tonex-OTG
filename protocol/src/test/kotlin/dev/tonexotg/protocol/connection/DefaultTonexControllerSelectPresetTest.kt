@@ -222,6 +222,76 @@ class DefaultTonexControllerSelectPresetTest {
         assertEquals(PresetSlot.C.ordinal.toByte(), written.payload[slotOffset])
     }
 
+    // ---- duplicate slot assignments (issue #86) --------------------------------------------------
+
+    @Test
+    fun `target held by both the active slot and another slot - prefers the active slot, zero writes after the re-read`() = runTest {
+        // Two slots (A and B) both hold preset 5; B is active. Before the #86 fix,
+        // assignments.entries.firstOrNull { it.value == index } returned whichever slot iterates
+        // first (A, by PresetSlot.entries order) rather than the active one (B), so the
+        // holdingSlot == activeSlot short-circuit never fired and a needless write (switching the
+        // active slot A -> A, a no-op preset-wise) landed instead.
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        val connectDeferred = async { controller.connect(fake) }
+        driveToReady(fake, activeSlot = PresetSlot.B, a = 5, b = 5, c = 2)
+        connectDeferred.await()
+        val writesBefore = fake.writtenMessages().size
+
+        val selectDeferred = async { controller.selectPreset(PresetIndex(5)) }
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 5, b = 5, c = 2)))
+        testScheduler.runCurrent()
+
+        val result = selectDeferred.await()
+        assertIs<TonexResult.Success<Unit>>(result)
+        val newWrites = fake.writtenMessages().drop(writesBefore)
+        assertEquals(1, newWrites.size, "only the RequestState re-read - the active slot already holds the target preset")
+    }
+
+    @Test
+    fun `selecting a preset already active via a duplicate slot does NOT arm the latch - two subsequent external changes are BOTH reported`() = runTest {
+        // Reproduces issue #86's exact trace: A and B both hold preset 5, B active. The buggy
+        // selectPreset resolved holdingSlot to A (first match, not the active slot), took the
+        // "switch to another slot" branch (a real, if pointless, write), and armed
+        // selfInitiatedPreset = 5 unconditionally. Because the confirming push still reports preset
+        // 5 (previous == idx), applyStateUpdate's `previous != idx` branch never runs and the latch
+        // is never consumed - it stays armed at 5 indefinitely, silently swallowing the NEXT genuine
+        // external change back to preset 5.
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        val connectDeferred = async { controller.connect(fake) }
+        driveToReady(fake, activeSlot = PresetSlot.B, a = 5, b = 5, c = 2)
+        connectDeferred.await()
+
+        val selectDeferred = async { controller.selectPreset(PresetIndex(5)) }
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.B, a = 5, b = 5, c = 2)))
+        testScheduler.runCurrent()
+        selectDeferred.await().let { assertIs<TonexResult.Success<Unit>>(it) }
+
+        val externalChanges = mutableListOf<PresetIndex>()
+        val eventsJob = launch(start = CoroutineStart.UNDISPATCHED) {
+            controller.events.collect { if (it is TonexEvent.ExternalPresetChange) externalChanges += it.newIndex }
+        }
+
+        // First genuine external change: footswitch press moves the active slot B -> C (preset 2).
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.C, a = 5, b = 5, c = 2)))
+        testScheduler.runCurrent()
+
+        // Second genuine external change: footswitch press moves C -> A, which holds the SAME
+        // preset (5) selectPreset targeted - exactly the transition a stranded latch would swallow.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 5, b = 5, c = 2)))
+        testScheduler.runCurrent()
+
+        assertEquals(
+            listOf(PresetIndex(2), PresetIndex(5)),
+            externalChanges,
+            "both external footswitch presses must be reported, including the return to preset 5",
+        )
+        eventsJob.cancel()
+    }
+
     // ---- rejected before Ready ------------------------------------------------------------------
 
     @Test
