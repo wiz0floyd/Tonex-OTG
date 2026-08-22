@@ -137,17 +137,21 @@ class DefaultTonexControllerAssignPresetToSlotTest {
             "half 1: the caller's own move must not be reported as an external change",
         )
 
-        // Half 2: a LATER genuine external change (footswitch press B -> C) must still fire. If the
-        // latch had been armed with the wrong value (preset=10 instead of the source slot's actual
-        // new value, 5) it would never have been consumed by applyStateUpdate's `== idx` check
-        // above, and would still be stranded here - silently swallowing this genuine event too.
-        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.C, a = 10, b = 5, c = 15)))
+        // Half 2: a LATER genuine external change must still fire, AND it must specifically target
+        // the value the latch would have been left stranded at under the bug (10, the pre-fix
+        // wrong-armed value) - not an unrelated preset. Moving to slot A (which holds 10) is the
+        // discriminating case: under the bug, the stranded latch (armed with 10, never consumed
+        // because the confirming push's idx was 5, not 10) would still match here and silently
+        // swallow this event too. Under the fix, the latch was already consumed by the confirming
+        // push above, so this is seen as a genuine external change.
+        fake.emitMessage(stateUpdateMessage(plausibleBlob(activeSlot = PresetSlot.A, a = 10, b = 5, c = 15)))
         testScheduler.runCurrent()
 
         assertEquals(
-            listOf(PresetIndex(15)),
+            listOf(PresetIndex(10)),
             externalChanges,
-            "half 2: a later genuine external change must still be reported - proves the latch was consumed, not stranded",
+            "half 2: a later external change to the value the latch would have been stranded at (10) must " +
+                "still be reported - proves the latch was consumed by the confirming push, not left stranded",
         )
         eventsJob.cancel()
     }
