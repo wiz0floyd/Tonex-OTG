@@ -985,13 +985,16 @@ class DefaultTonexController(
      *
      * ## Move/swap semantics (issue #85 — supersedes an earlier "refuse if already assigned"
      * design)
-     * A preset may occupy at most one slot at a time. The wire protocol has no "empty slot"
-     * concept — every slot byte must hold a valid preset index — so there is no way to merely
-     * "clear" a preset's old slot; the only invariant-preserving move is a **swap**: if [preset]
-     * is currently assigned to a different slot ([slot]'s "source slot"), that source slot takes
-     * on whichever preset [slot] held right before this call, [slot] takes on [preset], and the
-     * third (untouched) slot's byte is carried over unchanged — three bytes patched, one of them
-     * to the same value it already had. Two other cases short-circuit before any write:
+     * This operation never *creates* a second slot holding the same preset — it does not
+     * guarantee no duplicate can exist at all (the pedal itself, or an external editor, could
+     * still arrive with two slots already pointing at the same preset; neither this guard nor its
+     * KDoc claims to undo that — see issue #86). The wire protocol has no "empty slot" concept —
+     * every slot byte must hold a valid preset index — so there is no way to merely "clear" a
+     * preset's old slot; the only invariant-preserving move this function can make is a **swap**:
+     * if [preset] is currently assigned to a different slot ([slot]'s "source slot"), that source
+     * slot takes on whichever preset [slot] held right before this call, [slot] takes on [preset],
+     * and the third (untouched) slot's byte is carried over unchanged — three bytes patched, one
+     * of them to the same value it already had. Two other cases short-circuit before any write:
      * - [slot] already holds [preset] — a no-op, [TonexResult.Success] with nothing written.
      * - [preset] is not assigned to any slot — the common case (most of the 20 presets are not on
      *   any footswitch) — a plain single-byte [StateBlobPatcher.patchSlotAssignment] write.
@@ -1049,25 +1052,37 @@ class DefaultTonexController(
             val activeSlot = StateBlobReader.activeSlot(bytes).orReturn { return@withLock it }
             val sourceSlot = assignments.entries.firstOrNull { it.key != slot && it.value == preset }?.key
 
-            val (patched, touchedSlots) = if (sourceSlot == null) {
+            // The complete post-write assignment map, in both branches — this is the single source
+            // of truth for "what does each slot hold after this write," which is what determines
+            // whether the ACTIVE slot's preset actually changed (below). Deriving that from this
+            // map, rather than from a separately-tracked "touched slots" set, is what keeps the
+            // touched-slots bookkeeping and the self-initiated arming value from being able to
+            // drift apart — see the swap case: when the active slot IS sourceSlot, its post-write
+            // value is [targetCurrent], NOT [preset] (Opus review, PR #85 part 2/2 pre-review).
+            val postWrite: Map<PresetSlot, PresetIndex> = if (sourceSlot == null) {
+                assignments + (slot to preset)
+            } else {
+                assignments + (slot to preset) + (sourceSlot to targetCurrent)
+            }
+
+            val patched = if (sourceSlot == null) {
                 // Case 2: preset is not on any slot — plain single-byte write.
-                val result = StateBlobPatcher.patchSlotAssignment(fresh, s, slot, preset).orReturn { return@withLock it }
-                result to setOf(slot)
+                StateBlobPatcher.patchSlotAssignment(fresh, s, slot, preset).orReturn { return@withLock it }
             } else {
                 // Case 3: preset currently sits on a different slot — move/swap. sourceSlot takes
                 // on whatever slot previously held; the third slot carries its current value over
                 // unchanged. restoreSlotAssignments requires exactly one entry per slot.
-                val newAssignments = assignments.toMutableMap()
-                newAssignments[slot] = preset
-                newAssignments[sourceSlot] = targetCurrent
-                val result = StateBlobPatcher.restoreSlotAssignments(fresh, s, newAssignments).orReturn { return@withLock it }
-                result to setOf(slot, sourceSlot)
+                StateBlobPatcher.restoreSlotAssignments(fresh, s, postWrite).orReturn { return@withLock it }
             }
-            val changesActivePreset = activeSlot in touchedSlots
+
+            // The active slot's preset only changes if this write actually altered ITS byte — which,
+            // in the swap case, may carry a value other than [preset] (see postWrite's KDoc above).
+            val newActivePreset = postWrite.getValue(activeSlot)
+            val changesActivePreset = newActivePreset != assignments.getValue(activeSlot)
 
             // Set AFTER the re-read, BEFORE the write — identical ordering rule to selectPreset's
             // own comment: setting it earlier would misread the re-read's own StateUpdate.
-            if (changesActivePreset) selfInitiatedPreset = preset
+            if (changesActivePreset) selfInitiatedPreset = newActivePreset
             writeFramed(SetStateMessage.encode(patched)).orReturn {
                 if (changesActivePreset) selfInitiatedPreset = null
                 return@withLock it
