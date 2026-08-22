@@ -16,6 +16,7 @@ import dev.tonexotg.app.data.alias.InMemoryPreferencesDataStore
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
+import dev.tonexotg.protocol.PresetSlot
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -162,6 +163,32 @@ class PresetListScreenTest {
 
         composeTestRule.onNodeWithText("My Lead Tone").assertIsDisplayed()
         composeTestRule.onAllNodesWithText("✓").assertCountEquals(0)
+    }
+
+    // ---- Slot badges (S85 part 2a) --------------------------------------------------------------
+
+    @Test
+    fun aPresetAssignedToTwoFootswitchSlots_showsBothBadges() {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.setSlotAssignments(
+            mapOf(PresetSlot.A to PresetIndex(2), PresetSlot.B to PresetIndex(2)),
+        )
+        setContentWithViewModel(controller)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("presetList").performScrollToIndex(2)
+        composeTestRule.onNodeWithContentDescription("Assigned to footswitch A, B").assertIsDisplayed()
+    }
+
+    @Test
+    fun noSlotBadge_isShown_whenDisconnectedEvenWithStaleSlotData() {
+        val controller = FakeTonexController(initialState = ConnectionState.Idle)
+        controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(0)))
+        setContentWithViewModel(controller)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithContentDescription("Assigned to footswitch A").assertDoesNotExist()
     }
 
     // ---- Inline alias editing -------------------------------------------------------------------

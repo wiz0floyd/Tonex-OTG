@@ -6,6 +6,7 @@ import dev.tonexotg.app.data.alias.InMemoryPreferencesDataStore
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
 import kotlinx.coroutines.test.runTest
@@ -223,6 +224,54 @@ class PresetListViewModelTest {
             val state = awaitItem { it.items.isNotEmpty() }
             assertEquals("Preset 1", state.items[0].displayName)
             assertEquals("Preset 20", state.items[19].displayName)
+        }
+    }
+
+    // --- Slot badges (S85 part 2a) ----------------------------------------------------------
+
+    @Test
+    fun `assignedSlots reflects the controller's live slot assignments`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.setSlotAssignments(
+            mapOf(
+                PresetSlot.A to PresetIndex(3),
+                PresetSlot.B to PresetIndex(3),
+                PresetSlot.C to PresetIndex(9),
+            ),
+        )
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val state = awaitItem { it.items[3].assignedSlots.isNotEmpty() }
+            assertEquals(setOf(PresetSlot.A, PresetSlot.B), state.items[3].assignedSlots)
+            assertEquals(setOf(PresetSlot.C), state.items[9].assignedSlots)
+        }
+    }
+
+    @Test
+    fun `a preset assigned to no slot has an empty assignedSlots`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(0)))
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val state = awaitItem { it.items[0].assignedSlots.isNotEmpty() }
+            assertTrue(state.items[1].assignedSlots.isEmpty())
+        }
+    }
+
+    @Test
+    fun `assignedSlots is empty while not live even if the controller has stale slot data`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Idle)
+        controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(3)))
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val state = awaitItem { it.items.isNotEmpty() }
+            assertFalse(state.isLive)
+            assertTrue(state.items.all { it.assignedSlots.isEmpty() })
         }
     }
 
