@@ -119,6 +119,7 @@ class DefaultTonexController(
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     private val _activePreset = MutableStateFlow<PresetIndex?>(null)
     private val _presets = MutableStateFlow<List<PresetInfo>>(emptyList())
+    private val _slotAssignments = MutableStateFlow<Map<PresetSlot, PresetIndex>>(emptyMap())
     private val _parameterValues = MutableStateFlow<Map<ParameterId, Float>>(emptyMap())
     private val _events = MutableSharedFlow<TonexEvent>(
         replay = 0,
@@ -129,6 +130,7 @@ class DefaultTonexController(
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
     override val activePreset: StateFlow<PresetIndex?> = _activePreset.asStateFlow()
     override val presets: StateFlow<List<PresetInfo>> = _presets.asStateFlow()
+    override val slotAssignments: StateFlow<Map<PresetSlot, PresetIndex>> = _slotAssignments.asStateFlow()
     override val parameterValues: StateFlow<Map<ParameterId, Float>> = _parameterValues.asStateFlow()
     override val events: SharedFlow<TonexEvent> = _events.asSharedFlow()
 
@@ -301,6 +303,13 @@ class DefaultTonexController(
      * defence; keep both.
      */
     private fun applyStateUpdate(state: PedalState) {
+        // Decoded independently of the activePreset read below -- separate reads of the same
+        // blob, neither gated on the other's success/failure. This is what makes both a
+        // self-initiated assignPresetToSlot write and an external footswitch reassignment show
+        // up live in slotAssignments, with zero extra plumbing.
+        val slots = StateBlobReader.slotAssignments(state)
+        if (slots is TonexResult.Success) _slotAssignments.value = slots.value
+
         val read = StateBlobReader.activePreset(state)
         if (read is TonexResult.Failure) return
         val idx = (read as TonexResult.Success).value
@@ -516,6 +525,7 @@ class DefaultTonexController(
         snapshotStore.clear()
         _presets.value = emptyList()
         _activePreset.value = null
+        _slotAssignments.value = emptyMap()
         _parameterValues.value = emptyMap()
         _connectionState.value = finalState // LAST, always
     }
@@ -609,6 +619,11 @@ class DefaultTonexController(
         // above — before this Ready assignment, before harvestPresetNames/harvestMasterVolume, and
         // long before any selectPreset() this connection could ever issue. No further wire read.
         footswitchSnapshot = captureFootswitchSnapshot(newSession, blob)
+        // Seed from the footswitchSnapshot just captured above -- reuses that same handshake
+        // blob read rather than decoding it a second time. Must land before Ready is published:
+        // teardown's own invariant (a collector must never see Ready with stale flows) applies
+        // here too.
+        _slotAssignments.value = footswitchSnapshot?.toMap() ?: emptyMap()
         _connectionState.value = ConnectionState.Ready
 
         // ---- Post-Ready harvest -----------------------------------------------------------------
@@ -961,6 +976,73 @@ class DefaultTonexController(
         }
         TonexResult.Success(Unit)
     }
+
+    // ---- assignPresetToSlot() ------------------------------------------------------------------
+
+    /**
+     * Assigns [preset] to [slot] without changing which slot is active — see [TonexController]'s
+     * KDoc for the contrast with [selectPreset].
+     *
+     * ## [selfInitiatedPreset] is armed CONDITIONALLY, only when this write actually changes the
+     * active preset
+     * Reassigning a slot other than the currently active one never changes [_activePreset] — the
+     * active-slot byte is untouched and the active slot's own preset assignment doesn't move.
+     * But reassigning the *currently active* slot's preset DOES change what's active, because the
+     * active preset is defined as "whatever preset the active slot currently points at" (see
+     * [StateBlobReader.activePreset]). So [selfInitiatedPreset] must be armed exactly when `slot`
+     * is the pedal's active slot — the same conditional-arm rule [restoreFootswitches] follows
+     * (its KDoc has the full rationale for why arming it unconditionally would leave the latch
+     * stranded and swallow a later genuine [TonexEvent.ExternalPresetChange]). Unlike
+     * [selectPreset], there is no short-circuit here that makes "always arm" safe.
+     */
+    override suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit> =
+        operationMutex.withLock {
+            if (_connectionState.value !is ConnectionState.Ready) {
+                return@withLock TonexResult.Failure(
+                    TonexError.ProtocolStateViolation(_connectionState.value, "assignPresetToSlot requires Ready"),
+                )
+            }
+            // Defense-in-depth against @JvmInline erasure at the JVM ABI boundary — see
+            // TonexError.InvalidPresetIndex's KDoc.
+            if (preset.value !in PresetIndex.VALID_RANGE) {
+                return@withLock TonexResult.Failure(TonexError.InvalidPresetIndex(preset.value))
+            }
+            val s = session ?: return@withLock TonexResult.Failure(
+                TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+            )
+
+            // ---- MANDATORY re-read, immediately before the patch (PedalState's freshness contract). ---
+            val fresh: PedalState = requestAndAwait(
+                RequestStateMessage.encode(),
+                timeouts.stateReadMillis,
+                "state-read",
+            ) { inb ->
+                commonInbound("state-read", inb) ?: when (inb) {
+                    is Inbound.State -> inb.result // Success(PedalState) or Failure(OversizedStateBlob)
+                    else -> null
+                }
+            }.orReturn { return@withLock it }
+
+            val bytes = fresh.copyOfBytes()
+            val current = StateBlobReader.presetInSlot(bytes, slot).orReturn { return@withLock it }
+
+            // Already assigned — verified against a read taken moments ago. No write sent.
+            if (current == preset) return@withLock TonexResult.Success(Unit)
+
+            val activeSlot = StateBlobReader.activeSlot(bytes).orReturn { return@withLock it }
+            val changesActivePreset = slot == activeSlot
+
+            val patched = StateBlobPatcher.patchSlotAssignment(fresh, s, slot, preset).orReturn { return@withLock it }
+
+            // Set AFTER the re-read, BEFORE the write — identical ordering rule to selectPreset's
+            // own comment: setting it earlier would misread the re-read's own StateUpdate.
+            if (changesActivePreset) selfInitiatedPreset = preset
+            writeFramed(SetStateMessage.encode(patched)).orReturn {
+                if (changesActivePreset) selfInitiatedPreset = null
+                return@withLock it
+            }
+            TonexResult.Success(Unit)
+        }
 
     // ---- setParameter() (§10.1) ----------------------------------------------------------------
 

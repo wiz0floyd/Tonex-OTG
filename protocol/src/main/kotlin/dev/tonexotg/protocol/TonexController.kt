@@ -91,6 +91,18 @@ interface TonexController {
     val presets: StateFlow<List<PresetInfo>>
 
     /**
+     * The pedal's three footswitch slot assignments (A/B/C), or an empty map before
+     * [ConnectionState.Ready]. Reflects changes made through this controller (e.g.
+     * [assignPresetToSlot], or [selectPreset]'s own side-effect of reassigning a slot) *and*
+     * changes made externally at the footswitch or another editor (FR6-style live projection) —
+     * the same guarantee [activePreset] and [presets] make, applied to slot assignments instead.
+     * Like [activePreset], this is push-driven only: neither [assignPresetToSlot] nor
+     * [selectPreset] updates it optimistically on a successful write — it only ever changes when
+     * the pedal's own confirming state push is observed.
+     */
+    val slotAssignments: StateFlow<Map<PresetSlot, PresetIndex>>
+
+    /**
      * The last known value of every parameter belonging to the active preset, plus the 7
      * globals, keyed by [ParameterId]. An id absent from this map means its value is not yet
      * known (e.g. before [ConnectionState.Ready]) — absence is not the same as a value of zero.
@@ -132,6 +144,19 @@ interface TonexController {
      * [PedalState] for why that distinction is load-bearing.
      */
     suspend fun selectPreset(index: PresetIndex): TonexResult<Unit>
+
+    /**
+     * Assigns [preset] to [slot] WITHOUT changing the pedal's active slot — in contrast with
+     * [selectPreset], which both selects a preset as active *and* may reassign a slot to it as a
+     * side effect of doing so. This is the direct "edit what footswitch slot B plays" operation:
+     * it never touches [activePreset], only [slotAssignments]`[slot]`.
+     *
+     * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation]
+     * otherwise. Implemented as a read-modify-write against the pedal's current state blob
+     * (patching only [slot]'s one assignment byte), the same [PedalState] freshness discipline
+     * [selectPreset] follows — see its KDoc for why that distinction is load-bearing.
+     */
+    suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit>
 
     /**
      * Writes [value] for parameter [id] on the pedal, using the single-parameter write path
