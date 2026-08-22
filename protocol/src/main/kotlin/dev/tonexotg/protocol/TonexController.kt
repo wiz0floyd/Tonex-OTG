@@ -148,8 +148,12 @@ interface TonexController {
     /**
      * Assigns [preset] to [slot] WITHOUT changing the pedal's active slot — in contrast with
      * [selectPreset], which both selects a preset as active *and* may reassign a slot to it as a
-     * side effect of doing so. This is the direct "edit what footswitch slot B plays" operation:
-     * it never touches [activePreset], only [slotAssignments]`[slot]`.
+     * side effect of doing so. This is the direct "edit what footswitch slot B plays" operation.
+     *
+     * Never changes which *slot* is active — the active-slot byte is not part of this write. It
+     * does, however, change [activePreset] in the one case where [slot] **is** the currently
+     * active slot, since the active preset is by definition whatever the active slot points at;
+     * assigning to any other slot leaves [activePreset] untouched.
      *
      * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation]
      * otherwise. Implemented as a read-modify-write against the pedal's current state blob
