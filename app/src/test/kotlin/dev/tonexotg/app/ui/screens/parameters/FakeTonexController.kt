@@ -4,6 +4,7 @@ import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexEvent
@@ -36,6 +37,9 @@ class FakeTonexController : TonexController {
 
     private val _presets = MutableStateFlow<List<PresetInfo>>(emptyList())
     override val presets: StateFlow<List<PresetInfo>> = _presets
+
+    private val _slotAssignments = MutableStateFlow<Map<PresetSlot, PresetIndex>>(emptyMap())
+    override val slotAssignments: StateFlow<Map<PresetSlot, PresetIndex>> = _slotAssignments
 
     private val _parameterValues = MutableStateFlow<Map<ParameterId, Float>>(emptyMap())
     override val parameterValues: StateFlow<Map<ParameterId, Float>> = _parameterValues
@@ -113,6 +117,9 @@ class FakeTonexController : TonexController {
     }
 
     override suspend fun restoreFootswitches(): TonexResult<Unit> = TonexResult.Success(Unit)
+
+    override suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit> =
+        TonexResult.Success(Unit)
 
     /** Test helper: sets [id]'s live value directly, as if it had just been read from the pedal. */
     fun seedParameterValue(id: ParameterId, value: Float) {

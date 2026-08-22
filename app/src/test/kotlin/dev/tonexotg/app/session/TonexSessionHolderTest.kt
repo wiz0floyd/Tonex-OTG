@@ -7,6 +7,7 @@ import dev.tonexotg.app.usb.connection.UsbConnectionState
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexEvent
@@ -296,6 +297,9 @@ private class FakeTonexController(
     private val _presets = MutableStateFlow<List<dev.tonexotg.protocol.PresetInfo>>(emptyList())
     override val presets: StateFlow<List<dev.tonexotg.protocol.PresetInfo>> = _presets
 
+    private val _slotAssignments = MutableStateFlow<Map<PresetSlot, PresetIndex>>(emptyMap())
+    override val slotAssignments: StateFlow<Map<PresetSlot, PresetIndex>> = _slotAssignments
+
     private val _parameterValues = MutableStateFlow<Map<ParameterId, Float>>(emptyMap())
     override val parameterValues: StateFlow<Map<ParameterId, Float>> = _parameterValues
 
@@ -350,4 +354,7 @@ private class FakeTonexController(
     override suspend fun revertActivePreset(): TonexResult<Unit> = TonexResult.Success(Unit)
 
     override suspend fun restoreFootswitches(): TonexResult<Unit> = TonexResult.Success(Unit)
+
+    override suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit> =
+        TonexResult.Success(Unit)
 }

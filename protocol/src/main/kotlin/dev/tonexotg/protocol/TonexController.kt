@@ -91,6 +91,18 @@ interface TonexController {
     val presets: StateFlow<List<PresetInfo>>
 
     /**
+     * The pedal's three footswitch slot assignments (A/B/C), or an empty map before
+     * [ConnectionState.Ready]. Reflects changes made through this controller (e.g.
+     * [assignPresetToSlot], or [selectPreset]'s own side-effect of reassigning a slot) *and*
+     * changes made externally at the footswitch or another editor (FR6-style live projection) —
+     * the same guarantee [activePreset] and [presets] make, applied to slot assignments instead.
+     * Like [activePreset], this is push-driven only: neither [assignPresetToSlot] nor
+     * [selectPreset] updates it optimistically on a successful write — it only ever changes when
+     * the pedal's own confirming state push is observed.
+     */
+    val slotAssignments: StateFlow<Map<PresetSlot, PresetIndex>>
+
+    /**
      * The last known value of every parameter belonging to the active preset, plus the 7
      * globals, keyed by [ParameterId]. An id absent from this map means its value is not yet
      * known (e.g. before [ConnectionState.Ready]) — absence is not the same as a value of zero.
@@ -132,6 +144,34 @@ interface TonexController {
      * [PedalState] for why that distinction is load-bearing.
      */
     suspend fun selectPreset(index: PresetIndex): TonexResult<Unit>
+
+    /**
+     * Assigns [preset] to [slot] WITHOUT changing the pedal's active slot — in contrast with
+     * [selectPreset], which both selects a preset as active *and* may reassign a slot to it as a
+     * side effect of doing so. This is the direct "edit what footswitch slot B plays" operation.
+     *
+     * Never changes which *slot* is active — the active-slot byte is not part of this write. It
+     * does, however, change [activePreset] whenever the slot whose byte actually changes (see
+     * below) **is** the currently active slot, since the active preset is by definition whatever
+     * the active slot points at.
+     *
+     * ## Move/swap behavior: a preset occupies at most one slot at a time
+     * A preset can only ever be assigned to one footswitch slot. If [preset] is already assigned
+     * to a *different* slot than [slot], this is not a plain single-byte write: [preset] moves to
+     * [slot], and the slot it moved *from* takes on whatever preset [slot] previously held — a
+     * swap, not a refusal. This is the only way to satisfy "never occupy more than one slot"
+     * without inventing a placeholder "empty slot" value the wire protocol has no concept of. The
+     * third footswitch slot (neither [slot] nor the one preset moved from) is included in the
+     * underlying write but its byte value is left unchanged. If [preset] is not currently assigned
+     * to any slot (the common case), this is a plain single-byte write of [slot]'s assignment. If
+     * [slot] already holds [preset], this is a no-op — [TonexResult.Success] with nothing written.
+     *
+     * Requires [ConnectionState.Ready]; fails with [TonexError.ProtocolStateViolation]
+     * otherwise. Implemented as a read-modify-write against the pedal's current state blob, the
+     * same [PedalState] freshness discipline [selectPreset] follows — see its KDoc for why that
+     * distinction is load-bearing.
+     */
+    suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit>
 
     /**
      * Writes [value] for parameter [id] on the pedal, using the single-parameter write path
