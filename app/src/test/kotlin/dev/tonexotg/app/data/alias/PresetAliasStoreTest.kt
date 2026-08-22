@@ -157,25 +157,44 @@ class PresetAliasStoreTest {
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun `alias set before a simulated restart is still readable after it`() = runTest {
-        val file = File.createTempFile("preset_aliases_test", ".preferences_pb")
-        file.deleteOnExit()
+        // Two independent DataStore instances (and two independent coroutine scopes) standing in
+        // for "the app process died and was relaunched" — nothing here is shared in-process
+        // between the write and the read. Each gets its own backing file (rather than two handles
+        // to one file) so this doesn't depend on the OS's file-locking semantics: Windows enforces
+        // exclusive locks more strictly than POSIX, so a second concurrent handle to the same file
+        // can fail there even after the first scope is cancelled, since cancellation doesn't
+        // guarantee the underlying file handle is closed synchronously. Copying the first file's
+        // bytes into a second, fully independent file reproduces "still readable after a restart"
+        // without relying on concurrent access to one file at all.
+        //
+        // File.createTempFile() itself already creates the physical (empty) file. DataStore's
+        // write path does an atomic rename of a ".tmp" file onto that target; renaming *onto an
+        // already-existing file* is exactly the case Windows' stricter file locking makes flaky
+        // (POSIX allows a rename to silently replace an existing file; Windows does not always).
+        // Deleting the pre-created placeholder immediately, before DataStore ever opens it, means
+        // the first write's rename lands on a path that doesn't exist yet — sidestepping the
+        // rename-over-existing-file case entirely rather than depending on timing.
+        val firstFile = File.createTempFile("preset_aliases_test", ".preferences_pb")
+        firstFile.deleteOnExit()
+        firstFile.delete()
 
-        // Two independent DataStore instances (and two independent coroutine scopes) pointed at
-        // the same backing file, standing in for "the app process died and was relaunched" —
-        // nothing here is shared in-process between the write and the read.
         val writeScope = CoroutineScope(UnconfinedTestDispatcher() + Job())
         val firstProcessDataStore = PreferenceDataStoreFactory.create(
             scope = writeScope,
-            produceFile = { file },
+            produceFile = { firstFile },
         )
         val firstProcessStore = DataStorePresetAliasStore(firstProcessDataStore)
         firstProcessStore.setAlias(presetZero, "Survives Restart")
         writeScope.cancel()
 
+        val secondFile = File.createTempFile("preset_aliases_test", ".preferences_pb")
+        secondFile.deleteOnExit()
+        firstFile.copyTo(secondFile, overwrite = true)
+
         val readScope = CoroutineScope(UnconfinedTestDispatcher() + Job())
         val secondProcessDataStore = PreferenceDataStoreFactory.create(
             scope = readScope,
-            produceFile = { file },
+            produceFile = { secondFile },
         )
         val secondProcessStore = DataStorePresetAliasStore(secondProcessDataStore)
 
