@@ -43,6 +43,10 @@ import dev.tonexotg.app.ui.theme.minTouchTarget
  *   register as the row's own [onClick]) that invokes this callback — S16's inline alias-editing
  *   entry point. `null` (the default) renders no edit affordance at all, which is what every
  *   pre-S16 caller/preview of this component already expects.
+ * @param assignedSlots plain strings (e.g. `"A"`, `"B"`) for the footswitch slots currently
+ *   pointed at this preset (S85 part 2a) — this component never imports
+ *   `dev.tonexotg.protocol.*`, so the caller converts `PresetSlot.name` before passing these in.
+ *   Empty (the default) renders no badges at all, matching every pre-S85 caller/preview.
  */
 @Composable
 fun PresetRow(
@@ -52,6 +56,7 @@ fun PresetRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    assignedSlots: Set<String> = emptySet(),
     onEditAlias: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(10.dp)
@@ -91,13 +96,45 @@ fun PresetRow(
         }
 
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = name,
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space1),
+            ) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (assignedSlots.isNotEmpty()) {
+                    val sortedSlots = assignedSlots.sorted()
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space1 / 2),
+                        modifier = Modifier.semantics {
+                            contentDescription =
+                                "Assigned to footswitch ${sortedSlots.joinToString(", ")}"
+                        },
+                    ) {
+                        sortedSlots.forEach { slot ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = slot,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
             if (subtitle != null) {
                 Text(
                     text = subtitle,
@@ -178,5 +215,31 @@ private fun PresetRowEditableAliasPreview() {
             onEditAlias = {},
             modifier = Modifier.padding(16.dp),
         )
+    }
+}
+
+@Preview(name = "Preset row — footswitch slot badges (S85)", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun PresetRowSlotBadgesPreview() {
+    TonexTheme {
+        Column {
+            PresetRow(
+                index = "07",
+                name = "Set Opener",
+                isActive = true,
+                onClick = {},
+                subtitle = "from pedal: PRESET 07",
+                assignedSlots = setOf("A", "B"),
+                modifier = Modifier.padding(16.dp),
+            )
+            PresetRow(
+                index = "12",
+                name = "DJENT TIGHT",
+                isActive = false,
+                onClick = {},
+                assignedSlots = setOf("C"),
+                modifier = Modifier.padding(16.dp),
+            )
+        }
     }
 }
