@@ -5,6 +5,7 @@ import dev.tonexotg.app.ui.screens.connection.toPresentation
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexError
 
 /**
@@ -27,6 +28,11 @@ import dev.tonexotg.protocol.TonexError
  * @property isActive whether this is the pedal's current active preset. Always `false` when
  *   [PresetListUiState.isLive] is `false` — "active" is a live-pedal fact, never inferred or
  *   remembered across a disconnect (see that property's kdoc for why).
+ * @property assignedSlots the footswitch slots ([PresetSlot]) currently pointed at this preset,
+ *   per [dev.tonexotg.protocol.TonexController.slotAssignments] — zero, one, two, or all three at
+ *   once (nothing stops two slots pointing at the same preset). Always empty when
+ *   [PresetListUiState.isLive] is `false`, the same "live pedal fact, never inferred or
+ *   remembered across a disconnect" rule [isActive] already follows.
  */
 data class PresetListItem(
     val index: PresetIndex,
@@ -34,6 +40,7 @@ data class PresetListItem(
     val localAlias: String?,
     val displayName: String,
     val isActive: Boolean,
+    val assignedSlots: Set<PresetSlot>,
 )
 
 /**
@@ -75,6 +82,7 @@ data class PresetListUiState(
                     localAlias = null,
                     displayName = placeholderName(index),
                     isActive = false,
+                    assignedSlots = emptySet(),
                 )
             },
             isLive = false,
@@ -92,6 +100,7 @@ internal fun buildPresetListItem(
     localAlias: String?,
     activePreset: PresetIndex?,
     isLive: Boolean,
+    slotAssignments: Map<PresetSlot, PresetIndex>,
 ): PresetListItem {
     val pedalName = pedalInfo?.pedalName
     return PresetListItem(
@@ -100,5 +109,10 @@ internal fun buildPresetListItem(
         localAlias = localAlias,
         displayName = localAlias ?: pedalName ?: placeholderName(index),
         isActive = isLive && activePreset == index,
+        assignedSlots = if (isLive) {
+            PresetSlot.entries.filter { slotAssignments[it] == index }.toSet()
+        } else {
+            emptySet()
+        },
     )
 }

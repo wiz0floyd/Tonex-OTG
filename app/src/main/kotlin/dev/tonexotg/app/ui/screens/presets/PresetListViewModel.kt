@@ -7,6 +7,7 @@ import dev.tonexotg.app.data.alias.PresetAliasStore
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
@@ -60,24 +61,36 @@ class PresetListViewModel(
         (0..19).map { aliasStore.alias(PresetIndex(it)) },
     ) { aliases -> aliases.toList() }
 
+    /**
+     * [controller.presets] paired with [controller.slotAssignments] into one flow, the same
+     * pattern [aliasesFlow] already uses to pre-combine several sources into one arm —
+     * [kotlinx.coroutines.flow.combine] only has typed overloads up to 5 flows, and [uiState]'s
+     * own `combine` below is already at that ceiling without this.
+     */
+    private val pedalPresetState = combine(
+        controller.presets,
+        controller.slotAssignments,
+    ) { presets, slotAssignments -> presets to slotAssignments }
+
     /** The most recent [selectPreset] failure, or `null` — folded into [uiState] below. */
     private val lastSelectError = MutableStateFlow<TonexError?>(null)
 
     /**
      * The current [PresetListUiState], recombined whenever the controller's connection state,
-     * preset list, or active preset changes; a local alias changes; or a [selectPreset] call
-     * fails. [PresetListUiState.initial] covers the one composition frame before this flow's
-     * first emission; every value after that is a full recomputation, never a patch, so there's
-     * no way for a stale item to survive an update to any one of its inputs.
+     * preset list, slot assignments, or active preset changes; a local alias changes; or a
+     * [selectPreset] call fails. [PresetListUiState.initial] covers the one composition frame
+     * before this flow's first emission; every value after that is a full recomputation, never a
+     * patch, so there's no way for a stale item to survive an update to any one of its inputs.
      */
     val uiState: StateFlow<PresetListUiState> = combine(
         controller.connectionState,
-        controller.presets,
+        pedalPresetState,
         controller.activePreset,
         aliasesFlow,
         lastSelectError,
-    ) { connectionState, presets, activePreset, aliases, selectError ->
-        buildUiState(connectionState, presets, activePreset, aliases, selectError)
+    ) { connectionState, pedalState, activePreset, aliases, selectError ->
+        val (presets, slotAssignments) = pedalState
+        buildUiState(connectionState, presets, activePreset, aliases, selectError, slotAssignments)
     }.stateIn(
         scope = scope,
         started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000),
@@ -90,6 +103,7 @@ class PresetListViewModel(
         activePreset: PresetIndex?,
         aliases: List<String?>,
         selectError: TonexError?,
+        slotAssignments: Map<PresetSlot, PresetIndex>,
     ): PresetListUiState {
         val isLive = connectionState is ConnectionState.Ready
         val presetsByIndex: Map<Int, PresetInfo> = presets.associateBy { it.index.value }
@@ -101,6 +115,7 @@ class PresetListViewModel(
                 localAlias = aliases.getOrNull(i),
                 activePreset = activePreset,
                 isLive = isLive,
+                slotAssignments = slotAssignments,
             )
         }
         return PresetListUiState(items = items, isLive = isLive, selectPresetError = selectError)

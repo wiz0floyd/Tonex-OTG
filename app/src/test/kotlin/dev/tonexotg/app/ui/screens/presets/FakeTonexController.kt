@@ -66,6 +66,15 @@ class FakeTonexController(
     }
 
     /**
+     * Directly pushes new footswitch slot assignments, simulating a pedal-confirmed state push
+     * (S85 part 2a) -- [disconnect] deliberately does *not* clear this, unlike [_presets] and
+     * [_activePreset], so tests can exercise "controller holds stale slot data while not live."
+     */
+    fun setSlotAssignments(assignments: Map<PresetSlot, PresetIndex>) {
+        _slotAssignments.value = assignments
+    }
+
+    /**
      * Directly pushes a new active preset **without** going through [selectPreset] — simulating
      * an app-initiated selection completing.
      */

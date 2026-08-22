@@ -30,6 +30,7 @@ import dev.tonexotg.app.ui.screens.connection.ConnectionErrorPanel
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
+import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexController
 import dev.tonexotg.protocol.TonexError
 
@@ -140,6 +141,7 @@ fun PresetListContent(
                     isActive = item.isActive,
                     onClick = { onPresetClick(item.index) },
                     subtitle = subtitle,
+                    assignedSlots = item.assignedSlots.map { it.name }.toSet(),
                     onEditAlias = { onEditAliasRequested(item.index) },
                     modifier = Modifier.testTag("presetRow.${item.index.value}"),
                 )
@@ -208,18 +210,26 @@ private fun previewItem(
     pedalName: String?,
     localAlias: String? = null,
     isActive: Boolean = false,
+    assignedSlots: Set<PresetSlot> = emptySet(),
 ): PresetListItem = PresetListItem(
     index = PresetIndex(index),
     pedalName = pedalName,
     localAlias = localAlias,
     displayName = localAlias ?: pedalName ?: "Preset ${index + 1}",
     isActive = isActive,
+    assignedSlots = assignedSlots,
 )
 
 private val previewLiveState = PresetListUiState(
     items = listOf(
-        previewItem(0, "PRESET 01", isActive = false),
-        previewItem(6, "PRESET 07", localAlias = "Set Opener", isActive = true),
+        previewItem(0, "PRESET 01", isActive = false, assignedSlots = setOf(PresetSlot.C)),
+        previewItem(
+            6,
+            "PRESET 07",
+            localAlias = "Set Opener",
+            isActive = true,
+            assignedSlots = setOf(PresetSlot.A, PresetSlot.B),
+        ),
         previewItem(11, "DJENT TIGHT"),
     ) + (0..19).filterNot { it in setOf(0, 6, 11) }.map { previewItem(it, "PRESET %02d".format(it + 1)) },
     isLive = true,
