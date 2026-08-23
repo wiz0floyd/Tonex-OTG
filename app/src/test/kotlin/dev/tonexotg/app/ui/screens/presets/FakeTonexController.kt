@@ -55,6 +55,15 @@ class FakeTonexController(
     /** What [selectPreset] returns the next time it's called; defaults to success. */
     var nextSelectPresetResult: TonexResult<Unit> = TonexResult.Success(Unit)
 
+    /**
+     * Every (slot, preset) pair [assignPresetToSlot] was called with, in order — for S85 part 2b
+     * assign-to-slot assertions.
+     */
+    val assignPresetToSlotCalls: MutableList<Pair<PresetSlot, PresetIndex>> = mutableListOf()
+
+    /** What [assignPresetToSlot] returns the next time it's called; defaults to success. */
+    var nextAssignPresetToSlotResult: TonexResult<Unit> = TonexResult.Success(Unit)
+
     /** Directly pushes a new [ConnectionState], simulating what the real state machine would do. */
     fun setConnectionState(state: ConnectionState) {
         _connectionState.value = state
@@ -117,8 +126,19 @@ class FakeTonexController(
 
     override suspend fun restoreFootswitches(): TonexResult<Unit> = TonexResult.Success(Unit)
 
-    override suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit> =
-        TonexResult.Success(Unit)
+    /**
+     * Deliberately does **not** touch [_slotAssignments] or [_activePreset] on success — the real
+     * [TonexController.assignPresetToSlot] is push-driven only (see its kdoc), and a fake that
+     * "optimistically" updated state here would make S85 part 2b's no-optimistic-update view-model
+     * test vacuous: it couldn't tell "the view model updated state itself" apart from "the fake
+     * pushed it." Tests that need the post-assignment state must call [setSlotAssignments]/
+     * [setActivePreset] explicitly, exactly as they would to simulate any other pedal-confirmed
+     * push.
+     */
+    override suspend fun assignPresetToSlot(slot: PresetSlot, preset: PresetIndex): TonexResult<Unit> {
+        assignPresetToSlotCalls.add(slot to preset)
+        return nextAssignPresetToSlotResult
+    }
 }
 
 /**
