@@ -36,6 +36,7 @@ import dev.tonexotg.app.ui.screens.parameters.ParameterEditorViewModel
 import dev.tonexotg.app.ui.screens.presets.PresetListScreen
 import dev.tonexotg.app.ui.screens.presets.PresetListViewModel
 import dev.tonexotg.app.ui.screens.presets.rememberPresetListViewModel
+import dev.tonexotg.app.ui.screens.settings.SettingsScreen
 import dev.tonexotg.protocol.PresetIndex
 
 /**
@@ -122,6 +123,7 @@ fun TonexApp(
                     viewModel = presetListViewModel,
                     onPresetOpened = { navController.navigate(TonexRoute.PARAMETER_EDITOR.route) },
                     onAboutClick = { navController.navigate(TonexRoute.ABOUT.route) },
+                    onSettingsClick = { navController.navigate(TonexRoute.SETTINGS.route) },
                 )
             }
             composable(TonexRoute.PARAMETER_EDITOR.route) {
@@ -132,6 +134,9 @@ fun TonexApp(
             }
             composable(TonexRoute.ABOUT.route) {
                 AboutScreen()
+            }
+            composable(TonexRoute.SETTINGS.route) {
+                SettingsScreen()
             }
         }
     }
@@ -167,12 +172,19 @@ private fun PresetListRoute(
     viewModel: PresetListViewModel,
     onPresetOpened: (PresetIndex) -> Unit,
     onAboutClick: () -> Unit,
+    onSettingsClick: () -> Unit,
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(text = "Presets", style = MaterialTheme.typography.titleLarge) },
                 actions = {
+                    TextButton(
+                        onClick = onSettingsClick,
+                        modifier = Modifier.testTag("presetList.settingsButton"),
+                    ) {
+                        Text("Settings")
+                    }
                     TextButton(
                         onClick = onAboutClick,
                         modifier = Modifier.testTag("presetList.aboutButton"),

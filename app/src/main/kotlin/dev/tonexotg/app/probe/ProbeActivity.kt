@@ -4,6 +4,7 @@ import android.content.Intent
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -106,6 +107,50 @@ class ProbeActivity : ComponentActivity() {
         // button — so the transport stays usable for the reader/restore to finish.
     }
 }
+
+/**
+ * Issue #96: builds a `github.com/.../issues/new` deep link pre-filled from [log]'s current
+ * contents, for [Intent.ACTION_VIEW] to hand off to the browser/GitHub app. Takes [ProbeLog]
+ * itself (not a pre-rendered string) so it reuses [ProbeLog.render]'s formatting -- the same
+ * "one canonical line format" [ProbeLog]'s own KDoc requires for its real-time file sink, rather
+ * than re-deriving the `[HH:mm:ss.SSS] [LEVEL] message` shape a second time here and risking the
+ * two silently diverging on a future format change. Deliberately the *tail* of the log (most
+ * recent entries), not the head -- the most recent lines are the ones nearest to whatever
+ * prompted the user to file this, and [maxBodyChars] means one or the other end has to be cut.
+ * Kept well under any browser/Android intent URL-length ceiling (unlike a Binder transaction,
+ * there's no single documented limit here, but several thousand characters is a safe margin).
+ */
+internal fun buildDebugDumpIssueUri(log: ProbeLog, maxBodyChars: Int = MAX_BODY_CHARS): Uri {
+    val fullLog = log.render()
+    val truncated = fullLog.length > maxBodyChars
+    val tail = if (truncated) fullLog.takeLast(maxBodyChars) else fullLog
+    val body = buildString {
+        appendLine("<!-- Filed from the Tonex Probe debug dump shortcut (issue #96). -->")
+        appendLine()
+        appendLine("**What happened:** _(describe here)_")
+        appendLine()
+        if (truncated) {
+            appendLine(
+                "Log truncated to the most recent $maxBodyChars characters for this link. " +
+                    "Attach the full log via the probe screen's \"Save & share log\" button if more " +
+                    "context is needed.",
+            )
+            appendLine()
+        }
+        appendLine("```")
+        append(tail)
+        appendLine()
+        appendLine("```")
+    }
+    return Uri.parse("https://github.com/$GITHUB_REPO/issues/new")
+        .buildUpon()
+        .appendQueryParameter("title", "Debug dump: ")
+        .appendQueryParameter("body", body)
+        .build()
+}
+
+private const val GITHUB_REPO = "wiz0floyd/Tonex-OTG"
+private const val MAX_BODY_CHARS = 4000
 
 private class UsbConnectionHandles(
     val connection: UsbDeviceConnection,
@@ -308,6 +353,32 @@ private fun ProbeScreen(scope: CoroutineScope, log: ProbeLog, logFile: ProbeLogF
             },
         ) {
             Text("Save & share log")
+        }
+
+        OutlinedButton(
+            onClick = {
+                // Issue #96: no GitHub token/API call from the device -- this just opens a
+                // pre-filled "new issue" page in the browser/GitHub app so the user reviews and
+                // submits it themselves, already authenticated there. The full log is still only
+                // reliably retrieved via "Save & share log" above; this button carries a
+                // tail-truncated summary since a GitHub issue body has no hard URL-length limit
+                // but browsers and the Android intent machinery do.
+                //
+                // runCatching, matching this codebase's convention for external-facing calls
+                // that can't be relied on to always succeed (AndroidUsbIoPort, ProbeSession,
+                // TonexSessionHolder): a device/profile with no browser or GitHub-capable app
+                // registered for an https ACTION_VIEW would otherwise throw
+                // ActivityNotFoundException straight out of this onClick and crash the Activity.
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, buildDebugDumpIssueUri(log)))
+                }.onSuccess {
+                    log.info("Opening GitHub issue draft for debug dump.")
+                }.onFailure { t ->
+                    log.error("Could not open GitHub issue draft: ${t::class.simpleName}: ${t.message}")
+                }
+            },
+        ) {
+            Text("Post debug dump as GitHub issue")
         }
 
         OutlinedButton(
