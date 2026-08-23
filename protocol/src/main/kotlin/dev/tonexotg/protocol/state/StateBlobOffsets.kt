@@ -53,6 +53,17 @@ import dev.tonexotg.protocol.SessionId
  * - `MAX_STATE_DATA` — line 76 (matches [PedalState.MAX_STATE_BYTES] = 512).
  * - `TONEX_STATE_OFFSET_START_*` / `TONEX_STATE_OFFSET_END_*` `#define`s — lines 105-119.
  *
+ * ### Global-parameter offsets (issue #83)
+ * [END_BPM], [START_INPUT_TRIM], [START_CAB_BYPASS], [END_TEMPO_SOURCE], [END_TUNING_REF], and
+ * [END_BYPASS_MODE] were hand-checked against the same pinned commit, both `usb_tonex_one_modify_global`
+ * (write) and `usb_tonex_one_parse_state` (read) — confirmed symmetric, no mismatch between the two
+ * directions. `BPM` and `INPUT_TRIM` are 4-byte little-endian IEEE-754 floats; `TUNING_REFERENCE` is
+ * a 2-byte little-endian `uint16`; the rest are single bytes. Endianness for the two float fields is
+ * not spelled out by a `#define` name the way `TUNING_REFERENCE`'s is — it is inferred from the same
+ * `memcpy`-of-a-native-struct pattern [dev.tonexotg.protocol.message.MasterVolumeMessage] already
+ * documents for this pedal's on-wire float encoding, not independently re-verified byte-by-byte
+ * against a captured frame.
+ *
  * This is the **only** firmware revision these offsets are known to be correct for. If a
  * connected pedal's actual firmware predates or postdates the revision IK shipped around that
  * commit, these offsets may silently point at the wrong bytes; the length and sanity checks in
@@ -79,13 +90,26 @@ import dev.tonexotg.protocol.SessionId
  *   reselect, forced to `0` otherwise. Easy to miss because it is not adjacent to the other two in
  *   the `#define` list — it sits between [END_CURRENT_SLOT] (`11`) and `END_SLOT_C_PRESET` (`14`).
  *
- * Per this project's mandate (see [PedalState] and issue #12), all three are side effects to
- * strip, not to port, so this module never writes any of them and does not even name their
+ * `TONEX_STATE_OFFSET_START_STOMP_MODE` and `TONEX_STATE_OFFSET_END_DIRECT_MONITOR` remain
+ * entirely unmodelled: per this project's mandate (see [PedalState] and issue #12), both are side
+ * effects to strip, not to port, so this module never writes either and does not even name their
  * offsets as constants here — there is nothing in this file capable of producing that write. An
- * earlier version of this KDoc named only the first two; that was a documentation completeness
- * gap, not a code gap — see [dev.tonexotg.protocol.diagnostics.PresetChangeAudit], whose
- * exhaustive full-blob diff would have caught a write to any of the three regardless of whether
- * this comment named it.
+ * earlier version of this KDoc named only these two, plus `END_BYPASS_MODE`, as a single group of
+ * three; that was a documentation completeness gap, not a code gap — see
+ * [dev.tonexotg.protocol.diagnostics.PresetChangeAudit], whose exhaustive full-blob diff would
+ * have caught a write to any of the three regardless of whether this comment named it.
+ *
+ * **`TONEX_STATE_OFFSET_END_BYPASS_MODE` is now modelled, as [END_BYPASS_MODE] — but only for a
+ * different, legitimate write.** Issue #83 adds a direct, user-initiated write path for the
+ * pedal's global `BYPASS` parameter (`ParameterId` 115), which happens to share this exact byte
+ * with upstream's unwanted preset-reselect side effect. Naming this offset as a constant does
+ * **not** reopen the side-effect this file's own history spent two rounds of review guarding
+ * against: [StateBlobPatcher]'s `selectPreset`/`patchSlotAssignment`/`restoreSlotAssignments` — the
+ * only functions that implement preset selection/assignment — never reference [END_BYPASS_MODE],
+ * and a dedicated regression test (`StateBlobPatcherTest`) asserts none of them ever touches this
+ * byte. The only function permitted to write it is the new global-parameter patch reachable
+ * exclusively from `DefaultTonexController.writeParameterLocked`'s `BYPASS` branch — never from
+ * preset-selection code.
  */
 internal object StateBlobOffsets {
 
@@ -104,12 +128,49 @@ internal object StateBlobOffsets {
      */
     const val END_CURRENT_SLOT: Int = 11
 
+    /** End-relative offset of the pedal's global BPM value (4-byte little-endian float). */
+    const val END_BPM: Int = 4
+
+    /**
+     * Start-relative offset of the pedal's global input-trim value (4-byte little-endian float,
+     * dB).
+     */
+    const val START_INPUT_TRIM: Int = 15
+
+    /** Start-relative offset of the global cab-sim-bypass flag byte (`0`/`1`). */
+    const val START_CAB_BYPASS: Int = 20
+
+    /** End-relative offset of the global tempo-source flag byte (`0` = GLOBAL, `1` = PRESET). */
+    const val END_TEMPO_SOURCE: Int = 6
+
+    /** End-relative offset of the global tuning-reference value (2-byte little-endian `uint16`, Hz). */
+    const val END_TUNING_REF: Int = 9
+
+    /**
+     * End-relative offset of the global bypass-mode flag byte (`0`/`1`).
+     *
+     * This is the SAME byte upstream's `set_preset_in_slot()` writes as an unwanted side effect of
+     * preset selection — see "Fields intentionally NOT modelled here" above for why that write is
+     * deliberately never ported. This constant exists for a different, legitimate write: a direct,
+     * user-initiated write of the `BYPASS` global parameter (issue #83), reachable only from
+     * [dev.tonexotg.protocol.connection.DefaultTonexController.writeParameterLocked]. No function
+     * that implements preset selection or slot assignment may reference this constant.
+     */
+    const val END_BYPASS_MODE: Int = 12
+
     /**
      * The largest end-relative offset this module ever indexes. A blob whose length is smaller
      * than this cannot safely be indexed at any of the offsets above at all — indexing it would
      * throw `ArrayIndexOutOfBoundsException` rather than land on a wrong-but-in-bounds byte. This
      * is purely an indexing-safety floor, not a plausibility floor — see [MIN_PLAUSIBLE_BLOB_SIZE]
      * for the latter, which [StateBlobPatcher] actually enforces as its length rejection.
+     *
+     * Still [END_SLOT_A_PRESET] (`18`) after issue #83 added [END_BPM] (`4`), [END_TEMPO_SOURCE]
+     * (`6`), [END_TUNING_REF] (`9`, 2-byte field — deepest byte touched is still only `9`), and
+     * [END_BYPASS_MODE] (`12`): all four are smaller than the existing floor, so none of them
+     * widens it. [START_INPUT_TRIM] and [START_CAB_BYPASS] are start-relative, not end-relative,
+     * and are both well short of [START_COLOUR_TABLE] (`22`) — they do not affect this constant or
+     * [MIN_PLAUSIBLE_BLOB_SIZE] either.
      */
     const val MAX_END_OFFSET: Int = END_SLOT_A_PRESET
 
