@@ -176,7 +176,15 @@ fun PresetListContent(
                     subtitle = subtitle,
                     assignedSlots = item.assignedSlots.map { it.name }.toSet(),
                     onEditAlias = { onEditAliasRequested(item.index) },
-                    onAssignSlot = { onAssignSlotRequested(item.index) },
+                    // Gated on isLive, not just null-checked: assignedSlots is forced empty
+                    // while disconnected (same reason the badges themselves hide then), so
+                    // showing this affordance would let the dialog open and render every slot
+                    // "Empty" -- falsely claiming known pedal state we don't have.
+                    onAssignSlot = if (uiState.isLive) {
+                        { onAssignSlotRequested(item.index) }
+                    } else {
+                        null
+                    },
                     modifier = Modifier.testTag("presetRow.${item.index.value}"),
                 )
             }

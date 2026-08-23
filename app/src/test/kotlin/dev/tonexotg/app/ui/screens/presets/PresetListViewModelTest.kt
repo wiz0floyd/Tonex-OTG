@@ -364,15 +364,18 @@ class PresetListViewModelTest {
             assertTrue(viewModel.uiState.value.items[3].isActive)
             assertTrue(viewModel.uiState.value.items[9].assignedSlots.isEmpty())
 
-            // Now simulate the pedal's confirming push: A now points at 9, and (per the
-            // move/swap contract) 3 -- the slot A moved from -- no longer holds anything, and 3
-            // was also the active preset, so activePreset moves to whatever A's target held
-            // before (here: nothing new selected, so it stays 3 in this simplified scenario --
-            // what matters is this only happens after the explicit push, not before).
+            // Now simulate the pedal's confirming push: A now points at 9, so 3 -- the slot A
+            // moved from -- no longer holds anything. 3 was also the active preset and A was the
+            // slot being touched, so per TonexController.assignPresetToSlot's kdoc (TonexController.kt:153-156)
+            // activePreset moves to 9 too -- this is the other half of the push-driven-only
+            // contract this test exists to guard, so assert it actually moves, not that it stays.
             controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(9)))
+            controller.setActivePreset(PresetIndex(9))
             val pushed = awaitItem { it.items[9].assignedSlots.contains(PresetSlot.A) }
             assertTrue(pushed.items[9].assignedSlots.contains(PresetSlot.A))
             assertTrue(pushed.items[3].assignedSlots.isEmpty())
+            assertTrue(pushed.items[9].isActive)
+            assertFalse(pushed.items[3].isActive)
         }
     }
 
