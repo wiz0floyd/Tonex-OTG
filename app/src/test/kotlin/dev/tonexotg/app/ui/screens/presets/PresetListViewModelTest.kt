@@ -275,6 +275,107 @@ class PresetListViewModelTest {
         }
     }
 
+    // --- Assign-to-slot (S85 part 2b) --------------------------------------------------------
+
+    @Test
+    fun `assignToSlot is a no-op when not live`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Idle)
+        val viewModel = newViewModel(controller)
+
+        viewModel.assignToSlot(PresetIndex(9), PresetSlot.B)
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(controller.assignPresetToSlotCalls.isEmpty())
+    }
+
+    @Test
+    fun `assignToSlot calls through to the controller with the right slot and index while live`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            awaitItem { it.items.isNotEmpty() }
+
+            viewModel.assignToSlot(PresetIndex(9), PresetSlot.B)
+
+            // Nothing in this fake's assignPresetToSlot stub pushes a new uiState emission on its
+            // own (unlike selectPreset's stub) -- suspend until the launched coroutine has
+            // actually run by awaiting the call log settling via a follow-up push, matching this
+            // class's documented "advanceUntilIdle alone doesn't drain backgroundScope" note.
+            controller.setSlotAssignments(mapOf(PresetSlot.B to PresetIndex(9)))
+            val state = awaitItem { it.items[9].assignedSlots.contains(PresetSlot.B) }
+            assertTrue(state.items[9].assignedSlots.contains(PresetSlot.B))
+        }
+
+        assertEquals(listOf(PresetSlot.B to PresetIndex(9)), controller.assignPresetToSlotCalls)
+    }
+
+    @Test
+    fun `a failed assignToSlot surfaces the TonexError rather than being swallowed`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.nextAssignPresetToSlotResult = TonexResult.Failure(
+            TonexError.ProtocolStateViolation(state = ConnectionState.Connecting, details = "not ready"),
+        )
+        val viewModel = newViewModel(controller)
+
+        viewModel.assignToSlot(PresetIndex(2), PresetSlot.A)
+
+        viewModel.uiState.test {
+            val state = awaitItem { it.assignSlotError != null }
+            assertTrue(state.assignSlotError is TonexError.ProtocolStateViolation)
+        }
+
+        assertEquals(listOf(PresetSlot.A to PresetIndex(2)), controller.assignPresetToSlotCalls)
+    }
+
+    @Test
+    fun `assignToSlot does not optimistically change uiState before the controller's flows emit`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(3)))
+        controller.setActivePreset(PresetIndex(3))
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val initial = awaitItem { it.items[3].assignedSlots.isNotEmpty() }
+            assertEquals(setOf(PresetSlot.A), initial.items[3].assignedSlots)
+            assertTrue(initial.items[3].isActive)
+
+            // Fire the write -- the fake's stub (see FakeTonexController.assignPresetToSlot's
+            // kdoc) deliberately does not touch slotAssignments/activePreset on success, so if the
+            // ViewModel guessed the swap's result locally, it would show up as a *new* uiState
+            // emission here even though the controller's own flows haven't moved. Assert the call
+            // actually happened (proving the coroutine ran) while uiState is untouched, then only
+            // after simulating the real pedal push does the badge/active state actually move.
+            viewModel.assignToSlot(PresetIndex(9), PresetSlot.A) // swap: A moves 3 -> 9
+
+            // Drain the launched coroutine at the current virtual instant (runCurrent, not
+            // advanceUntilIdle -- see ParameterWriteThrottlerTest's own note on why the two
+            // differ) without advancing past it, then confirm the write actually ran...
+            this@runTest.testScheduler.runCurrent()
+            assertEquals(listOf(PresetSlot.A to PresetIndex(9)), controller.assignPresetToSlotCalls)
+            // ...while uiState still has NOT recomputed: the fake's assignPresetToSlot stub never
+            // touches slotAssignments/activePreset (see its kdoc), so if the ViewModel rendered
+            // its own guess of the swap here instead of waiting for the real push, this direct
+            // StateFlow.value read (bypassing Turbine's buffered items entirely) would catch it.
+            assertEquals(setOf(PresetSlot.A), viewModel.uiState.value.items[3].assignedSlots)
+            assertTrue(viewModel.uiState.value.items[3].isActive)
+            assertTrue(viewModel.uiState.value.items[9].assignedSlots.isEmpty())
+
+            // Now simulate the pedal's confirming push: A now points at 9, and (per the
+            // move/swap contract) 3 -- the slot A moved from -- no longer holds anything, and 3
+            // was also the active preset, so activePreset moves to whatever A's target held
+            // before (here: nothing new selected, so it stays 3 in this simplified scenario --
+            // what matters is this only happens after the explicit push, not before).
+            controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(9)))
+            val pushed = awaitItem { it.items[9].assignedSlots.contains(PresetSlot.A) }
+            assertTrue(pushed.items[9].assignedSlots.contains(PresetSlot.A))
+            assertTrue(pushed.items[3].assignedSlots.isEmpty())
+        }
+    }
+
     // --- setAlias: blank input clears rather than throwing ----------------------------------
 
     @Test
