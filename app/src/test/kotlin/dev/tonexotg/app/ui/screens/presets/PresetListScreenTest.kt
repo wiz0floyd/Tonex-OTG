@@ -210,6 +210,82 @@ class PresetListScreenTest {
         ).assertDoesNotExist()
     }
 
+    // ---- Assign-to-slot (S85 part 2b) ------------------------------------------------------------
+
+    @Test
+    fun tappingTheAssignSlotIcon_opensTheDialog() {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        setContentWithViewModel(controller)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithContentDescription("Assign preset 01 to a footswitch slot").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Assign preset 1 to a footswitch slot").assertIsDisplayed()
+    }
+
+    @Test
+    fun tappingSlotB_inTheDialog_callsAssignPresetToSlotWithTheRightSlotAndIndex() {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        setContentWithViewModel(controller)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("presetList").performScrollToIndex(9)
+        composeTestRule.onNodeWithContentDescription("Assign preset 10 to a footswitch slot").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("assignSlotDialog.slot.B").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(
+            listOf(PresetSlot.B to PresetIndex(9)),
+            controller.assignPresetToSlotCalls,
+        )
+        // The dialog closes immediately on tap (fire-and-forget, no await) -- it must not still
+        // be showing after the click.
+        composeTestRule.onNodeWithText("Assign preset 10 to a footswitch slot").assertDoesNotExist()
+    }
+
+    @Test
+    fun theDialog_showsWhichSlotThisPresetAlreadyOccupies() {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.setSlotAssignments(mapOf(PresetSlot.A to PresetIndex(2)))
+        setContentWithViewModel(controller)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("presetList").performScrollToIndex(2)
+        composeTestRule.onNodeWithContentDescription("Assign preset 03 to a footswitch slot").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("assignSlotDialog.slot.A")
+            .assertIsDisplayed()
+        composeTestRule.onNode(
+            hasTestTag("assignSlotDialog.slot.A").and(hasAnyDescendant(hasText("Already here"))),
+            useUnmergedTree = true,
+        ).assertExists()
+    }
+
+    @Test
+    fun theDialog_showsWhatASwapWouldDisplaceOnAnotherSlot() {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.setSlotAssignments(mapOf(PresetSlot.C to PresetIndex(5)))
+        setContentWithViewModel(controller)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("presetList").performScrollToIndex(0)
+        composeTestRule.onNodeWithContentDescription("Assign preset 01 to a footswitch slot").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNode(
+            hasTestTag("assignSlotDialog.slot.C").and(hasAnyDescendant(hasText("Will swap with PRESET 06"))),
+            useUnmergedTree = true,
+        ).assertExists()
+    }
+
     // ---- Inline alias editing -------------------------------------------------------------------
 
     @Test
