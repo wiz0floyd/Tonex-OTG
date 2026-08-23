@@ -50,11 +50,18 @@ jobs:
 
       # Guards against a signingConfig regression silently shipping an unsigned "release" APK
       # (see app/build.gradle.kts's fail-fast check for the build-config half of this guard).
+      #
+      # GitHub's ubuntu-latest runners ship multiple build-tools versions side by side, so a
+      # bare glob (build-tools/*/apksigner) expands to more than one path on one command line —
+      # the second path lands where "verify" belongs and apksigner reports "Unsupported
+      # command: <path>" instead of verifying anything. `sort -V | tail -n1` picks exactly one,
+      # the highest installed version.
       - name: Verify APK is signed
         run: |
           APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
-          echo "Verifying: $APK"
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1)/apksigner"
+          echo "Verifying: $APK (with $APKSIGNER)"
+          "$APKSIGNER" verify --verbose "$APK"
 
       - name: Clean up keystore
         if: always()
