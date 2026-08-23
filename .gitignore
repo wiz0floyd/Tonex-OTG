@@ -33,3 +33,7 @@ local.properties
 
 # Claude Code agent worktrees (transient; nested git worktrees, never commit)
 .claude/worktrees/
+
+# Release signing keystore (#67) — generated locally, stored outside git, never committed
+*.jks
+*.keystore

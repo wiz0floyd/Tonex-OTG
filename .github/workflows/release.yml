@@ -1,0 +1,70 @@
+name: Release
+
+# #67 MVP: tag push -> signed release APK attached to a GitHub Release.
+# workflow_dispatch exists so a dry run can be triggered on a scratch tag before a real release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (defaults to the ref that triggered this run)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # 21, not 17 — see app/build.gradle.kts jvmToolchain(21)
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: chmod +x gradlew
+
+      # Required repo secrets: RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD,
+      # RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD. The keystore itself lives only as a base64
+      # secret and a runner-local temp file — never committed, never logged.
+      - name: Decode release keystore
+        run: |
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed release APK
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      # Guards against a signingConfig regression silently shipping an unsigned "release" APK
+      # (see app/build.gradle.kts's fail-fast check for the build-config half of this guard).
+      - name: Verify APK is signed
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
+          echo "Verifying: $APK"
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: app/build/outputs/apk/release/*.apk
+          # workflow_dispatch dry runs (no real tag push) publish as a draft so a scratch trigger
+          # never creates a public release; a real `v*` tag push publishes normally.
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          fail_on_unmatched_files: true
