@@ -75,22 +75,34 @@ class PresetListViewModel(
     /** The most recent [selectPreset] failure, or `null` — folded into [uiState] below. */
     private val lastSelectError = MutableStateFlow<TonexError?>(null)
 
+    /** The most recent [assignToSlot] failure, or `null` — folded into [uiState] below. */
+    private val lastAssignError = MutableStateFlow<TonexError?>(null)
+
+    /**
+     * [lastSelectError] and [lastAssignError] pre-combined into one arm — the same reason
+     * [pedalPresetState] exists: [uiState]'s own `combine` below is already at the 5-flow ceiling
+     * of [kotlinx.coroutines.flow.combine]'s typed overloads without this.
+     */
+    private val writeErrors = combine(lastSelectError, lastAssignError) { select, assign -> select to assign }
+
     /**
      * The current [PresetListUiState], recombined whenever the controller's connection state,
      * preset list, slot assignments, or active preset changes; a local alias changes; or a
-     * [selectPreset] call fails. [PresetListUiState.initial] covers the one composition frame
-     * before this flow's first emission; every value after that is a full recomputation, never a
-     * patch, so there's no way for a stale item to survive an update to any one of its inputs.
+     * [selectPreset]/[assignToSlot] call fails. [PresetListUiState.initial] covers the one
+     * composition frame before this flow's first emission; every value after that is a full
+     * recomputation, never a patch, so there's no way for a stale item to survive an update to
+     * any one of its inputs.
      */
     val uiState: StateFlow<PresetListUiState> = combine(
         controller.connectionState,
         pedalPresetState,
         controller.activePreset,
         aliasesFlow,
-        lastSelectError,
-    ) { connectionState, pedalState, activePreset, aliases, selectError ->
+        writeErrors,
+    ) { connectionState, pedalState, activePreset, aliases, errors ->
         val (presets, slotAssignments) = pedalState
-        buildUiState(connectionState, presets, activePreset, aliases, selectError, slotAssignments)
+        val (selectError, assignError) = errors
+        buildUiState(connectionState, presets, activePreset, aliases, selectError, assignError, slotAssignments)
     }.stateIn(
         scope = scope,
         started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000),
@@ -103,6 +115,7 @@ class PresetListViewModel(
         activePreset: PresetIndex?,
         aliases: List<String?>,
         selectError: TonexError?,
+        assignError: TonexError?,
         slotAssignments: Map<PresetSlot, PresetIndex>,
     ): PresetListUiState {
         val isLive = connectionState is ConnectionState.Ready
@@ -118,7 +131,12 @@ class PresetListViewModel(
                 slotAssignments = slotAssignments,
             )
         }
-        return PresetListUiState(items = items, isLive = isLive, selectPresetError = selectError)
+        return PresetListUiState(
+            items = items,
+            isLive = isLive,
+            selectPresetError = selectError,
+            assignSlotError = assignError,
+        )
     }
 
     /**
@@ -143,6 +161,29 @@ class PresetListViewModel(
             when (val result = controller.selectPreset(index)) {
                 is TonexResult.Success -> lastSelectError.value = null
                 is TonexResult.Failure -> lastSelectError.value = result.error
+            }
+        }
+    }
+
+    /**
+     * Assigns [index] to [slot] on the pedal (S85 part 2b) — the direct "edit what footswitch
+     * slot A/B/C plays" entry point, distinct from [selectPreset]'s "load this preset now."
+     *
+     * Same fire-and-forget/gate-on-[ConnectionState.Ready] shape as [selectPreset], and
+     * deliberately makes **no** local guess about the result: [TonexController.assignPresetToSlot]'s
+     * own kdoc documents that a single call can move a *different* slot's assignment (the swap's
+     * source) and even [TonexController.activePreset] itself, and both [TonexController.slotAssignments]
+     * and [activePreset] are push-driven only, with no optimistic update from this controller. This
+     * function does not attempt to render its own before-the-pedal-confirms guess of any of
+     * that — [uiState] simply re-renders off the controller's real flows once the confirming push
+     * arrives, exactly as [selectPreset]'s tap-to-load already does for `activePreset`.
+     */
+    fun assignToSlot(index: PresetIndex, slot: PresetSlot) {
+        if (controller.connectionState.value !is ConnectionState.Ready) return
+        scope.launch {
+            when (val result = controller.assignPresetToSlot(slot, index)) {
+                is TonexResult.Success -> lastAssignError.value = null
+                is TonexResult.Failure -> lastAssignError.value = result.error
             }
         }
     }

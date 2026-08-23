@@ -54,6 +54,7 @@ fun PresetListScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var editingIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+    var assigningIndex by rememberSaveable { mutableStateOf<Int?>(null) }
 
     PresetListContent(
         uiState = uiState,
@@ -65,6 +66,7 @@ fun PresetListScreen(
             onPresetOpened(index)
         },
         onEditAliasRequested = { index -> editingIndex = index.value },
+        onAssignSlotRequested = { index -> assigningIndex = index.value },
         modifier = modifier,
     )
 
@@ -77,6 +79,25 @@ fun PresetListScreen(
                 editingIndex = null
             },
             onCancel = { editingIndex = null },
+        )
+    }
+
+    val assigningItem = assigningIndex?.let { i -> uiState.items.getOrNull(i) }
+    if (assigningItem != null) {
+        SlotAssignDialog(
+            item = assigningItem,
+            allItems = uiState.items,
+            onSlotSelected = { slot ->
+                // Fire-and-forget (same rationale as tap-to-load above): close the dialog
+                // immediately rather than waiting for the write to complete. Neither this slot's
+                // badge nor any displaced slot's badge -- nor activePreset if either slot was
+                // active -- update here; PresetListViewModel.assignToSlot deliberately makes no
+                // local guess, so the row(s) simply re-render once the controller's own
+                // slotAssignments/activePreset flows report the pedal's confirming push.
+                viewModel.assignToSlot(assigningItem.index, slot)
+                assigningIndex = null
+            },
+            onCancel = { assigningIndex = null },
         )
     }
 }
@@ -92,6 +113,7 @@ fun PresetListContent(
     uiState: PresetListUiState,
     onPresetClick: (PresetIndex) -> Unit,
     onEditAliasRequested: (PresetIndex) -> Unit,
+    onAssignSlotRequested: (PresetIndex) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -122,6 +144,17 @@ fun PresetListContent(
             )
         }
 
+        val assignErrorPresentation = uiState.assignSlotErrorPresentation
+        if (assignErrorPresentation != null) {
+            ConnectionErrorPanel(
+                presentation = assignErrorPresentation,
+                onReconnect = {},
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(TonexTheme.spacing.space2),
+            )
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -143,6 +176,7 @@ fun PresetListContent(
                     subtitle = subtitle,
                     assignedSlots = item.assignedSlots.map { it.name }.toSet(),
                     onEditAlias = { onEditAliasRequested(item.index) },
+                    onAssignSlot = { onAssignSlotRequested(item.index) },
                     modifier = Modifier.testTag("presetRow.${item.index.value}"),
                 )
             }
@@ -195,6 +229,86 @@ private fun AliasEditDialog(
                 Text("Save")
             }
         },
+        dismissButton = {
+            TextButton(onClick = onCancel) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+/**
+ * "Assign this preset to a footswitch slot" dialog (S85 part 2b) — one row per [PresetSlot], each
+ * a button that immediately confirms and closes (fire-and-forget, mirroring tap-to-load; see
+ * [PresetListScreen]'s own comment on why this dialog never awaits the write).
+ *
+ * Shows two things so the user can see at a glance what a swap would displace, per
+ * [dev.tonexotg.protocol.TonexController.assignPresetToSlot]'s move/swap contract:
+ *  - which slot(s), if any, [item] itself currently occupies (from [PresetListItem.assignedSlots],
+ *    already live per S85 part 2a) — tapping that slot's own button is a no-op per the
+ *    controller's own kdoc.
+ *  - for every *other* slot, which preset currently occupies it (derived from [allItems], since
+ *    [PresetListItem] only carries its own slot set, not what's holding any other slot) — that's
+ *    the preset a tap on that slot would displace via the swap.
+ */
+@Composable
+private fun SlotAssignDialog(
+    item: PresetListItem,
+    allItems: List<PresetListItem>,
+    onSlotSelected: (PresetSlot) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val occupantBySlot: Map<PresetSlot, PresetListItem> = allItems
+        .flatMap { candidate -> candidate.assignedSlots.map { slot -> slot to candidate } }
+        .toMap()
+
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        title = {
+            Text(
+                text = "Assign preset ${item.index.value + 1} to a footswitch slot",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space1)) {
+                Text(
+                    text = item.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TonexTheme.extendedColors.onSurfaceTertiary,
+                )
+                PresetSlot.entries.forEach { slot ->
+                    val currentlyHere = slot in item.assignedSlots
+                    val occupant = occupantBySlot[slot]
+                    val subtitle = when {
+                        currentlyHere -> "Already here"
+                        occupant != null -> "Will swap with ${occupant.displayName}"
+                        else -> "Empty"
+                    }
+                    TextButton(
+                        onClick = { onSlotSelected(slot) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("assignSlotDialog.slot.${slot.name}"),
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = "Slot ${slot.name}",
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Text(
+                                text = subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TonexTheme.extendedColors.onSurfaceTertiary,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
         dismissButton = {
             TextButton(onClick = onCancel) {
                 Text("Cancel")
@@ -283,6 +397,36 @@ private fun PresetListContentErrorPreview() {
             ),
             onPresetClick = {},
             onEditAliasRequested = {},
+        )
+    }
+}
+
+@Preview(name = "Preset list — assign-slot error surfaced (S85 part 2b)", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun PresetListContentAssignErrorPreview() {
+    TonexTheme {
+        PresetListContent(
+            uiState = previewLiveState.copy(
+                assignSlotError = TonexError.ProtocolStateViolation(
+                    state = ConnectionState.Connecting,
+                    details = "assignPresetToSlot requires Ready",
+                ),
+            ),
+            onPresetClick = {},
+            onEditAliasRequested = {},
+        )
+    }
+}
+
+@Preview(name = "Preset list — assign-to-slot dialog open (S85 part 2b)", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun SlotAssignDialogPreview() {
+    TonexTheme {
+        SlotAssignDialog(
+            item = previewLiveState.items[11],
+            allItems = previewLiveState.items,
+            onSlotSelected = {},
+            onCancel = {},
         )
     }
 }

@@ -62,14 +62,20 @@ data class PresetListItem(
  *   Per FR11 / this project's fail-fast-and-loud house style, a failed [dev.tonexotg.protocol.TonexController.selectPreset]
  *   call is surfaced here rather than swallowed — the row simply not turning active is not
  *   itself a legible failure signal.
+ * @property assignSlotError the most recent [TonexError] from a failed [dev.tonexotg.protocol.TonexController.assignPresetToSlot]
+ *   call (S85 part 2b), or `null`. Same fail-fast-and-loud rationale as [selectPresetError].
  */
 data class PresetListUiState(
     val items: List<PresetListItem>,
     val isLive: Boolean,
     val selectPresetError: TonexError? = null,
+    val assignSlotError: TonexError? = null,
 ) {
     val selectPresetErrorPresentation: ErrorPresentation?
         get() = selectPresetError?.toPresentation()
+
+    val assignSlotErrorPresentation: ErrorPresentation?
+        get() = assignSlotError?.toPresentation()
 
     companion object {
         /** Every screen starts here for one composition frame, before the first flow emission lands. */

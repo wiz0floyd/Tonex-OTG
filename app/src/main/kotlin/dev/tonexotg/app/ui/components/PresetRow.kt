@@ -47,6 +47,11 @@ import dev.tonexotg.app.ui.theme.minTouchTarget
  *   pointed at this preset (S85 part 2a) — this component never imports
  *   `dev.tonexotg.protocol.*`, so the caller converts `PresetSlot.name` before passing these in.
  *   Empty (the default) renders no badges at all, matching every pre-S85 caller/preview.
+ * @param onAssignSlot when non-null, renders a third icon affordance (S85 part 2b) — its own
+ *   [dev.tonexotg.app.ui.theme.TonexTouchTargets.secondary] touch target, alongside (not in place
+ *   of) [onEditAlias] and the [assignedSlots] badges — that invokes this callback to open the
+ *   "assign this preset to a footswitch slot" dialog. `null` (the default) renders no affordance
+ *   at all, matching every pre-S85-part-2b caller/preview.
  */
 @Composable
 fun PresetRow(
@@ -58,6 +63,7 @@ fun PresetRow(
     subtitle: String? = null,
     assignedSlots: Set<String> = emptySet(),
     onEditAlias: (() -> Unit)? = null,
+    onAssignSlot: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(10.dp)
     val borderColor = if (isActive) MaterialTheme.colorScheme.primary else Color.Transparent
@@ -170,6 +176,23 @@ fun PresetRow(
                 )
             }
         }
+
+        if (onAssignSlot != null) {
+            Box(
+                modifier = Modifier
+                    .minTouchTarget(TonexTheme.touchTargets.secondary)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onAssignSlot)
+                    .semantics { contentDescription = "Assign preset $index to a footswitch slot" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "⇄",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TonexTheme.extendedColors.onSurfaceTertiary,
+                )
+            }
+        }
     }
 }
 
@@ -241,5 +264,23 @@ private fun PresetRowSlotBadgesPreview() {
                 modifier = Modifier.padding(16.dp),
             )
         }
+    }
+}
+
+@Preview(name = "Preset row — assign-to-slot affordance (S85 part 2b)", showBackground = true, backgroundColor = 0xFF121212)
+@Composable
+private fun PresetRowAssignSlotPreview() {
+    TonexTheme {
+        PresetRow(
+            index = "07",
+            name = "Set Opener",
+            isActive = true,
+            onClick = {},
+            subtitle = "from pedal: PRESET 07",
+            assignedSlots = setOf("A"),
+            onEditAlias = {},
+            onAssignSlot = {},
+            modifier = Modifier.padding(16.dp),
+        )
     }
 }
