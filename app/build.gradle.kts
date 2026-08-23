@@ -58,9 +58,41 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
 
+    // Release signing (#67): sourced from env vars, never from committed files or
+    // gradle.properties. If NONE of the four vars are set, `signingConfig` is left null and
+    // `assembleRelease` produces an unsigned APK as before — the everyday local-build path for
+    // contributors. If SOME are set, that's a broken invocation (e.g. a typo'd secret name in
+    // CI) and must fail loudly rather than silently falling back to unsigned, per this repo's
+    // fail-fast-and-loud philosophy — an unsigned "release" APK published by CI is exactly the
+    // kind of silent wrong-success this project explicitly guards against.
+    val keystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
+    val keystorePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+    val keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+    val keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+    val releaseSigningVars = listOf(keystorePath, keystorePassword, keyAlias, keyPassword)
+    val releaseSigningConfigured = releaseSigningVars.all { !it.isNullOrEmpty() }
+    check(releaseSigningConfigured || releaseSigningVars.all { it.isNullOrEmpty() }) {
+        "Partial release signing config: RELEASE_KEYSTORE_PATH/RELEASE_KEYSTORE_PASSWORD/" +
+            "RELEASE_KEY_ALIAS/RELEASE_KEY_PASSWORD must be either all set or all unset."
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(keystorePath!!)
+                storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
