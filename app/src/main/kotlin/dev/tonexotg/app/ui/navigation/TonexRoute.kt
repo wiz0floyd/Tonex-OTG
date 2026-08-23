@@ -24,4 +24,7 @@ enum class TonexRoute(val route: String) {
 
     /** Credits, licences, version info (S19). */
     ABOUT("about"),
+
+    /** Diagnostics entry point + app preferences (issue #96). */
+    SETTINGS("settings"),
 }

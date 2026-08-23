@@ -42,14 +42,11 @@
           docs/architecture/s23-ui-wiring.md §3.4/§3.5 for why every connection path goes through
           that service instead.
 
-          android:taskAffinity is explicit (and distinct from ProbeActivity's below) because both
-          activities declare their own MAIN/LAUNCHER intent-filter, giving each its own icon in
-          the app drawer — with neither activity overriding taskAffinity, both default to the
-          SAME value (the application's package name), which puts them in the same task. That
-          made the two launcher icons unreliable: opening one and then the other could resurface
-          whichever task already existed instead of actually starting the newly-tapped Activity,
-          so both icons could appear to open the same (first-launched) screen. Distinct
-          affinities give each launcher icon its own task, so each reliably opens its own Activity.
+          android:taskAffinity is explicit so this Activity's task is never ambiguous with any
+          other Activity's. Historically this mattered because ProbeActivity below also declared
+          its own MAIN/LAUNCHER intent-filter; ProbeActivity's launcher icon was removed in issue
+          #96 (it's now reached from Settings via an explicit Intent, so it opens in this
+          Activity's own task), but MainActivity keeps its explicit affinity regardless.
         -->
         <activity
             android:name=".MainActivity"
@@ -101,18 +98,16 @@
 
         <!--
           ⚠️ DIAGNOSTIC-ONLY (S20 hardware probe, issue #25). Not part of the app's real
-          navigation — see dev.tonexotg.app.probe's KDoc. A standalone launcher activity so the
-          product owner can run it directly from the device's app drawer, separate from
-          MainActivity, without any of this being wired into real screens (S16-S19).
-
-          android:taskAffinity is distinct from MainActivity's — see MainActivity's own comment
-          above for why an explicit, distinct affinity is required on every launcher activity.
+          navigation — see dev.tonexotg.app.probe's KDoc. Reached from the Settings screen
+          (issue #96) via an explicit Intent, not its own launcher icon: it no longer declares a
+          MAIN/LAUNCHER intent-filter or a distinct taskAffinity, so it opens in MainActivity's
+          own task instead of spawning a separate app-drawer entry. exported="false" because
+          nothing outside this app ever starts it directly.
         -->
         <activity
             android:name=".probe.ProbeActivity"
             android:label="Tonex Probe (Diagnostic)"
-            android:exported="true"
-            android:taskAffinity="${applicationId}.probe"
+            android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
             <!--
               configChanges above keeps a rotation (or keyboard/UI-mode change) from destroying
@@ -120,10 +115,6 @@
               see ProbeSession.runWriteTest's NonCancellable restore-write guard (issue #25,
               opus-reviewer-probe25 B1).
             -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
         </activity>
 
         <!--
