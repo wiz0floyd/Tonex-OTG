@@ -1142,22 +1142,58 @@ class DefaultTonexController(
             return TonexResult.Failure(TonexError.ParameterValueOutOfRange(id, value, spec.min, effectiveMax))
         }
 
-        val encoded: ByteArray = when {
-            spec.scope == ParameterScope.PRESET ->
-                ParameterWriteMessage.encode(id, value, capabilities, effectiveBounds).orReturn { return it }
-            spec.enumName == "MASTER_VOLUME" ->
-                MasterVolumeMessage.encode(value, capabilities).orReturn { return it }
-            else -> return TonexResult.Failure(
+        if (spec.scope == ParameterScope.PRESET) {
+            val encoded = ParameterWriteMessage.encode(id, value, capabilities, effectiveBounds).orReturn { return it }
+            writeFramed(encoded).orReturn { return it }
+            _parameterValues.update { it + (id to value) } // AFTER success only
+            return TonexResult.Success(Unit)
+        }
+
+        if (spec.enumName == "MASTER_VOLUME") {
+            val encoded = MasterVolumeMessage.encode(value, capabilities).orReturn { return it }
+            writeFramed(encoded).orReturn { return it }
+            _parameterValues.update { it + (id to value) } // AFTER success only
+            return TonexResult.Success(Unit)
+        }
+
+        // The remaining GLOBAL-scope parameters (issue #83): upstream writes these by patching the
+        // full state blob, the same read-modify-write mechanism selectPreset/restoreFootswitches
+        // already use. Mandatory re-read immediately before the patch, per PedalState's freshness
+        // contract.
+        val globalPatcher: ((PedalState, SessionId, Float) -> TonexResult<ByteArray>)? = when (spec.enumName) {
+            "BPM" -> StateBlobPatcher::patchBpm
+            "INPUT_TRIM" -> StateBlobPatcher::patchInputTrim
+            "CABSIM_BYPASS" -> StateBlobPatcher::patchCabSimBypass
+            "TEMPO_SOURCE" -> StateBlobPatcher::patchTempoSource
+            "TUNING_REFERENCE" -> StateBlobPatcher::patchTuningReference
+            "BYPASS" -> StateBlobPatcher::patchBypassMode
+            else -> null
+        }
+        if (globalPatcher == null) {
+            return TonexResult.Failure(
                 TonexError.ProtocolStateViolation(
                     _connectionState.value,
-                    "${spec.enumName} is a global parameter other than master volume; :protocol has no write " +
-                        "path for it — upstream writes those by patching the full state blob at offsets " +
-                        "StateBlobOffsets deliberately does not model",
+                    "${spec.enumName} is a global parameter with no known write path in :protocol",
                 ),
             )
         }
 
-        writeFramed(encoded).orReturn { return it }
+        val s = session ?: return TonexResult.Failure(
+            TonexError.ProtocolStateViolation(_connectionState.value, "no session (internal invariant violated)"),
+        )
+        val fresh: PedalState = requestAndAwait(
+            RequestStateMessage.encode(),
+            timeouts.stateReadMillis,
+            "state-read",
+        ) { inb ->
+            commonInbound("state-read", inb) ?: when (inb) {
+                is Inbound.State -> inb.result
+                else -> null
+            }
+        }.orReturn { return it }
+
+        val patched = globalPatcher(fresh, s, value).orReturn { return it }
+        writeFramed(SetStateMessage.encode(patched)).orReturn { return it }
         _parameterValues.update { it + (id to value) } // AFTER success only
         return TonexResult.Success(Unit)
     }
@@ -1369,9 +1405,12 @@ class DefaultTonexController(
      *
      * ## Why a whole-state write, not per-parameter writes
      * Unlike [revertActivePreset], there is no per-parameter write path for footswitch slot
-     * assignments — they are pedal globals, not [ParameterScope.PRESET]-scoped parameters (see
-     * [writeParameterLocked]'s `else` branch: ":protocol has no write path" for globals other than
-     * master volume). The *only* way to change a slot assignment on this pedal at all is the same
+     * assignments — they are pedal globals, not [ParameterScope.PRESET]-scoped parameters, and
+     * unlike the six other GLOBAL-scope parameters [writeParameterLocked] now has a write path for
+     * (issue #83: `BPM`, `INPUT_TRIM`, `CABSIM_BYPASS`, `TEMPO_SOURCE`, `TUNING_REFERENCE`,
+     * `BYPASS`, plus `MASTER_VOLUME`'s own dedicated message), footswitch slot assignments are the
+     * one remaining global with no per-parameter write path at all. The *only* way to change a slot
+     * assignment on this pedal at all is the same
      * read-modify-write whole-state mechanism [selectPreset] already uses — this function follows
      * that exact, already-reviewed pattern: mandatory re-read immediately before the patch,
      * [StateBlobPatcher] as the sole byte-touching authority, and [selfInitiatedPreset] set (only)
