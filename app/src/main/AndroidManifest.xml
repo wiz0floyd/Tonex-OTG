@@ -100,9 +100,17 @@
           ⚠️ DIAGNOSTIC-ONLY (S20 hardware probe, issue #25). Not part of the app's real
           navigation — see dev.tonexotg.app.probe's KDoc. Reached from the Settings screen
           (issue #96) via an explicit Intent, not its own launcher icon: it no longer declares a
-          MAIN/LAUNCHER intent-filter or a distinct taskAffinity, so it opens in MainActivity's
-          own task instead of spawning a separate app-drawer entry. exported="false" because
-          nothing outside this app ever starts it directly.
+          MAIN/LAUNCHER intent-filter, so it no longer spawns a separate app-drawer entry.
+          exported="false" because nothing outside this app ever starts it directly.
+
+          No explicit taskAffinity either (unlike MainActivity's, above) — it inherits the
+          default (bare ${applicationId}) affinity, which differs from MainActivity's
+          "${applicationId}.main". It still opens in MainActivity's task today only because
+          SettingsScreen starts it from an Activity Context with no FLAG_ACTIVITY_NEW_TASK, which
+          reuses the calling task regardless of affinity. That's a property of the call site, not
+          a guarantee this manifest entry makes — if ProbeActivity is ever started with
+          FLAG_ACTIVITY_NEW_TASK, or from a context that requires it, the affinity mismatch would
+          spawn it into its own task again.
         -->
         <activity
             android:name=".probe.ProbeActivity"
