@@ -80,6 +80,27 @@ class DefaultTonexControllerSetParameterTest {
     }
 
     @Test
+    fun `an out-of-range BPM value is rejected before any re-read is issued - issue 83`() = runTest {
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+        )
+        connectToReady(controller, fake)
+        val writesBefore = fake.writtenMessages().size
+
+        val result = controller.setParameter(bpmParam.id, bpmParam.max + 1f)
+
+        val error = (result as TonexResult.Failure).error
+        assertIs<TonexError.ParameterValueOutOfRange>(error)
+        assertEquals(
+            fake.writtenMessages().size,
+            writesBefore,
+            "no re-read or write should be issued for an out-of-range global-parameter value",
+        )
+    }
+
+    @Test
     fun `a value below min is rejected with ParameterValueOutOfRange`() = runTest {
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
