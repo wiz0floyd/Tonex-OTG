@@ -1,5 +1,6 @@
 package dev.tonexotg.protocol.state
 
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PedalState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetSlot
@@ -186,5 +187,97 @@ class StateBlobReaderTest {
 
         assertTrue(patcherResult.assertFailure() is TonexError.ImplausibleStateBlobShape)
         assertTrue(readerResult.assertFailure() is TonexError.ImplausibleStateBlobShape)
+    }
+
+    // ---- globalParameterValues (issue #83) -----------------------------------------------------
+
+    /**
+     * The exact 160-byte `GetState` response captured from a real pedal, S22 backup run
+     * (`docs/hardware-probes/tonexprobe20260819_220308.log.txt`, "S22 backup: full state blob
+     * (160 bytes)" entry). Decoded by hand at the six global offsets this test pins literal
+     * expectations against - not a round-trip against this module's own encoder.
+     */
+    private val capturedHardwareBlob: ByteArray = intArrayOf(
+        0xB9, 0x01, 0xB9, 0x0E, 0x82, 0x4C, 0x42, 0x4C, 0x47, 0xB9, 0x03, 0x00, 0x04, 0x00, 0x88, 0x00,
+        0x00, 0x20, 0x40, 0x00, 0x00, 0x01, 0xBA, 0x14, 0xB9, 0x03, 0x00, 0x80, 0xFF, 0x00, 0xB9, 0x03,
+        0x00, 0x00, 0x80, 0xFF, 0xB9, 0x03, 0x80, 0xFF, 0x00, 0x00, 0xB9, 0x03, 0x80, 0xFF, 0x00, 0x00,
+        0xB9, 0x03, 0x00, 0x00, 0x80, 0xFF, 0xB9, 0x03, 0x80, 0xFF, 0x00, 0x00, 0xB9, 0x03, 0x80, 0xBF,
+        0x80, 0xBF, 0x80, 0xBF, 0xB9, 0x03, 0x0F, 0x80, 0xFF, 0x2F, 0xB9, 0x03, 0x80, 0xFF, 0x00, 0x00,
+        0xB9, 0x03, 0x2F, 0x00, 0x80, 0xFF, 0xB9, 0x03, 0x11, 0x11, 0x00, 0xB9, 0x03, 0x00, 0x00, 0x80,
+        0xFF, 0xB9, 0x03, 0x05, 0x00, 0x11, 0xB9, 0x03, 0x80, 0xFF, 0x00, 0x00, 0xB9, 0x03, 0x80, 0xFF,
+        0x00, 0x00, 0xB9, 0x03, 0x11, 0x00, 0x00, 0xB9, 0x03, 0x00, 0x80, 0xFF, 0x00, 0xB9, 0x03, 0x0B,
+        0x0B, 0x0B, 0xB9, 0x03, 0x11, 0x22, 0x00, 0xB9, 0x03, 0x00, 0x19, 0x19, 0xBC, 0x06, 0x00, 0x00,
+        0x0A, 0x00, 0x03, 0x00, 0x00, 0x00, 0x81, 0xB8, 0x01, 0x01, 0x00, 0x88, 0x00, 0x00, 0x70, 0x43,
+    ).map { it.toByte() }.toByteArray()
+
+    @Test
+    fun `globalParameterValues decodes the exact literal values in a real captured hardware blob`() {
+        val values = StateBlobReader.globalParameterValues(capturedHardwareBlob).assertSuccess()
+
+        assertEquals(240.0f, values[ParameterId(110)]) // BPM
+        assertEquals(2.5f, values[ParameterId(111)]) // INPUT_TRIM
+        assertEquals(0f, values[ParameterId(112)]) // CABSIM_BYPASS
+        assertEquals(0f, values[ParameterId(113)]) // TEMPO_SOURCE
+        assertEquals(440f, values[ParameterId(114)]) // TUNING_REFERENCE
+        assertEquals(0f, values[ParameterId(115)]) // BYPASS
+    }
+
+    @Test
+    fun `globalParameterValues agrees byte-for-byte with what StateBlobPatcher's patch functions write`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = PedalState.create(session, original).assertSuccess()
+
+        val patched = StateBlobPatcher.patchBpm(state, session, 120f).assertSuccess()
+        val values = StateBlobReader.globalParameterValues(patched).assertSuccess()
+
+        assertEquals(120f, values[ParameterId(110)])
+    }
+
+    @Test
+    fun `globalParameterValues decodes INPUT_TRIM, TUNING_REFERENCE, and the three flag bytes patched independently`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+
+        val trimState = PedalState.create(session, original).assertSuccess()
+        val trimPatched = StateBlobPatcher.patchInputTrim(trimState, session, -15f).assertSuccess()
+        assertEquals(-15f, StateBlobReader.globalParameterValues(trimPatched).assertSuccess()[ParameterId(111)])
+
+        val session2 = SessionId.create()
+        val tuningState = PedalState.create(session2, original).assertSuccess()
+        val tuningPatched = StateBlobPatcher.patchTuningReference(tuningState, session2, 440f).assertSuccess()
+        assertEquals(440f, StateBlobReader.globalParameterValues(tuningPatched).assertSuccess()[ParameterId(114)])
+
+        val session3 = SessionId.create()
+        val flagState = PedalState.create(session3, original).assertSuccess()
+        val cabPatched = StateBlobPatcher.patchCabSimBypass(flagState, session3, 1f).assertSuccess()
+        assertEquals(1f, StateBlobReader.globalParameterValues(cabPatched).assertSuccess()[ParameterId(112)])
+    }
+
+    @Test
+    fun `globalParameterValues overload accepting a PedalState delegates to the ByteArray form`() {
+        val session = SessionId.create()
+        val blob = plausibleBlob()
+        val state = PedalState.create(session, blob).assertSuccess()
+
+        val fromBytes = StateBlobReader.globalParameterValues(blob).assertSuccess()
+        val fromState = StateBlobReader.globalParameterValues(state).assertSuccess()
+
+        assertEquals(fromBytes, fromState)
+    }
+
+    @Test
+    fun `globalParameterValues is rejected the same way as the other accessors for a too-short blob`() {
+        val blob = plausibleBlob(size = StateBlobOffsets.MIN_PLAUSIBLE_BLOB_SIZE - 1)
+        assertTrue(StateBlobReader.globalParameterValues(blob).assertFailure() is TonexError.BlobTooShortToPatch)
+    }
+
+    @Test
+    fun `globalParameterValues is rejected for an implausible slot region even though it never reads that region`() {
+        // globalParameterValues shares StateBlobReader's structural validate() gate (min length +
+        // looksLikeSlotRegion) rather than defining its own - an implausible slot-region byte still
+        // rejects the whole blob, consistent with every other accessor in this file.
+        val blob = plausibleBlob(slotA = 250)
+        assertTrue(StateBlobReader.globalParameterValues(blob).assertFailure() is TonexError.ImplausibleStateBlobShape)
     }
 }

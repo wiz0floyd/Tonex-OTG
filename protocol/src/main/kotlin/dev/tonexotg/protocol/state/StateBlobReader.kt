@@ -1,5 +1,6 @@
 package dev.tonexotg.protocol.state
 
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PedalState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetSlot
@@ -15,6 +16,14 @@ import dev.tonexotg.protocol.TonexResult
  * exists at all), every inbound unsolicited state push, and `selectPreset`'s slot-choice logic.
  * [StateBlobOffsets] is `internal` (reachable from this package), but nothing in `:protocol`
  * exposed a read accessor before this file — [StateBlobPatcher] only ever patches.
+ *
+ * ## Global-parameter read path (issue #83)
+ * [globalParameterValues] decodes the same six GLOBAL-scope offsets ([StateBlobOffsets.END_BPM],
+ * [StateBlobOffsets.START_INPUT_TRIM], [StateBlobOffsets.START_CAB_BYPASS],
+ * [StateBlobOffsets.END_TEMPO_SOURCE], [StateBlobOffsets.END_TUNING_REF],
+ * [StateBlobOffsets.END_BYPASS_MODE]) that [StateBlobPatcher]'s six `patch*` functions write,
+ * mirroring upstream's `usb_tonex_one_parse_state` — added so a home-screen control can display the
+ * pedal's actual live value instead of a [dev.tonexotg.protocol.ParameterSpec.default] placeholder.
  *
  * ## This does not authorize a write, and cannot be used to synthesize one
  *
@@ -92,6 +101,54 @@ internal object StateBlobReader {
     /** Convenience overload of [slotAssignments] taking a [PedalState] directly. */
     fun slotAssignments(state: PedalState): TonexResult<Map<PresetSlot, PresetIndex>> =
         slotAssignments(state.copyOfBytes())
+
+    /**
+     * The pedal's six GLOBAL-scope parameter values (issue #83: `BPM`, `INPUT_TRIM`,
+     * `CABSIM_BYPASS`, `TEMPO_SOURCE`, `TUNING_REFERENCE`, `BYPASS` — [ParameterId]s `110`-`115`),
+     * decoded from [bytes] at the exact offsets [StateBlobPatcher]'s six `patch*` functions write —
+     * see [StateBlobOffsets]'s "Global-parameter offsets" KDoc for the upstream/captured-blob
+     * confirmation of byte width, endianness, and anchor for each.
+     */
+    fun globalParameterValues(bytes: ByteArray): TonexResult<Map<ParameterId, Float>> {
+        val validated = validate(bytes)
+        if (validated is TonexResult.Failure) return validated
+
+        val values = mapOf(
+            ParameterId(110) to readFloatLe(bytes, bytes.size - StateBlobOffsets.END_BPM), // BPM
+            ParameterId(111) to readFloatLe(bytes, StateBlobOffsets.START_INPUT_TRIM), // INPUT_TRIM
+            ParameterId(112) to // CABSIM_BYPASS
+                (bytes[StateBlobOffsets.START_CAB_BYPASS].toInt() and 0xFF).toFloat(),
+            ParameterId(113) to // TEMPO_SOURCE
+                (bytes[bytes.size - StateBlobOffsets.END_TEMPO_SOURCE].toInt() and 0xFF).toFloat(),
+            ParameterId(114) to // TUNING_REFERENCE
+                readUint16Le(bytes, bytes.size - StateBlobOffsets.END_TUNING_REF).toFloat(),
+            ParameterId(115) to // BYPASS
+                (bytes[bytes.size - StateBlobOffsets.END_BYPASS_MODE].toInt() and 0xFF).toFloat(),
+        )
+        return TonexResult.Success(values)
+    }
+
+    /** Convenience overload of [globalParameterValues] taking a [PedalState] directly. */
+    fun globalParameterValues(state: PedalState): TonexResult<Map<ParameterId, Float>> =
+        globalParameterValues(state.copyOfBytes())
+
+    /**
+     * Reads a 4-byte little-endian IEEE-754 float from [bytes] at [index]..[index]+3 — the exact
+     * inverse of [StateBlobPatcher]'s private `writeFloatLe`, kept as a separate copy in this file
+     * rather than shared, since one is `private` to each object and neither is part of the other's
+     * public contract.
+     */
+    private fun readFloatLe(bytes: ByteArray, index: Int): Float {
+        val bits = (bytes[index].toInt() and 0xFF) or
+            ((bytes[index + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[index + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[index + 3].toInt() and 0xFF) shl 24)
+        return Float.fromBits(bits)
+    }
+
+    /** Reads a 2-byte little-endian `uint16` from [bytes] at [index]..[index]+1. */
+    private fun readUint16Le(bytes: ByteArray, index: Int): Int =
+        (bytes[index].toInt() and 0xFF) or ((bytes[index + 1].toInt() and 0xFF) shl 8)
 
     /**
      * The two structural checks shared by every accessor above — see class KDoc for why the
