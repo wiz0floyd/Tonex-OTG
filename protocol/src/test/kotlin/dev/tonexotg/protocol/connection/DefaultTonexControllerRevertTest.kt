@@ -55,10 +55,9 @@ class DefaultTonexControllerRevertTest {
             val decoded = SingleParameterPayloadCodec.decode(msg.payload)
             assertIs<TonexResult.Success<SingleParameterPayload>>(decoded)
             assertEquals(SingleParameterPayloadCodec.KIND_PARAMETER, decoded.value.kind, "write $i")
-            // Read payload[4] directly, NOT decoded.value.index: SingleParameterPayloadCodec's
-            // write side and read side are deliberately not inverses for a nonzero index (its own
-            // KDoc, "Why encode and decode are not inverses") -- decode would recover i*256, not i.
-            assertEquals(i, msg.payload[4].toInt() and 0xFF, "write $i should target ParameterId($i)")
+            // encode/decode are confirmed symmetric (#106, issue #104), so decoded.value.index
+            // recovers the same index encode() wrote.
+            assertEquals(i, decoded.value.index, "write $i should target ParameterId($i)")
         }
     }
 
