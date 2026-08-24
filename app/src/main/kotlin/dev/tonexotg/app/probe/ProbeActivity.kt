@@ -259,6 +259,30 @@ private fun ProbeScreen(scope: CoroutineScope, log: ProbeLog, logFile: ProbeLogF
             Text("Single-parameter write test (writes to your pedal)")
         }
 
+        Text("Knob-listen probe (issue #104) — read-only, no pedal write", style = MaterialTheme.typography.titleSmall)
+
+        Button(
+            enabled = !busy && readOnlyPassDone && handles != null,
+            onClick = {
+                busy = true
+                scope.launch {
+                    try {
+                        handles?.let {
+                            probeSession.runKnobListenProbe(it.connection, it.inEndpoint, it.outEndpoint)
+                        }
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        log.error("Knob-listen probe crashed: ${t::class.simpleName}: ${t.message}")
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+        ) {
+            Text("Listen for a physical knob change (read-only, 20s)")
+        }
+
         Text("S21 Latency measurements (issue #26) — informational only, no pass/fail target", style = MaterialTheme.typography.titleSmall)
 
         Text("Transport for the latency run:", style = MaterialTheme.typography.bodySmall)
