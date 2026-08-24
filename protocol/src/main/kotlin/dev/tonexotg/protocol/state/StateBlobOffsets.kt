@@ -58,11 +58,35 @@ import dev.tonexotg.protocol.SessionId
  * [END_BYPASS_MODE] were hand-checked against the same pinned commit, both `usb_tonex_one_modify_global`
  * (write) and `usb_tonex_one_parse_state` (read) — confirmed symmetric, no mismatch between the two
  * directions. `BPM` and `INPUT_TRIM` are 4-byte little-endian IEEE-754 floats; `TUNING_REFERENCE` is
- * a 2-byte little-endian `uint16`; the rest are single bytes. Endianness for the two float fields is
- * not spelled out by a `#define` name the way `TUNING_REFERENCE`'s is — it is inferred from the same
- * `memcpy`-of-a-native-struct pattern [dev.tonexotg.protocol.message.MasterVolumeMessage] already
- * documents for this pedal's on-wire float encoding, not independently re-verified byte-by-byte
- * against a captured frame.
+ * a 2-byte little-endian `uint16`; the rest are single bytes.
+ *
+ * ### Endianness and anchor confirmed byte-by-byte (issue #83), not merely inferred
+ * An earlier version of this KDoc said float endianness here was inferred from
+ * [dev.tonexotg.protocol.message.MasterVolumeMessage]'s on-wire pattern and "not independently
+ * re-verified byte-by-byte against a captured frame." That caveat no longer applies — two
+ * independent sources both check out:
+ *
+ * 1. **Upstream's own literal.** `usb_tonex_one.c` line 105, at the pinned commit above:
+ *    `#define TONEX_STATE_OFFSET_START_INPUT_TRIM  15   // 0x000070c1 (-15.0) -> 0x000058c1 (0)
+ *    -> 0x00007041 (15.0)`. `struct.pack('<f', -15.0)` is `00 00 70 c1` and
+ *    `struct.pack('<f', 15.0)` is `00 00 70 41` — an exact little-endian IEEE-754 match at both
+ *    endpoints upstream's own comment names. (The middle "(0)" label in that same upstream comment
+ *    is itself wrong — it decodes to a large negative float, not `0.0` — so only the two endpoints
+ *    are cited here as evidence, not the middle value.)
+ * 2. **A real captured hardware blob already in this repo.** A full 160-byte `GetState` response
+ *    from the S22 hardware run is logged at
+ *    `docs/hardware-probes/tonexprobe20260819_220308.log.txt` (around line 11102). Decoded at
+ *    these six offsets it reads `INPUT_TRIM=2.5dB` (bytes `00 00 20 40` at start-relative `15`),
+ *    `BPM=240.0` (bytes `00 00 70 43` at end-relative `4`), `TUNING_REFERENCE=440Hz` (bytes
+ *    `B8 01` at end-relative `9`), and `CABSIM_BYPASS`/`TEMPO_SOURCE`/`BYPASS` all `0` — every one
+ *    a plausible real-world value. The off-by-one/wrong-endianness alternative interpretations at
+ *    those same byte ranges are not plausible (e.g. big-endian at the BPM bytes reads as
+ *    `~4.03e-41`, not a tempo), which is what makes this a genuine confirmation and not a
+ *    coincidence. This also confirms little-endian for [END_TUNING_REF]'s `uint16` specifically,
+ *    not only the two float fields, and independently confirms the *anchor* (start-relative vs.
+ *    end-relative addressing), not just byte width/endianness — [START_INPUT_TRIM] and
+ *    [START_CAB_BYPASS] are this module's first-ever start-relative blob *write* offsets; every
+ *    previously-proven write offset in this file is end-relative.
  *
  * This is the **only** firmware revision these offsets are known to be correct for. If a
  * connected pedal's actual firmware predates or postdates the revision IK shipped around that

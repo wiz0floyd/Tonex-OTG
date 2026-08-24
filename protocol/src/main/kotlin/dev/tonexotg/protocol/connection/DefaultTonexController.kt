@@ -1280,11 +1280,23 @@ class DefaultTonexController(
      * nothing is skipped. No automatic retry is implemented here (CLAUDE.md: no elaborate
      * automatic-recovery nets) — offering the user a retry is a UI-layer decision.
      *
-     * ## The whole-state write remains structurally impossible
-     * This function reaches the wire only through [writeParameterLocked] →
-     * [ParameterWriteMessage.encode] / [MasterVolumeMessage.encode] → [writeFramed].
-     * [SetStateMessage.encode] — the only whole-state write in this module — is called at exactly
-     * one site, inside [selectPreset], and nothing here adds another.
+     * ## Revert never touches a state-blob-patched global, by range, not by call-site count
+     * [SetStateMessage.encode] is no longer called from a single site — [selectPreset],
+     * [assignPresetToSlot], and [restoreFootswitches] all call it, and issue #83 added a fourth
+     * call site inside [writeParameterLocked] itself, for the six `GLOBAL_RANGE` parameters
+     * ([ParameterId.GLOBAL_RANGE], `110..116`) that [dev.tonexotg.protocol.state.StateBlobPatcher]
+     * patches into the state blob. An earlier version of this KDoc claimed safety came from
+     * [SetStateMessage.encode] having exactly one call site; that was already stale before #83 (it
+     * ignored [assignPresetToSlot]/[restoreFootswitches]) and #83's new call site would have broken
+     * it outright.
+     *
+     * The actual invariant that keeps this function safe: this loop iterates
+     * [ParameterId.PRESET_RANGE] (`0..108`) only, which is disjoint from [ParameterId.GLOBAL_RANGE]
+     * — revert replays preset parameters exclusively and never issues a write for any of the six
+     * global parameters, so it can never trigger [writeParameterLocked]'s state-blob-patch branch or
+     * produce a [SetStateMessage.encode] write of its own. [DefaultTonexControllerRevertTest]
+     * asserts this directly (`newWrites.none { it.header.type == MessageType.StateUpdate }`) rather
+     * than relying on call-site counting.
      *
      * @throws never — every failure mode returns a typed [TonexResult.Failure].
      */

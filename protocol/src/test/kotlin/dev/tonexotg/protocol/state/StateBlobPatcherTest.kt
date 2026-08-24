@@ -1312,6 +1312,39 @@ class StateBlobPatcherTest {
     }
 
     @Test
+    fun `patchInputTrim writes the exact literal bytes for -15f, confirmed against upstream and a captured blob`() {
+        // Pins ENDIANNESS specifically, via literals independent of writeFloatLe's own shift
+        // sequence (see StateBlobOffsets' "Endianness and anchor confirmed byte-by-byte" KDoc for
+        // the upstream `usb_tonex_one.c` line-105 comment and the captured S22 hardware blob this
+        // is checked against). The anchor (start-relative vs. end-relative) is pinned by that same
+        // captured-blob evidence, not by this test.
+        val session = SessionId.create()
+        val state = stateFor(session, plausibleBlob())
+
+        val patched = StateBlobPatcher.patchInputTrim(state, session, -15f).assertSuccess()
+
+        val index = StateBlobOffsets.START_INPUT_TRIM
+        assertEquals(0x00.toByte(), patched[index])
+        assertEquals(0x00.toByte(), patched[index + 1])
+        assertEquals(0x70.toByte(), patched[index + 2])
+        assertEquals(0xC1.toByte(), patched[index + 3])
+    }
+
+    @Test
+    fun `patchTuningReference writes the exact literal bytes for 440Hz, confirmed against a captured blob`() {
+        // Pins ENDIANNESS specifically — see the sibling patchInputTrim literal test above.
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchTuningReference(state, session, 440f).assertSuccess()
+
+        val index = original.size - StateBlobOffsets.END_TUNING_REF
+        assertEquals(0xB8.toByte(), patched[index])
+        assertEquals(0x01.toByte(), patched[index + 1])
+    }
+
+    @Test
     fun `patchCabSimBypass writes exactly the one byte at START_CAB_BYPASS, nothing else changes`() {
         val session = SessionId.create()
         val original = plausibleBlob()

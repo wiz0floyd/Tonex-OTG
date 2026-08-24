@@ -357,8 +357,10 @@ object StateBlobPatcher {
 
     /**
      * Writes [value] into [bytes] at [index]..[index]+3 as a 4-byte little-endian IEEE-754 float —
-     * see [StateBlobOffsets]'s "Global-parameter offsets" KDoc for why little-endian is assumed
-     * rather than independently re-verified for these two fields specifically.
+     * see [StateBlobOffsets]'s "Endianness and anchor confirmed byte-by-byte" KDoc for the
+     * upstream-literal and captured-hardware-blob evidence confirming little-endian for these two
+     * fields specifically, rather than merely assuming it by analogy to
+     * [dev.tonexotg.protocol.message.MasterVolumeMessage].
      */
     private fun writeFloatLe(bytes: ByteArray, index: Int, value: Float) {
         val bits = value.toRawBits()
