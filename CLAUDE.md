@@ -134,6 +134,41 @@ its responses** (see "Review rigor" below). That review has twice caught
 a genuine blocker a Sonnet pass reported as "criteria met, tests green" —
 that gap is the whole justification, so never skip it to save tokens.
 
+### Prompt caching is half the dispatch cost
+
+A dispatch doesn't just pay its own tokens — it throws away a warm cache.
+Published rates: **cache reads are 0.1x base input**, a 5-minute cache
+write is **1.25x**, and a 1-hour write is **2x**. So the same context
+costs a tenth as much on a continued turn in this session as it does the
+first time a fresh agent reads it.
+
+What that means concretely:
+
+- **A sub agent starts cold by design** — its own context window, its own
+  system prompt, its own tool definitions. Nothing this session has cached
+  carries over, so every file it re-reads and every convention it
+  re-derives is billed at full write price, not 0.1x read price. That
+  cold start is the real floor on a dispatch's cost, and it's why "the
+  task has several parts" never justifies spawning on its own.
+- **Continuing inline is usually the cheap branch** for anything touching
+  context already loaded here. Re-reading a file you already have in
+  context is close to free; handing it to a new agent is not.
+- **Haiku 4.5 needs 4,096 tokens before anything caches at all** (vs 1,024
+  for Sonnet 5 and 512 for Opus 5). Short, chatty Haiku dispatches get no
+  cache benefit whatsoever — they're only cheap because the rate is low,
+  so give Haiku one self-contained brief rather than a conversation.
+- **Cache invalidation is prefix-ordered**: `tools` → `system` →
+  `messages`, and a change at one level invalidates it and everything
+  after. Swapping tools or rewriting a system prompt mid-flow discards the
+  whole prefix. Don't reconfigure an agent's tool set mid-task when a
+  fresh, correctly-scoped dispatch would do.
+- **A dispatch pays for itself when its output is much smaller than its
+  input.** A grep sweep or log trawl that reads tens of thousands of
+  tokens and returns a 1-2k finding is exactly the right shape: the
+  expensive reading happens in a context that gets discarded instead of
+  permanently inflating this one. A dispatch that returns nearly as much
+  as it consumed was the wrong call.
+
 ### Dispatch at all, or do it inline?
 
 A dispatch is not free even at Haiku rates: the sub agent cold-starts and
@@ -161,9 +196,23 @@ question: do inline. "The task has several parts" is not a reason to spawn.
 - **Attach primary evidence, not a summary of a summary.** Hand a reviewer
   the raw log or the upstream file path; re-summarizing costs tokens and
   loses the detail the review depends on.
-- **Prefer several small dispatches over one large one** — cheaper to
-  re-run, and less is lost if one is cut off mid-task (see "Session-limit
-  resilience").
+- **Once a dispatch is justified, prefer several small ones over one large
+  one** — cheaper to re-run, and less is lost if one is cut off mid-task
+  (see "Session-limit resilience"). This splits work that was already going
+  to be dispatched; it is not a reason to spawn more agents, since each one
+  pays its own cold start.
+- **Say what shape the answer should come back in.** A sub agent returns a
+  summary, not its transcript — if you need file:line anchors, a verdict
+  per acceptance criterion, or a table, ask for that format up front. A
+  second dispatch to re-ask "which file was that in?" costs another cold
+  start.
+- **Restrict tool access to what the job needs.** Read-only for research
+  and review; write access only for the agent that owns a worktree. Fewer
+  tools means a smaller prefix and no chance of a stray write landing on
+  someone else's branch.
+- **Ask for parallelism explicitly** when dispatching several agents that
+  can run at once — say "these run in parallel," and give each its own
+  worktree path in the same breath (see "Agent and session isolation").
 - **Ask the advisor one specific, answerable question**, not "review
   this." Don't re-ask what a passing test already answered.
 
