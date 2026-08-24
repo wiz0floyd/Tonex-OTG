@@ -79,11 +79,16 @@ fun ParameterEditorScreen(
                     )
                 },
                 navigationIcon = {
-                    // Still a TextButton, not an arrow-icon IconButton, even though #107 added
-                    // material-icons-extended to :app: that story's trade was 6 glyphs the
-                    // collapsed globals tray genuinely needs one dependency for, not a blanket
-                    // "any icon anywhere is now free" — a text affordance still sidesteps the
-                    // question for this one glyph with no new cost.
+                    // TextButton, not an arrow-icon IconButton: this project has no
+                    // material-icons-extended dependency and no Icons.* usage anywhere in `:app`
+                    // (S23, issue #74) -- a text affordance sidesteps that question entirely
+                    // rather than adding a new dependency for one glyph. #107 briefly added that
+                    // dependency for the home-screen globals tray's 6 icon chips, then reverted it
+                    // (the extended artifact cost ~4MB unshrunk in a release build -- this
+                    // project's release build type has isMinifyEnabled = false, so R8 never got a
+                    // chance to strip the unused vectors) in favour of hand-authored Canvas glyphs
+                    // (see PresetListScreen.kt's GlyphIcon) — so this comment's original claim is
+                    // true again, unchanged by that story.
                     TextButton(
                         onClick = onBack,
                         modifier = Modifier.testTag("parameterEditor.backButton"),

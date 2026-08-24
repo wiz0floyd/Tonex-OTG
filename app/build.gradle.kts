@@ -127,10 +127,6 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    // S107 (issue #107): the home-screen globals tray's 6 icon chips (Speed/Tune/MusicNote/
-    // Speaker/Schedule/PowerSettingsNew) — none of those exist in material-icons-core, which
-    // material3 already pulls in, so the extended artifact is genuinely required for this one.
-    implementation(libs.androidx.compose.material.icons.extended)
     debugImplementation(libs.androidx.ui.tooling)
 
     // S23 (issue #74): the real app's navigation graph (preset list <-> parameter editor <->

@@ -34,10 +34,6 @@ androidx-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
 androidx-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 androidx-material3 = { module = "androidx.compose.material3:material3" }
-# S107 (issue #107): the home-screen globals tray's 6 icon chips. See ParameterEditorScreen.kt's
-# updated navigationIcon comment for why this project previously avoided this dependency and why
-# 6 glyphs is a different trade than the 1 glyph that comment used to weigh against.
-androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
 androidx-compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastorePreferences" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }

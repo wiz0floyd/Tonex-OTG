@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -16,18 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Speaker
-import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.outlined.PowerSettingsNew as PowerSettingsNewOutlined
-import androidx.compose.material.icons.outlined.Speaker as SpeakerOutlined
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -42,8 +32,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -362,6 +354,21 @@ private fun GlobalParametersSection(
  * their own (per-chip, naming the parameter and its value, per the AC) but no [Modifier.clickable]
  * of their own, so TalkBack announces one merged element with six concatenated descriptions
  * instead of six competing touch targets.
+ *
+ * ## Glyphs: hand-drawn [Canvas] shapes, not `material-icons-extended`
+ * This story tried `androidx.compose.material:material-icons-extended` first (per its own
+ * dependency note) and measured its actual release-build cost: `:app:assembleRelease` grew
+ * ~4.2MB (8,918,741 → 13,162,679 bytes) with the dependency added, because this project's release
+ * build type has `isMinifyEnabled = false` (see `app/build.gradle.kts`) — R8 never got a chance
+ * to strip the ~2000 unused vectors the extended artifact ships. That's the "material" delta the
+ * issue's own contingency names, so per that contingency this falls back to 6 small
+ * [androidx.compose.foundation.Canvas]-drawn glyphs ([GlyphIcon]) instead — original simple
+ * shapes approximating each named icon (a gauge needle for Speed, three bars for Tune, a
+ * note-head+stem for MusicNote, a speaker box for Speaker, a clock face for Schedule, a power
+ * ring for PowerSettingsNew), not a copy of Material's own path data. They are **not** pixel-
+ * faithful reproductions of the named Material glyphs — flag that explicitly for the product
+ * owner's own-eyes/own-phone sign-off this story's issue already requires (see its "Sign-off"
+ * section), same as any other layout-only judgment call this pass made.
  */
 @Composable
 private fun GlobalParametersHeader(
@@ -369,8 +376,6 @@ private fun GlobalParametersHeader(
     expanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val chevronRotation by animateFloatAsState(targetValue = if (expanded) 180f else 0f, label = "globalParameters.chevron")
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -387,30 +392,30 @@ private fun GlobalParametersHeader(
             horizontalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space1),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            RangeChip(icon = Icons.Filled.Speed, valueText = state.bpm.valueText, contentDescription = "${state.bpm.label}, ${state.bpm.valueText}")
-            RangeChip(icon = Icons.Filled.Tune, valueText = state.inputTrim.valueText, contentDescription = "${state.inputTrim.label}, ${state.inputTrim.valueText}")
-            RangeChip(icon = Icons.Filled.MusicNote, valueText = state.tuningReference.valueText, contentDescription = "${state.tuningReference.label}, ${state.tuningReference.valueText}")
+            RangeChip(glyph = GlobalGlyph.Speed, valueText = state.bpm.valueText, contentDescription = "${state.bpm.label}, ${state.bpm.valueText}")
+            RangeChip(glyph = GlobalGlyph.Tune, valueText = state.inputTrim.valueText, contentDescription = "${state.inputTrim.label}, ${state.inputTrim.valueText}")
+            RangeChip(glyph = GlobalGlyph.MusicNote, valueText = state.tuningReference.valueText, contentDescription = "${state.tuningReference.label}, ${state.tuningReference.valueText}")
             SwitchChip(
-                iconOn = Icons.Filled.Speaker,
-                iconOff = Icons.Outlined.SpeakerOutlined,
+                glyph = GlobalGlyph.Speaker,
                 checked = state.cabSimBypass.checked,
                 contentDescription = "${state.cabSimBypass.label}, ${if (state.cabSimBypass.checked) "on" else "off"}",
             )
-            RangeChip(icon = Icons.Filled.Schedule, valueText = state.tempoSource.abbreviation, contentDescription = "${state.tempoSource.label}, ${state.tempoSource.abbreviation}")
+            RangeChip(glyph = GlobalGlyph.Schedule, valueText = state.tempoSource.abbreviation, contentDescription = "${state.tempoSource.label}, ${state.tempoSource.abbreviation}")
             SwitchChip(
-                iconOn = Icons.Filled.PowerSettingsNew,
-                iconOff = Icons.Outlined.PowerSettingsNewOutlined,
+                glyph = GlobalGlyph.Power,
                 checked = state.bypass.checked,
                 contentDescription = "${state.bypass.label}, ${if (state.bypass.checked) "on" else "off"}",
             )
         }
 
-        Icon(
-            imageVector = Icons.Filled.ExpandMore,
-            contentDescription = null, // decorative -- the header row's own merged semantics cover expand/collapse.
-            modifier = Modifier
-                .size(TonexChipIconSize)
-                .rotate(chevronRotation),
+        // Decorative expand/collapse affordance -- same "no Icons.* usage" text-affordance
+        // convention CategoryAccordion already uses (its own "−"/"+"), not a 7th authored glyph.
+        // Decorative because the header row's own merged semantics above already cover
+        // expand/collapse for accessibility.
+        Text(
+            text = if (expanded) "⌃" else "⌄",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -419,17 +424,17 @@ private val TonexChipIconSize = 16.dp
 
 /** One icon+compact-value chip in [GlobalParametersHeader] — BPM/Input Trim/Tuning Reference/Tempo Source. */
 @Composable
-private fun RangeChip(icon: ImageVector, valueText: String, contentDescription: String) {
+private fun RangeChip(glyph: GlobalGlyph, valueText: String, contentDescription: String) {
     Row(
         modifier = Modifier.semantics { this.contentDescription = contentDescription },
         horizontalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space0_5),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null, // decorative -- described by the Row's own contentDescription above.
-            modifier = Modifier.size(TonexChipIconSize),
+        GlyphIcon(
+            glyph = glyph,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            slashed = false,
+            modifier = Modifier.size(TonexChipIconSize),
         )
         Text(
             text = valueText,
@@ -442,20 +447,122 @@ private fun RangeChip(icon: ImageVector, valueText: String, contentDescription: 
 
 /**
  * One icon-only chip in [GlobalParametersHeader] — Cab Sim Bypass/Bypass. Colour alone (tint)
- * isn't an accessible on/off signal on its own (issue #107's constraint), so [checked] also swaps
- * which glyph variant renders: [iconOn] (filled) vs [iconOff] (outlined) is a shape change, not
- * just a colour change.
+ * isn't an accessible on/off signal on its own (issue #107's constraint), so [checked] also draws
+ * a slash through the glyph when off — a shape change, not just a colour change, without needing
+ * a second hand-authored glyph variant per icon.
  */
 @Composable
-private fun SwitchChip(iconOn: ImageVector, iconOff: ImageVector, checked: Boolean, contentDescription: String) {
-    Icon(
-        imageVector = if (checked) iconOn else iconOff,
-        contentDescription = null, // set on the wrapping Modifier below, not here.
+private fun SwitchChip(glyph: GlobalGlyph, checked: Boolean, contentDescription: String) {
+    GlyphIcon(
+        glyph = glyph,
         tint = if (checked) MaterialTheme.colorScheme.primary else TonexTheme.extendedColors.onSurfaceDisabled,
+        slashed = !checked,
         modifier = Modifier
             .size(TonexChipIconSize)
             .semantics { this.contentDescription = contentDescription },
     )
+}
+
+/** The 6 hand-drawn glyphs [GlyphIcon] knows how to render — see [GlobalParametersHeader]'s kdoc for why these are original shapes, not Material's own path data. */
+private enum class GlobalGlyph { Speed, Tune, MusicNote, Speaker, Schedule, Power }
+
+/**
+ * Draws one [GlobalGlyph] as simple original shapes on a [Canvas] — small enough, and few enough
+ * (6, one per [GlobalGlyph]), that hand-authoring is cheaper and lighter than a dependency; see
+ * [GlobalParametersHeader]'s kdoc for the measurement that led here. [slashed] draws one extra
+ * diagonal line across the glyph, the shape-change half of [SwitchChip]'s on/off signal.
+ */
+@Composable
+private fun GlyphIcon(glyph: GlobalGlyph, tint: Color, slashed: Boolean, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val stroke = Stroke(width = size.minDimension * 0.12f, cap = StrokeCap.Round)
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val r = size.minDimension / 2f
+
+        when (glyph) {
+            GlobalGlyph.Speed -> {
+                // Gauge: a 3/4 arc plus a needle from center towards upper-right.
+                drawArc(
+                    color = tint,
+                    startAngle = 135f,
+                    sweepAngle = 270f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - r, center.y - r),
+                    size = androidx.compose.ui.geometry.Size(r * 2, r * 2),
+                    style = stroke,
+                )
+                drawLine(tint, center, Offset(center.x + r * 0.6f, center.y - r * 0.6f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+            }
+
+            GlobalGlyph.Tune -> {
+                // Three vertical bars of different heights -- a mixer/equalizer look.
+                val barWidth = stroke.width
+                val heights = listOf(0.5f, 1f, 0.7f)
+                val xs = listOf(center.x - r * 0.6f, center.x, center.x + r * 0.6f)
+                heights.forEachIndexed { i, h ->
+                    val half = r * h
+                    drawLine(tint, Offset(xs[i], center.y - half), Offset(xs[i], center.y + half), strokeWidth = barWidth, cap = StrokeCap.Round)
+                }
+            }
+
+            GlobalGlyph.MusicNote -> {
+                // A note-head (filled circle) plus a stem.
+                val headRadius = r * 0.4f
+                val headCenter = Offset(center.x - headRadius * 0.4f, center.y + r * 0.4f)
+                drawCircle(tint, radius = headRadius, center = headCenter)
+                drawLine(
+                    tint,
+                    Offset(headCenter.x + headRadius * 0.9f, headCenter.y),
+                    Offset(headCenter.x + headRadius * 0.9f, center.y - r * 0.9f),
+                    strokeWidth = stroke.width * 0.6f,
+                    cap = StrokeCap.Round,
+                )
+            }
+
+            GlobalGlyph.Speaker -> {
+                // A rounded box with a smaller circle "cone" inside.
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(center.x - r * 0.6f, center.y - r * 0.85f),
+                    size = androidx.compose.ui.geometry.Size(r * 1.2f, r * 1.7f),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(r * 0.2f, r * 0.2f),
+                    style = stroke,
+                )
+                drawCircle(tint, radius = r * 0.35f, center = center, style = stroke)
+            }
+
+            GlobalGlyph.Schedule -> {
+                // A clock face: circle outline plus two hands.
+                drawCircle(tint, radius = r * 0.85f, center = center, style = stroke)
+                drawLine(tint, center, Offset(center.x, center.y - r * 0.5f), strokeWidth = stroke.width * 0.6f, cap = StrokeCap.Round)
+                drawLine(tint, center, Offset(center.x + r * 0.4f, center.y), strokeWidth = stroke.width * 0.6f, cap = StrokeCap.Round)
+            }
+
+            GlobalGlyph.Power -> {
+                // The standard power-symbol shape: an open ring plus a vertical tick through the top.
+                drawArc(
+                    color = tint,
+                    startAngle = -240f,
+                    sweepAngle = 300f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - r * 0.8f, center.y - r * 0.8f),
+                    size = androidx.compose.ui.geometry.Size(r * 1.6f, r * 1.6f),
+                    style = stroke,
+                )
+                drawLine(tint, Offset(center.x, center.y - r * 0.9f), Offset(center.x, center.y - r * 0.1f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+            }
+        }
+
+        if (slashed) {
+            drawLine(
+                color = tint,
+                start = Offset(center.x - r * 0.9f, center.y - r * 0.9f),
+                end = Offset(center.x + r * 0.9f, center.y + r * 0.9f),
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
 }
 
 /**
