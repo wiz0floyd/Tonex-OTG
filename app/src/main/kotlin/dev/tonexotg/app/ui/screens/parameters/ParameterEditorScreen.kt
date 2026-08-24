@@ -18,7 +18,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -31,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import dev.tonexotg.app.ui.components.DestructiveActionConfirmationDialog
+import dev.tonexotg.app.ui.components.MasterVolumeDock
 import dev.tonexotg.app.ui.components.ParameterControl
 import dev.tonexotg.app.ui.components.ParameterNumericEntrySheet
 import dev.tonexotg.app.ui.components.ParameterSelectChipRow
@@ -79,10 +79,11 @@ fun ParameterEditorScreen(
                     )
                 },
                 navigationIcon = {
-                    // TextButton, not an arrow-icon IconButton: this project has no
-                    // material-icons-extended dependency and no other Icons.* usage anywhere in
-                    // `:app` (S23, issue #74) -- a text affordance sidesteps that question
-                    // entirely rather than adding a new dependency for one glyph.
+                    // Still a TextButton, not an arrow-icon IconButton, even though #107 added
+                    // material-icons-extended to :app: that story's trade was 6 glyphs the
+                    // collapsed globals tray genuinely needs one dependency for, not a blanket
+                    // "any icon anywhere is now free" — a text affordance still sidesteps the
+                    // question for this one glyph with no new cost.
                     TextButton(
                         onClick = onBack,
                         modifier = Modifier.testTag("parameterEditor.backButton"),
@@ -215,26 +216,6 @@ private fun QuickTierCardView(card: QuickTierCardUiState, onValueChange: (Float)
                 color = TonexTheme.extendedColors.onSurfaceTertiary,
             )
         }
-    }
-}
-
-@Composable
-private fun MasterVolumeDock(row: ParameterRow.Range, onValueChange: (Float) -> Unit, onValueTextClick: () -> Unit) {
-    // D1 §2.1 `surface.raised-1` (top app bar / bottom bar token) — global scope reads as chrome,
-    // not as belonging to whichever preset is open (D3 §1.1).
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-        ParameterControl(
-            label = "Master Volume",
-            value = row.value,
-            valueRange = row.range,
-            valueText = row.valueText,
-            onValueChange = onValueChange,
-            abbreviation = row.abbreviation,
-            onValueTextClick = onValueTextClick,
-            modifier = Modifier
-                .padding(TonexTheme.spacing.space3)
-                .testTag("masterVolume.dock"),
-        )
     }
 }
 

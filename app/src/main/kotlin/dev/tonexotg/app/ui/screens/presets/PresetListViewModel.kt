@@ -4,7 +4,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import dev.tonexotg.app.data.alias.PresetAliasStore
+import dev.tonexotg.app.ui.screens.parameters.ParameterCatalog
 import dev.tonexotg.app.ui.screens.parameters.ParameterWriteThrottler
+import dev.tonexotg.app.ui.screens.parameters.buildRangeRow
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
@@ -188,6 +190,17 @@ class PresetListViewModel(
         } else {
             null
         }
+        // issue #107: master volume follows the exact same "absence gates visibility, never a
+        // ParameterRegistry default" rule as globalParameters above — not connected, or connected
+        // but the pedal hasn't reported MASTER_VOLUME yet, both render nothing on this screen.
+        val masterVolumeId = ParameterCatalog.masterVolumeId
+        val masterVolume = if (isLive) {
+            (globalOverrides[masterVolumeId] ?: parameterValues[masterVolumeId])?.let { raw ->
+                buildRangeRow(masterVolumeId, raw)
+            }
+        } else {
+            null
+        }
         return PresetListUiState(
             items = items,
             isLive = isLive,
@@ -195,6 +208,7 @@ class PresetListViewModel(
             assignSlotError = core.assignError,
             globalParameters = globalParameters,
             globalWriteError = globalWriteError,
+            masterVolume = masterVolume,
         )
     }
 
@@ -306,6 +320,26 @@ class PresetListViewModel(
      */
     fun onGlobalSwitchToggle(id: ParameterId, checked: Boolean) {
         val value = if (checked) 1f else 0f
+        _globalOverrides.update { it + (id to value) }
+        globalWriteThrottler.submit(id, value)
+    }
+
+    /**
+     * Continuous slider drag on the sticky home-screen master-volume row (issue #107,
+     * `MASTER_VOLUME` idx 116). Unlike [onGlobalRangeDrag]'s deliberate release-only write (this
+     * class's own kdoc explains why: each of *those* six writes costs a full state-blob
+     * read-modify-write), `MASTER_VOLUME` writes through [dev.tonexotg.protocol.message.MasterVolumeMessage]
+     * — a cheap, dedicated wire message, not a blob rewrite — so this mirrors
+     * [dev.tonexotg.app.ui.screens.parameters.ParameterEditorViewModel.onRangeDrag]'s per-tick cadence
+     * instead: every drag tick both updates the optimistic override and submits through
+     * [globalWriteThrottler] (last-value-wins conflation still applies; see that class's kdoc).
+     * Reuses [globalWriteThrottler]/[_globalOverrides]/[lastGlobalWriteError] rather than a second
+     * set of state — [ParameterId] already keys the throttler's per-parameter workers, so sharing
+     * them with the six home-screen globals costs nothing and keeps one error slot for this whole
+     * screen's global-parameter writes.
+     */
+    fun onMasterVolumeDrag(value: Float) {
+        val id = ParameterCatalog.masterVolumeId
         _globalOverrides.update { it + (id to value) }
         globalWriteThrottler.submit(id, value)
     }

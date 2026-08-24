@@ -2,6 +2,7 @@ package dev.tonexotg.app.ui.screens.presets
 
 import dev.tonexotg.app.ui.screens.connection.ErrorPresentation
 import dev.tonexotg.app.ui.screens.connection.toPresentation
+import dev.tonexotg.app.ui.screens.parameters.ParameterRow
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
@@ -73,6 +74,10 @@ data class PresetListItem(
  *   global parameters (issue #83), or `null`. Same fail-fast-and-loud rationale as
  *   [selectPresetError]: a slider quietly sliding back to its previous value on failure is not
  *   itself a legible failure signal.
+ * @property masterVolume the sticky home-screen master-volume row (issue #107, `MASTER_VOLUME`
+ *   idx 116) — promoted here from the Parameter Editor-only [dev.tonexotg.app.ui.components.MasterVolumeDock]
+ *   mount. `null` under the same "absence, not a placeholder default, gates visibility" rule as
+ *   [globalParameters]: not connected, or connected but the pedal hasn't reported this value yet.
  */
 data class PresetListUiState(
     val items: List<PresetListItem>,
@@ -81,6 +86,7 @@ data class PresetListUiState(
     val assignSlotError: TonexError? = null,
     val globalParameters: GlobalParametersUiState? = null,
     val globalWriteError: TonexError? = null,
+    val masterVolume: ParameterRow.Range? = null,
 ) {
     val selectPresetErrorPresentation: ErrorPresentation?
         get() = selectPresetError?.toPresentation()
