@@ -2,6 +2,7 @@ package dev.tonexotg.app.session
 
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import androidx.core.content.ContextCompat
 import dev.tonexotg.app.data.alias.DataStorePresetAliasStore
 import dev.tonexotg.app.data.alias.PresetAliasStore
@@ -13,6 +14,7 @@ import dev.tonexotg.app.usb.connection.UsbConnectionService
 import dev.tonexotg.app.usb.connection.UsbConnectionState
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.TonexController
+import dev.tonexotg.protocol.TonexEvent
 import dev.tonexotg.protocol.connection.DefaultTonexController
 import dev.tonexotg.protocol.message.FirmwareCapabilities
 import dev.tonexotg.protocol.params.EffectiveParameterBounds
@@ -166,6 +168,31 @@ class TonexSessionHolder internal constructor(
 
     init {
         scope.launch { observe() }
+        scope.launch { logUnroutableParameterNotifications() }
+    }
+
+    /**
+     * The `WARN` half of issue #104's "fail loud, not silently": the pedal sent a
+     * `ParameterChanged` notification whose index this app cannot route to any `ParameterId`, so
+     * `:protocol` dropped it rather than guessing. `:protocol` is Android-free (issue #15) and has
+     * no logger of its own, so it reports the fact as a [TonexEvent] and this — the one app-scoped,
+     * always-running collector — is what turns it into a log line.
+     *
+     * The raw payload hex is the payload of the line: routing for master volume and the
+     * GLOBAL-scope parameters is a working assumption, not an observation, so if it turns out to be
+     * wrong the truth arrives in the next debug dump (#106's own mechanism) in a form the next
+     * hardware session can hand-decode — no new probe code needed.
+     */
+    private suspend fun logUnroutableParameterNotifications() {
+        controller.events.collect { event ->
+            if (event is TonexEvent.UnroutableParameterNotification) {
+                Log.w(
+                    TAG,
+                    "Unroutable ParameterChanged notification: index ${event.index} is outside " +
+                        "0..108 / 110..116; value dropped. Raw payload: ${event.payloadHex}",
+                )
+            }
+        }
     }
 
     private suspend fun observe() {
@@ -282,6 +309,8 @@ class TonexSessionHolder internal constructor(
     }
 
     companion object {
+        private const val TAG = "TonexSessionHolder"
+
         private const val BLOCKED_NO_FOREGROUND_SERVICE =
             "Pedal attached, but the background service isn't running — reconnect to continue."
 

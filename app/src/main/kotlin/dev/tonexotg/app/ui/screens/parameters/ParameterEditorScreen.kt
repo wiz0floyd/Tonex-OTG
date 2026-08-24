@@ -97,6 +97,7 @@ fun ParameterEditorScreen(
                 MasterVolumeDock(
                     row = row,
                     onValueChange = { viewModel.onRangeDrag(row.id, it) },
+                    onValueChangeFinished = { viewModel.onRangeDragEnd(row.id) },
                     onValueTextClick = { viewModel.onNumericEntryOpen(row.id) },
                 )
             }
@@ -115,6 +116,7 @@ fun ParameterEditorScreen(
                 QuickTierCardView(
                     card = card,
                     onValueChange = { viewModel.onRangeDrag(card.row.id, it) },
+                    onValueChangeFinished = { viewModel.onRangeDragEnd(card.row.id) },
                     onValueTextClick = { viewModel.onNumericEntryOpen(card.row.id) },
                 )
             }
@@ -133,6 +135,7 @@ fun ParameterEditorScreen(
                     expanded = category.title in uiState.expandedCategories,
                     onToggle = { viewModel.onCategoryToggle(category.title) },
                     onRangeChange = viewModel::onRangeDrag,
+                    onRangeChangeFinished = viewModel::onRangeDragEnd,
                     onValueTextClick = viewModel::onNumericEntryOpen,
                     onSwitchToggle = viewModel::onSwitchToggle,
                     onStepperChange = viewModel::onStepperChange,
@@ -197,7 +200,12 @@ fun ParameterEditorScreen(
 }
 
 @Composable
-private fun QuickTierCardView(card: QuickTierCardUiState, onValueChange: (Float) -> Unit, onValueTextClick: () -> Unit) {
+private fun QuickTierCardView(
+    card: QuickTierCardUiState,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit,
+    onValueTextClick: () -> Unit,
+) {
     Column(modifier = Modifier.testTag("quickTier.card.${card.row.id.index}")) {
         ParameterControl(
             label = card.row.label,
@@ -205,6 +213,7 @@ private fun QuickTierCardView(card: QuickTierCardUiState, onValueChange: (Float)
             valueRange = card.row.range,
             valueText = card.row.valueText,
             onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
             abbreviation = card.row.abbreviation,
             onValueTextClick = onValueTextClick,
         )
@@ -219,7 +228,12 @@ private fun QuickTierCardView(card: QuickTierCardUiState, onValueChange: (Float)
 }
 
 @Composable
-private fun MasterVolumeDock(row: ParameterRow.Range, onValueChange: (Float) -> Unit, onValueTextClick: () -> Unit) {
+private fun MasterVolumeDock(
+    row: ParameterRow.Range,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit,
+    onValueTextClick: () -> Unit,
+) {
     // D1 §2.1 `surface.raised-1` (top app bar / bottom bar token) — global scope reads as chrome,
     // not as belonging to whichever preset is open (D3 §1.1).
     Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
@@ -229,6 +243,7 @@ private fun MasterVolumeDock(row: ParameterRow.Range, onValueChange: (Float) -> 
             valueRange = row.range,
             valueText = row.valueText,
             onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
             abbreviation = row.abbreviation,
             onValueTextClick = onValueTextClick,
             modifier = Modifier
@@ -244,6 +259,7 @@ private fun CategoryAccordion(
     expanded: Boolean,
     onToggle: () -> Unit,
     onRangeChange: (ParameterId, Float) -> Unit,
+    onRangeChangeFinished: (ParameterId) -> Unit,
     onValueTextClick: (ParameterId) -> Unit,
     onSwitchToggle: (ParameterId, Boolean) -> Unit,
     onStepperChange: (ParameterId, Int) -> Unit,
@@ -274,12 +290,12 @@ private fun CategoryAccordion(
                 when (category) {
                     is CategoryUiState.Flat ->
                         category.rows.forEach { row ->
-                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                            ParameterRowView(row, onRangeChange, onRangeChangeFinished, onValueTextClick, onSwitchToggle, onStepperChange)
                         }
 
                     is CategoryUiState.Banked -> {
                         category.alwaysOnRows.forEach { row ->
-                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                            ParameterRowView(row, onRangeChange, onRangeChangeFinished, onValueTextClick, onSwitchToggle, onStepperChange)
                         }
                         ParameterSelectChipRow(
                             options = category.selector.options,
@@ -291,7 +307,7 @@ private fun CategoryAccordion(
                         // D3 §2.1: only the selected model's rows are ever composed here — every
                         // other model's rows are absent, not grayed or collapsed.
                         category.modelRows.forEach { row ->
-                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                            ParameterRowView(row, onRangeChange, onRangeChangeFinished, onValueTextClick, onSwitchToggle, onStepperChange)
                         }
                     }
                 }
@@ -304,6 +320,7 @@ private fun CategoryAccordion(
 private fun ParameterRowView(
     row: ParameterRow,
     onRangeChange: (ParameterId, Float) -> Unit,
+    onRangeChangeFinished: (ParameterId) -> Unit,
     onValueTextClick: (ParameterId) -> Unit,
     onSwitchToggle: (ParameterId, Boolean) -> Unit,
     onStepperChange: (ParameterId, Int) -> Unit,
@@ -315,6 +332,7 @@ private fun ParameterRowView(
             valueRange = row.range,
             valueText = row.valueText,
             onValueChange = { onRangeChange(row.id, it) },
+            onValueChangeFinished = { onRangeChangeFinished(row.id) },
             abbreviation = row.abbreviation,
             onValueTextClick = { onValueTextClick(row.id) },
             modifier = Modifier.testTag("paramRow.range.${row.id.index}"),

@@ -549,4 +549,61 @@ class ParameterEditorViewModelTest {
         assertNull(vm.uiState.value.writeError)
         vm.onCleared()
     }
+
+    // ---- issue #104: pedal-initiated changes must not fight the user's own drag -----------------
+
+    @Test
+    fun `a pedal-initiated change to the parameter being dragged does not move the thumb`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 7f)
+        runCurrent() // the mid-drag throttled write completes and clears its own override
+
+        // The pedal reports its own knob moving for the SAME parameter, mid-gesture.
+        controller.seedParameterValue(gain, 1f)
+        runCurrent()
+
+        assertEquals(7f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `after the drag ends, the parameter follows the controller again`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 7f)
+        runCurrent()
+        vm.onRangeDragEnd(gain)
+        controller.seedParameterValue(gain, 1f)
+        runCurrent()
+
+        assertEquals(1f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a pedal-initiated change to a different parameter lands immediately during a drag`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 7f)
+        runCurrent()
+        controller.seedParameterValue(bass, 9f)
+        runCurrent()
+
+        // Suppression is per-id and per-gesture: this is the whole feature, not an exception to it.
+        assertEquals(9f, rowValue(vm, bass), 1e-4f)
+        assertEquals(7f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    private fun gainValue(vm: ParameterEditorViewModel): Float = rowValue(vm, gain)
+
+    private fun rowValue(vm: ParameterEditorViewModel, id: ParameterId): Float =
+        vm.uiState.value.quickTier.first { it.row.id == id }.row.value
 }
