@@ -25,6 +25,7 @@ import dev.tonexotg.protocol.params.ParameterRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -768,6 +769,87 @@ class ProbeSession(
     }
 
     /**
+     * Issue #104's spike — read-only. Connects, then does nothing on the wire itself for
+     * [listenDurationMillis] while the human turns a **physical, preset-scoped** knob on the pedal
+     * (e.g. an EQ gain or the noise gate threshold — deliberately NOT master volume, whose
+     * unsolicited push is already confirmed working; see [SingleParameterPayloadCodec]'s KDoc).
+     *
+     * Two independent pieces of evidence come out of this:
+     * 1. [LoggingTonexTransport] (already wrapping [transport]) hex-dumps every raw inbound frame
+     *    during the window regardless of whether `:protocol` can decode or classify it — a human
+     *    can inspect the `[knob-listen]` READ entries by hand even if nothing below changes.
+     * 2. [TonexController.parameterValues] is diffed before/after the window. `:protocol`'s reader
+     *    loop already applies an unsolicited `ParameterChanged`/`StateUpdate` push live
+     *    ([DefaultTonexController.applyParameterChanged]/`.applyStateUpdate`) regardless of whether
+     *    this session asked for it — so if turning the knob changes this map, that is direct,
+     *    empirical confirmation the pedal pushes notifications for that parameter id, with no
+     *    further decoding needed here.
+     *
+     * Never calls anything that writes to the pedal — no confirmation dialog needed in
+     * [ProbeActivity], unlike every write-capable probe step.
+     */
+    suspend fun runKnobListenProbe(
+        connection: UsbDeviceConnection,
+        inEndpoint: UsbEndpoint,
+        outEndpoint: UsbEndpoint,
+        listenDurationMillis: Long = KNOB_LISTEN_DURATION_MILLIS,
+    ) {
+        log.warn("=== issue #104 knob-listen probe starting (read-only, ${listenDurationMillis}ms) ===")
+        val transport = LoggingTonexTransport(UsbTonexTransport(connection, inEndpoint, outEndpoint), log, "knob-listen")
+        val controller = DefaultTonexController(
+            scope = scope,
+            capabilities = FirmwareCapabilities.NONE_CONFIRMED,
+            timeouts = ConnectionTimeouts.DEFAULT,
+        )
+        val healthJob = launchConnectionHealthLog(controller, "knob-listen")
+        try {
+            val connectResult = controller.connect(transport)
+            if (connectResult is TonexResult.Failure) {
+                log.error("knob-listen probe: connect() failed: ${connectResult.error.message}")
+                return
+            }
+            val before = controller.parameterValues.value
+            log.finding(
+                "knob-listen probe: connected and listening. TURN A PHYSICAL PRESET-SCOPED KNOB ON " +
+                    "THE PEDAL NOW (e.g. an EQ gain or the noise gate threshold — NOT master volume; " +
+                    "that unsolicited push is already confirmed). You have ${listenDurationMillis / 1000}s. " +
+                    "Every raw inbound frame this session receives is hex-dumped above/below tagged " +
+                    "[knob-listen], whether or not :protocol recognizes it.",
+            )
+            delay(listenDurationMillis)
+            val after = controller.parameterValues.value
+            val changedIds = (before.keys + after.keys).filter { before[it] != after[it] }
+            if (changedIds.isEmpty()) {
+                log.finding(
+                    "knob-listen probe RESULT: parameterValues did NOT change during the listen window. " +
+                        "Either no knob was turned, or the pedal did not send an unsolicited notification " +
+                        "this app's decode path recognizes for whatever was turned — check the raw " +
+                        "[knob-listen] READ hex dumps above by hand for ANY frame that arrived during the " +
+                        "window; a frame the pedal sent but this codec doesn't map to a ParameterId would " +
+                        "still show up there even though it didn't change parameterValues.",
+                )
+            } else {
+                log.finding(
+                    "knob-listen probe RESULT: parameterValues CHANGED during the listen window for " +
+                        "wire index/value: " +
+                        changedIds.joinToString { "${it.index}: ${before[it]} -> ${after[it]}" } +
+                        ". This is empirical confirmation the pedal pushes an unsolicited notification " +
+                        "for at least this/these parameter id(s) — see issue #104.",
+                )
+            }
+        } finally {
+            healthJob.cancel()
+            withContext(NonCancellable) {
+                runCatching { controller.disconnect() }
+                    .onFailure { log.error("knob-listen probe: disconnect() failed during teardown: ${it.message}") }
+            }
+            runCatching { transport.close() }
+                .onFailure { log.error("knob-listen probe: transport.close() failed during teardown: ${it.message}") }
+            log.warn("=== knob-listen probe complete ===")
+        }
+    }
+
+    /**
      * Issue #27 §2/§3 — the preset-change byte-diff drill: capture the full state blob, change the
      * active preset via the real [dev.tonexotg.protocol.TonexController.selectPreset] (never a
      * synthesized write), capture the blob again, and byte-diff the two arrays completely. See
@@ -1059,6 +1141,13 @@ class ProbeSession(
     }
 
     private companion object {
+        /**
+         * Issue #104: long enough for a human to reach for the pedal and turn a knob a few times
+         * after reading the on-screen instruction, short enough to keep one probe run quick. Not
+         * derived from any measurement — this step has no timing target, only a listen window.
+         */
+        const val KNOB_LISTEN_DURATION_MILLIS: Long = 20_000L
+
         /**
          * Not derived from any measurement — a reasonable diagnostic burst size for simulating a
          * fast slider drag (comparable to the number of `onValueChange` callbacks a real Compose
