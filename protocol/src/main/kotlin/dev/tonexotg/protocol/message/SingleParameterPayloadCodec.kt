@@ -62,10 +62,10 @@ data class SingleParameterPayload(val kind: Int, val index: Int, val value: Floa
  * `{0xB9, 0x04, kind, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00}` and executes exactly one
  * assignment into the index field: **`payload[4] = index;`**. `payload[3]` is never written.
  *
- * Upstream's *reader* (`usb_tonex_one_parse_param_changed`, `:827-877`) disagrees with its own
+ * Upstream's *reader* (`usb_tonex_one_parse_param_changed`, `usb_tonex_one.c:862`) disagrees with its own
  * writer: it performs a 2-byte little-endian read, `param_index = *temp_ptr++;
  * param_index |= (*temp_ptr << 8);`. That read is dead code in upstream's own control flow —
- * `param_index`'s only use is `if (param_index == 0x00)` (`:856`), with no `else` branch, so every
+ * `param_index`'s only use is `if (param_index == 0x00)`, with no `else` branch, so every
  * nonzero index it computes is discarded unexamined.
  *
  * **Real hardware settles it in the writer's favour.** The #106 capture (a physical `MODEL_GAIN`
