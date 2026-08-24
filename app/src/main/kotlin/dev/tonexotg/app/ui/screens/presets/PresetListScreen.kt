@@ -12,9 +12,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,10 +27,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
+import dev.tonexotg.app.ui.components.ParameterControl
+import dev.tonexotg.app.ui.components.ParameterSwitch
 import dev.tonexotg.app.ui.components.PresetRow
 import dev.tonexotg.app.ui.screens.connection.ConnectionErrorPanel
 import dev.tonexotg.app.ui.theme.TonexTheme
 import dev.tonexotg.protocol.ConnectionState
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetSlot
 import dev.tonexotg.protocol.TonexController
@@ -56,6 +61,10 @@ fun PresetListScreen(
     var editingIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     var assigningIndex by rememberSaveable { mutableStateOf<Int?>(null) }
 
+    DisposableEffect(viewModel) {
+        onDispose { viewModel.onGlobalParametersCleared() }
+    }
+
     PresetListContent(
         uiState = uiState,
         onPresetClick = { index ->
@@ -67,6 +76,8 @@ fun PresetListScreen(
         },
         onEditAliasRequested = { index -> editingIndex = index.value },
         onAssignSlotRequested = { index -> assigningIndex = index.value },
+        onGlobalRangeChange = viewModel::onGlobalRangeDrag,
+        onGlobalSwitchToggle = viewModel::onGlobalSwitchToggle,
         modifier = modifier,
     )
 
@@ -114,6 +125,8 @@ fun PresetListContent(
     onPresetClick: (PresetIndex) -> Unit,
     onEditAliasRequested: (PresetIndex) -> Unit,
     onAssignSlotRequested: (PresetIndex) -> Unit = {},
+    onGlobalRangeChange: (ParameterId, Float) -> Unit = { _, _ -> },
+    onGlobalSwitchToggle: (ParameterId, Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -162,6 +175,16 @@ fun PresetListContent(
             contentPadding = PaddingValues(TonexTheme.spacing.space2),
             verticalArrangement = Arrangement.spacedBy(TonexTheme.touchTargets.spacing),
         ) {
+            uiState.globalParameters?.let { globalParameters ->
+                item(key = "globalParameters") {
+                    GlobalParametersSection(
+                        state = globalParameters,
+                        onRangeChange = onGlobalRangeChange,
+                        onSwitchToggle = onGlobalSwitchToggle,
+                    )
+                }
+            }
+
             items(uiState.items, key = { it.index.value }) { item ->
                 val subtitle = if (item.localAlias != null && item.pedalName != null) {
                     "from pedal: ${item.pedalName}"
@@ -186,6 +209,57 @@ fun PresetListContent(
                         null
                     },
                     modifier = Modifier.testTag("presetRow.${item.index.value}"),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The always-visible home-screen section (issue #83) for the 6 relocated GLOBAL parameters —
+ * BPM/Input Trim/Tuning Reference as sliders (reusing [ParameterControl], the same composable
+ * the Parameter Editor's RANGE rows use), Cab Sim Bypass/Tempo Source/Bypass as one-tap toggles
+ * (reusing [ParameterSwitch]). Rendered only when [PresetListUiState.globalParameters] is
+ * non-null — see that property's kdoc for why `null` means "don't render this at all," never a
+ * placeholder-default state.
+ */
+@Composable
+private fun GlobalParametersSection(
+    state: GlobalParametersUiState,
+    onRangeChange: (ParameterId, Float) -> Unit,
+    onSwitchToggle: (ParameterId, Boolean) -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("globalParameters.section"),
+    ) {
+        Column(
+            modifier = Modifier.padding(TonexTheme.spacing.space3),
+            verticalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space2),
+        ) {
+            Text(text = "Global", style = MaterialTheme.typography.headlineSmall)
+
+            listOf(state.bpm, state.inputTrim, state.tuningReference).forEach { row ->
+                ParameterControl(
+                    label = row.label,
+                    value = row.value,
+                    valueRange = row.range,
+                    valueText = row.valueText,
+                    onValueChange = { onRangeChange(row.id, it) },
+                    abbreviation = row.abbreviation,
+                    modifier = Modifier.testTag("globalParameters.range.${row.id.index}"),
+                )
+            }
+
+            listOf(state.cabSimBypass, state.tempoSource, state.bypass).forEach { row ->
+                ParameterSwitch(
+                    label = row.label,
+                    checked = row.checked,
+                    onCheckedChange = { onSwitchToggle(row.id, it) },
+                    abbreviation = row.abbreviation,
+                    modifier = Modifier.testTag("globalParameters.switch.${row.id.index}"),
                 )
             }
         }

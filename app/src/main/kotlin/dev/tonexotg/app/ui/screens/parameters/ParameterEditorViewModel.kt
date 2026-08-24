@@ -2,7 +2,6 @@ package dev.tonexotg.app.ui.screens.parameters
 
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
-import dev.tonexotg.protocol.ParameterScope
 import dev.tonexotg.protocol.ParameterSpec
 import dev.tonexotg.protocol.ParameterType
 import dev.tonexotg.protocol.PresetIndex
@@ -159,10 +158,6 @@ class ParameterEditorViewModel(
      */
     fun onRangeDrag(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
-        if (isWriteUnsupported(spec)) {
-            _writeError.value = WriteError(id, UNSUPPORTED_WRITE_MESSAGE)
-            return
-        }
         val clamped = rawValue.coerceIn(spec.min, effectiveBounds.effectiveMax(id))
         _overrides.update { it + (id to clamped) }
         throttler.submit(id, clamped)
@@ -256,10 +251,6 @@ class ParameterEditorViewModel(
 
     private fun onDiscreteChange(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
-        if (isWriteUnsupported(spec)) {
-            _writeError.value = WriteError(id, UNSUPPORTED_WRITE_MESSAGE)
-            return
-        }
         // Effective max (issue #80): the write-clamp must track the same widened ceiling
         // DefaultTonexController's own setParameter validation uses, or a value the UI's widened
         // stepper range permits (buildRow) could never actually reach the pedal — clamped back
@@ -271,24 +262,6 @@ class ParameterEditorViewModel(
             handleWriteResult(id, clamped, result)
         }
     }
-
-    /**
-     * True for the 6 `GLOBAL`-scope parameters (everything except `MASTER_VOLUME`, wire indices
-     * 110-115: `BPM`, `INPUT_TRIM`, `CABSIM_BYPASS`, `TEMPO_SOURCE`, `TUNING_REFERENCE`, `BYPASS`)
-     * that [dev.tonexotg.protocol.connection.DefaultTonexController.writeParameterLocked]
-     * *deterministically* rejects — `:protocol` has no write path for them yet (upstream patches
-     * the full state blob at offsets `StateBlobOffsets` deliberately does not model). Mirrors that
-     * function's own routing condition (`scope == PRESET`, else `enumName == "MASTER_VOLUME"`,
-     * else reject) so this never drifts out of sync with it.
-     *
-     * Checked before ever calling [TonexController.setParameter] for these ids: since the
-     * rejection is deterministic, there is nothing to gain from a doomed round trip, and skipping
-     * it also means the user never sees `:protocol`'s raw internal `ProtocolStateViolation` prose
-     * (`"$enumName is a global parameter other than master volume; :protocol has no write path
-     * for it..."`) — [UNSUPPORTED_WRITE_MESSAGE] is shown instead.
-     */
-    private fun isWriteUnsupported(spec: ParameterSpec): Boolean =
-        spec.scope == ParameterScope.GLOBAL && spec.enumName != "MASTER_VOLUME"
 
     /**
      * Shared by both write paths ([throttler]'s `onResult` and [onDiscreteChange]'s own call):
@@ -315,10 +288,6 @@ class ParameterEditorViewModel(
             is TonexResult.Success -> _writeError.update { current -> if (current?.id == id) null else current }
             is TonexResult.Failure -> _writeError.value = WriteError(id, result.error.message)
         }
-    }
-
-    private companion object {
-        const val UNSUPPORTED_WRITE_MESSAGE = "This parameter isn't supported yet."
     }
 
     private fun buildUiState(controllerSnapshot: ControllerSnapshot, localEditState: LocalEditState, dialogState: DialogState): ParameterEditorUiState {
@@ -470,7 +439,7 @@ private fun buildRow(id: ParameterId, rawValue: Float, effectiveBounds: Effectiv
     }
 }
 
-private fun buildRangeRow(id: ParameterId, rawValue: Float, labelOverride: String? = null): ParameterRow.Range {
+internal fun buildRangeRow(id: ParameterId, rawValue: Float, labelOverride: String? = null): ParameterRow.Range {
     val spec = ParameterRegistry.byIndex(id.index) ?: error("No ParameterSpec for $id")
     val value = rawValue.coerceIn(spec.min, spec.max)
     return ParameterRow.Range(
@@ -485,10 +454,10 @@ private fun buildRangeRow(id: ParameterId, rawValue: Float, labelOverride: Strin
     )
 }
 
-private fun abbreviationFor(spec: ParameterSpec, id: ParameterId): String = "${spec.name} · index ${id.index}"
+internal fun abbreviationFor(spec: ParameterSpec, id: ParameterId): String = "${spec.name} · index ${id.index}"
 
 /** `"NOISE_GATE_THRESHOLD"` → `"Noise Gate Threshold"` — a generic, no-curation-needed friendly label for full-tier rows. */
-private fun friendlyLabel(enumName: String): String =
+internal fun friendlyLabel(enumName: String): String =
     enumName.lowercase(Locale.US).split('_').joinToString(" ") { word ->
         word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
     }

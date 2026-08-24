@@ -465,40 +465,32 @@ class ParameterEditorViewModelTest {
     }
 
     @Test
-    fun `dragging a known write-unsupported global parameter never reaches the controller and shows a plain message`() = runTest {
+    fun `dragging one of the 6 issue-83 global range parameters now reaches the controller (PR #100 added its write path)`() = runTest {
         val controller = FakeTonexController()
         val vm = ParameterEditorViewModel(controller, backgroundScope)
         runCurrent()
 
-        val tuningReference = ParameterId(114) // TUNING_REFERENCE - GLOBAL scope, no :protocol write path
+        val tuningReference = ParameterId(114) // TUNING_REFERENCE - GLOBAL scope, :protocol write path since PR #100
         vm.onRangeDrag(tuningReference, 450f)
         runCurrent()
 
-        assertTrue(
-            "a deterministically-rejected write must never attempt the round trip",
-            controller.setParameterCalls.isEmpty(),
-        )
-        val message = vm.uiState.value.writeError
-        assertNotNull(message)
-        assertFalse(
-            "the raw :protocol ProtocolStateViolation prose must not leak to the UI",
-            message!!.contains("StateBlobOffsets") || message.contains("global parameter other than master volume"),
-        )
+        assertEquals(listOf(tuningReference to 450f), controller.setParameterCalls)
+        assertNull(vm.uiState.value.writeError)
         vm.onCleared()
     }
 
     @Test
-    fun `toggling a known write-unsupported global switch never reaches the controller and shows a plain message`() = runTest {
+    fun `toggling one of the 6 issue-83 global switch parameters now reaches the controller (PR #100 added its write path)`() = runTest {
         val controller = FakeTonexController()
         val vm = ParameterEditorViewModel(controller, backgroundScope)
         runCurrent()
 
-        val cabsimBypass = ParameterId(112) // CABSIM_BYPASS - GLOBAL scope, no :protocol write path
+        val cabsimBypass = ParameterId(112) // CABSIM_BYPASS - GLOBAL scope, :protocol write path since PR #100
         vm.onSwitchToggle(cabsimBypass, true)
         runCurrent()
 
-        assertTrue(controller.setParameterCalls.isEmpty())
-        assertNotNull(vm.uiState.value.writeError)
+        assertEquals(listOf(cabsimBypass to 1f), controller.setParameterCalls)
+        assertNull(vm.uiState.value.writeError)
         vm.onCleared()
     }
 
