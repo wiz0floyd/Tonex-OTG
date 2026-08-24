@@ -308,9 +308,19 @@ class ParameterEditorViewModel(
      * failure on Bass must not be wiped out by Gain's success just because they share one error
      * slot. (Two different parameters failing at the same time still only surfaces the more recent
      * one's message — an accepted single-dialog-at-a-time limitation, not a per-id queue.)
+     *
+     * ## Only clear an override that still matches (issue #84)
+     * The override is removed only if it's still exactly [value] — the value *this* completed
+     * write attempted. During a fast drag, [ParameterWriteThrottler] conflates in-flight values,
+     * so an earlier write (v1) can complete *after* [onRangeDrag] has already stored a newer
+     * optimistic override (v3) for the next, still-in-flight write. Clearing unconditionally there
+     * would drop the override back to the controller's stale v1 for one frame — a visible
+     * backward thumb-jump — even though v3 is still correct and its own write is already en route.
+     * Leaving a mismatched override alone here is safe: the newer write's own [handleWriteResult]
+     * call clears it once *that* write lands.
      */
-    private fun handleWriteResult(id: ParameterId, @Suppress("UNUSED_PARAMETER") value: Float, result: TonexResult<Unit>) {
-        _overrides.update { it - id }
+    private fun handleWriteResult(id: ParameterId, value: Float, result: TonexResult<Unit>) {
+        _overrides.update { current -> if (current[id] == value) current - id else current }
         when (result) {
             is TonexResult.Success -> _writeError.update { current -> if (current?.id == id) null else current }
             is TonexResult.Failure -> _writeError.value = WriteError(id, result.error.message)
