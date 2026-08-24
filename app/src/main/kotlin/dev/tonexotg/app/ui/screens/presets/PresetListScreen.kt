@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -393,14 +392,14 @@ private fun GlobalParametersHeader(
             RangeChip(icon = Icons.Filled.MusicNote, valueText = state.tuningReference.valueText, contentDescription = "${state.tuningReference.label}, ${state.tuningReference.valueText}")
             SwitchChip(
                 iconOn = Icons.Filled.Speaker,
-                iconOff = SpeakerOutlined,
+                iconOff = Icons.Outlined.SpeakerOutlined,
                 checked = state.cabSimBypass.checked,
                 contentDescription = "${state.cabSimBypass.label}, ${if (state.cabSimBypass.checked) "on" else "off"}",
             )
             RangeChip(icon = Icons.Filled.Schedule, valueText = state.tempoSource.abbreviation, contentDescription = "${state.tempoSource.label}, ${state.tempoSource.abbreviation}")
             SwitchChip(
                 iconOn = Icons.Filled.PowerSettingsNew,
-                iconOff = PowerSettingsNewOutlined,
+                iconOff = Icons.Outlined.PowerSettingsNewOutlined,
                 checked = state.bypass.checked,
                 contentDescription = "${state.bypass.label}, ${if (state.bypass.checked) "on" else "off"}",
             )
