@@ -129,10 +129,11 @@ Corollaries:
   respawning.
 
 What stays mandatory regardless of cost arithmetic: the **adversarial
-Opus review before merging anything that writes to the pedal or parses
-its responses** (see "Review rigor" below). That review has twice caught
-a genuine blocker a Sonnet pass reported as "criteria met, tests green" —
-that gap is the whole justification, so never skip it to save tokens.
+Opus review on any change scoring 4 or more on the rubric in "Review
+rigor, scaled to blast radius" below**. Don't reason about that one from
+cost at all — score the diff and do what the tier says. That review has
+twice caught a genuine blocker a Sonnet pass reported as "criteria met,
+tests green," so never skip a 4+ to save tokens.
 
 ### Prompt caching is half the dispatch cost
 
@@ -220,16 +221,63 @@ question: do inline. "The task has several parts" is not a reason to spawn.
 
 Not every change needs the same scrutiny. Scale it to what's at stake:
 
-- **High-stakes code** (anything that writes to the pedal, parses its
-  responses, or touches state that could be echoed back corrupted) gets an
-  adversarial Opus review before merge — not just a green test run. Brief
-  the reviewer to assume the implementation is wrong until proven otherwise,
-  to verify claims independently rather than trusting the diff's own tests,
-  and to hand-check protocol literals against the actual upstream source
-  rather than trusting a citation in the code or issue text. A prior
-  session's citation of an upstream detail (an offset table's supposed
-  version history) turned out to be fabricated; the reviewer only caught it
-  by fetching the real upstream repo and checking.
+### Score the change, then pick the reviewer
+
+"Anything that writes to the pedal gets an Opus review" was the rule
+through 2026-08-24. It was over-broad: most pedal-touching work now is a
+new parameter riding a codec that's been hardware-proven for months, and
+that doesn't need Opus. Retired in favour of the rubric below, which
+exists so the call comes out the same regardless of who's asking or how
+tired they are. Score the diff, add the points up, read off the tier.
+
+| Points | Trigger |
+| --- | --- |
+| +3 | Changes what goes on the wire: frame layout, field count, byte offsets, CRC, HDLC stuffing, an `encode`/`decode` body |
+| +3 | First write to a pedal region or state-blob offset this project has never written before |
+| +2 | No hardware-confirmed or upstream reference literal exists to assert against — the tests can only check round-trip self-consistency |
+| +2 | Upstream behaviour was inferred, generalized, or cited rather than read directly in **both** directions (outbound builder *and* inbound parser) |
+| +2 | Touches state the pedal later echoes back, where a bad write corrupts the user's device rather than just failing |
+| +2 | A Sonnet pass on this same change already came back wrong or incomplete once |
+| +2 | Drives writes from a continuous UI interaction (drag, hold-repeat, rapid taps) where the write rate isn't obviously bounded by the code |
+| −2 | Reuses an existing, hardware-proven path unchanged and only adds a value, a parameter, or a registry entry |
+
+Tiers:
+
+- **4 or more → adversarial Opus review before merge, non-negotiable.**
+  Not a green test run, not a Sonnet review.
+- **2–3 → Sonnet review by default; escalate to Opus on your own judgment**
+  if the diff is large, the story is unfamiliar, or anything about it
+  smells. Escalating is cheap now (1.67x); guessing wrong is not.
+- **0–1 → normal verification.** Build, tests, `:app:lintDebug`, PR. No
+  review agent needed.
+
+Two hard overrides on the arithmetic:
+
+- **Any diff to `:protocol` codec internals scores at least 3 by
+  definition** — if your count came out lower, you mis-scored it.
+- **A change that scores 0–1 but fails against real hardware is
+  automatically re-scored as 4** for the fix round. Hardware disagreeing
+  with the tests is exactly the signal the rubric can't see.
+
+When the rubric lands on Opus, brief the reviewer to assume the
+implementation is wrong until proven otherwise, to verify claims
+independently rather than trusting the diff's own tests, and to hand-check
+protocol literals against the actual upstream source rather than trusting a
+citation in the code or issue text. A prior session's citation of an
+upstream detail (an offset table's supposed version history) turned out to
+be fabricated; the reviewer only caught it by fetching the real upstream
+repo and checking.
+
+Why the top tier stays mandatory rather than advisory: Opus review has
+twice caught a genuine blocker on this project that a Sonnet pass reported
+as "criteria met, tests green," and both were invisible to a fully green
+suite because the fixtures encoded the same wrong assumption the code did.
+A codebase being stable doesn't protect the *next* codec — that's the trap,
+and it's why "we're stable now" is not a reason to skip a 4+ review.
+
+The rest of this section is the reviewer's checklist, and applies whenever
+a review happens at all:
+
 - **When confirming a wire-format detail against upstream, check the sibling
   function for the opposite direction too, in the same pass — don't assume
   symmetry.** Upstream typically has one function that builds outbound
