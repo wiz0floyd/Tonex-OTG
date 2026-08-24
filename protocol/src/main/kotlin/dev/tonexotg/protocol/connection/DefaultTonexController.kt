@@ -127,6 +127,15 @@ class DefaultTonexController(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
+    /**
+     * Rate-limits the ~100 Hz inbound `ParameterChanged` stream on its way into [_parameterValues]
+     * (issue #104). Leading-edge: a one-off frame still applies synchronously — see
+     * [InboundParameterThrottle]'s KDoc, which explains why that is load-bearing here.
+     */
+    private val inboundParameterThrottle = InboundParameterThrottle(scope) { updates ->
+        _parameterValues.update { it + updates }
+    }
+
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
     override val activePreset: StateFlow<PresetIndex?> = _activePreset.asStateFlow()
     override val presets: StateFlow<List<PresetInfo>> = _presets.asStateFlow()
@@ -338,21 +347,55 @@ class DefaultTonexController(
     }
 
     /**
-     * Applies a `ParameterChanged` notification to [parameterValues] — restrained to `index == 0`
-     * (master volume) only. [SingleParameterPayloadCodec]'s KDoc is explicit that the nonzero-index
-     * correspondence to [ParameterId]'s numbering is "plausible but unconfirmed" and not exercised
-     * by upstream's own control flow; mapping a nonzero index here would be inventing protocol
-     * truth. **Do not "fix" this restraint** — see issue #25 / S20 for the hardware probe that
-     * would resolve it.
+     * Applies a `ParameterChanged` notification to [parameterValues] (issue #104).
+     *
+     * The pedal streams these unsolicited, at ~100 Hz, for as long as a physical knob is being
+     * turned — that is how a knob turn on the hardware becomes a moving control in the app,
+     * without polling, a request/response round trip, or a preset reselect. Confirmed against real
+     * hardware in #106; see [SingleParameterPayloadCodec]'s KDoc for the frame layout that capture
+     * settled.
+     *
+     * ## Routing
+     * - **`index == 0` is master volume**, not `ParameterId(0)`. Upstream uses index 0 that way
+     *   specifically (`usb_tonex_one.c:856`, `if (param_index == 0x00)`), and the value arrives in
+     *   the pedal's native `0..10` range, so it is converted to the engineering `-40..3` dB the
+     *   registry stores via [MasterVolumeMessage.nativeToDecibels] — reused, not reimplemented.
+     * - **Any other valid index** ([ParameterId.PRESET_RANGE] / [ParameterId.GLOBAL_RANGE]) routes
+     *   straight to that [ParameterId], value stored as received: #106 swept `MODEL_GAIN`
+     *   (index 20) from 1.9 to 4.8, inside its registered `0f..10f`, so these are already in
+     *   engineering units with no conversion needed.
+     * - **Anything else is dropped, loudly** — a [TonexEvent.UnroutableParameterNotification]
+     *   carrying the raw payload hex, never silently swallowed and never guessed onto a nearby
+     *   parameter.
+     *
+     * That last branch is the point. #106 proves only the preset-scoped case; that master volume
+     * and the GLOBAL-scope parameters (110..116) notify through this same index space is the
+     * product owner's stated working assumption, not an observation. Routing generically and
+     * failing loud is the deliberate alternative to blocking the whole story on another hardware
+     * session — if the assumption is wrong, the next debug dump says so in raw hex.
+     *
+     * Values go through [inboundParameterThrottle] rather than into [_parameterValues] directly;
+     * see that class for why the first frame of a burst still applies synchronously.
      */
     private fun applyParameterChanged(msg: TonexMessage.ParameterChanged) {
         val decoded = SingleParameterPayloadCodec.decode(msg.payload)
         if (decoded !is TonexResult.Success) return
         val p = decoded.value
-        if (p.index != 0) return
-        val spec = ParameterRegistry.byEnumName("MASTER_VOLUME") ?: return
-        val decibels = MasterVolumeMessage.nativeToDecibels(p.value)
-        _parameterValues.update { it + (spec.id to decibels) }
+
+        if (p.index == 0) {
+            val spec = ParameterRegistry.byEnumName("MASTER_VOLUME") ?: return
+            inboundParameterThrottle.submit(spec.id, MasterVolumeMessage.nativeToDecibels(p.value))
+            return
+        }
+
+        if (p.index in ParameterId.PRESET_RANGE || p.index in ParameterId.GLOBAL_RANGE) {
+            inboundParameterThrottle.submit(ParameterId(p.index), p.value)
+            return
+        }
+
+        _events.tryEmit(
+            TonexEvent.UnroutableParameterNotification(p.index, msg.payload.toSpacedHex()),
+        )
     }
 
     // ---- awaiting a response (§6.5) ----------------------------------------------------------
@@ -529,6 +572,9 @@ class DefaultTonexController(
         selfInitiatedPreset = null
         footswitchSnapshot = null
         snapshotStore.clear()
+        // Before the flows are cleared below: anything still buffered describes a session that no
+        // longer exists, and must not be flushed back into a map that is about to be emptied.
+        inboundParameterThrottle.cancelAll()
         _presets.value = emptyList()
         _activePreset.value = null
         _slotAssignments.value = emptyMap()
@@ -1567,3 +1613,10 @@ class DefaultTonexController(
      */
     suspend fun <T> withOperationLock(block: suspend () -> T): T = operationMutex.withLock { block() }
 }
+
+/**
+ * `"B9 04 02 00 6D 88 00 00 00 00"` — uppercase, space-separated, one byte per group. Used for
+ * [TonexEvent.UnroutableParameterNotification]'s raw payload, so an unroutable notification reaches
+ * a debug dump in a form the next hardware session can decode by hand (issue #104).
+ */
+private fun ByteArray.toSpacedHex(): String = joinToString(" ") { "%02X".format(it) }
