@@ -150,10 +150,35 @@ object ParameterCatalog {
         Category("Modulation", alwaysOnIds = ids(63, 64, 65), modelBank = modulationBank),
         Category("Delay", alwaysOnIds = ids(94, 95, 96), modelBank = delayBank),
         Category("Reverb", alwaysOnIds = ids(36, 37, 38), modelBank = reverbBank),
-        Category("Global", flatIds = ids(110..116)),
+        // issue #83: BPM/INPUT_TRIM/CABSIM_BYPASS/TEMPO_SOURCE/TUNING_REFERENCE/BYPASS (110-115)
+        // moved out of this category entirely, onto the preset-list home screen - see
+        // homeScreenGlobalIds. MASTER_VOLUME (116) stays here, unchanged: it already has its own
+        // dedicated dock UI outside this category (MasterVolumeDock) and was already duplicated
+        // here before this story, same as a quick-tier id's home-category duplication.
+        Category("Global", flatIds = ids(116)),
     )
 
     /** The 4 `SELECT` parameters with real option labels — every other `SELECT` gets a stepper (D3 §3.2). */
     val knownLabelSelectIds: Set<ParameterId> =
         setOf(reverbBank.selectorId, modulationBank.selectorId, delayBank.selectorId, cabinetBank.selectorId)
+
+    /**
+     * The 6 GLOBAL-scope parameters (issue #83) relocated from this catalog's full-tier
+     * accordion onto an always-visible section at the top of the preset-list home screen —
+     * `BPM`, `INPUT_TRIM`, `CABSIM_BYPASS`, `TEMPO_SOURCE`, `TUNING_REFERENCE`, `BYPASS`, wire
+     * indices 110-115. Unlike [masterVolumeId] (116, which keeps its full-tier [categories] entry
+     * *in addition to* its dock), these six have **no** [categories] placement at all after this
+     * story — [ParameterCatalogTest]'s completeness check accounts for that by treating this list,
+     * not a category/bank, as their one legitimate placement.
+     */
+    val homeScreenGlobalIds: List<ParameterId> = ids(110, 111, 112, 113, 114, 115)
+
+    // Named individually (rather than only indexing into homeScreenGlobalIds) so the home-screen
+    // section's view model / builder code can refer to each by name instead of a magic position.
+    val bpmId: ParameterId get() = homeScreenGlobalIds[0]
+    val inputTrimId: ParameterId get() = homeScreenGlobalIds[1]
+    val cabSimBypassId: ParameterId get() = homeScreenGlobalIds[2]
+    val tempoSourceId: ParameterId get() = homeScreenGlobalIds[3]
+    val tuningReferenceId: ParameterId get() = homeScreenGlobalIds[4]
+    val bypassId: ParameterId get() = homeScreenGlobalIds[5]
 }

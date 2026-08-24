@@ -310,6 +310,12 @@ class DefaultTonexController(
         val slots = StateBlobReader.slotAssignments(state)
         if (slots is TonexResult.Success) _slotAssignments.value = slots.value
 
+        // issue #83: keep the six GLOBAL-scope parameters' displayed values live on every state
+        // push, the same way slotAssignments already is - independent of the activePreset read
+        // below, and never gated on its success/failure.
+        val globals = StateBlobReader.globalParameterValues(state)
+        if (globals is TonexResult.Success) _parameterValues.update { it + globals.value }
+
         val read = StateBlobReader.activePreset(state)
         if (read is TonexResult.Failure) return
         val idx = (read as TonexResult.Success).value
@@ -624,6 +630,11 @@ class DefaultTonexController(
         // teardown's own invariant (a collector must never see Ready with stale flows) applies
         // here too.
         _slotAssignments.value = footswitchSnapshot?.toMap() ?: emptyMap()
+        // issue #83: seed the six GLOBAL-scope parameters' displayed values from this same
+        // handshake blob - a pure decode of bytes already in hand, not a further round trip - so a
+        // home-screen control never renders a ParameterRegistry default before its first live read.
+        val initialGlobals = StateBlobReader.globalParameterValues(blob)
+        if (initialGlobals is TonexResult.Success) _parameterValues.update { it + initialGlobals.value }
         _connectionState.value = ConnectionState.Ready
 
         // ---- Post-Ready harvest -----------------------------------------------------------------

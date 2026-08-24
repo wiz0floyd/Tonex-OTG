@@ -64,18 +64,32 @@ data class PresetListItem(
  *   itself a legible failure signal.
  * @property assignSlotError the most recent [TonexError] from a failed [dev.tonexotg.protocol.TonexController.assignPresetToSlot]
  *   call (S85 part 2b), or `null`. Same fail-fast-and-loud rationale as [selectPresetError].
+ * @property globalParameters the home-screen section for the 6 relocated GLOBAL parameters
+ *   (issue #83), or `null` when their live values aren't fully known yet (not connected, or
+ *   connected but the pedal hasn't reported all six yet). `null` means "don't render the section
+ *   at all" — never rendered with a [dev.tonexotg.protocol.ParameterSpec.default] placeholder,
+ *   which the very first touch on a control could otherwise silently write back to the pedal.
+ * @property globalWriteError the most recent [TonexError] from a failed write to one of those six
+ *   global parameters (issue #83), or `null`. Same fail-fast-and-loud rationale as
+ *   [selectPresetError]: a slider quietly sliding back to its previous value on failure is not
+ *   itself a legible failure signal.
  */
 data class PresetListUiState(
     val items: List<PresetListItem>,
     val isLive: Boolean,
     val selectPresetError: TonexError? = null,
     val assignSlotError: TonexError? = null,
+    val globalParameters: GlobalParametersUiState? = null,
+    val globalWriteError: TonexError? = null,
 ) {
     val selectPresetErrorPresentation: ErrorPresentation?
         get() = selectPresetError?.toPresentation()
 
     val assignSlotErrorPresentation: ErrorPresentation?
         get() = assignSlotError?.toPresentation()
+
+    val globalWriteErrorPresentation: ErrorPresentation?
+        get() = globalWriteError?.toPresentation()
 
     companion object {
         /** Every screen starts here for one composition frame, before the first flow emission lands. */

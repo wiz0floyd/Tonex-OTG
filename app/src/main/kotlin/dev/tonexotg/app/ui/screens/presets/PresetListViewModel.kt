@@ -4,7 +4,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import dev.tonexotg.app.data.alias.PresetAliasStore
+import dev.tonexotg.app.ui.screens.parameters.ParameterWriteThrottler
 import dev.tonexotg.protocol.ConnectionState
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
 import dev.tonexotg.protocol.PresetSlot
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -85,15 +88,45 @@ class PresetListViewModel(
      */
     private val writeErrors = combine(lastSelectError, lastAssignError) { select, assign -> select to assign }
 
+    // ---- home-screen global-parameters section (issue #83) --------------------------------------
+
+    /** A value just submitted for one of [ParameterCatalog.homeScreenGlobalIds], held until [controller.parameterValues] catches up or the write fails — same "optimistic override" pattern as [dev.tonexotg.app.ui.screens.parameters.ParameterEditorViewModel]. */
+    private val _globalOverrides = MutableStateFlow<Map<ParameterId, Float>>(emptyMap())
+
+    private val globalWriteThrottler = ParameterWriteThrottler(
+        scope = scope,
+        write = controller::setParameter,
+        onResult = { id, _, result -> handleGlobalWriteResult(id, result) },
+    )
+
+    /**
+     * The most recent global-parameter write failure, or `null` — folded into [uiState] below.
+     * Review finding 2 on PR #101: a swallowed failure here would depart from the same
+     * fail-fast-and-loud rule [lastSelectError]/[lastAssignError] already follow on this screen,
+     * leaving a control that silently slides back to its old value as the only "error" signal.
+     */
+    private val lastGlobalWriteError = MutableStateFlow<TonexError?>(null)
+
+    /** [controller.parameterValues], [_globalOverrides] and [lastGlobalWriteError] pre-combined into one arm — same 5-flow-ceiling reason as [pedalPresetState]/[writeErrors]. */
+    private val globalParameterState = combine(
+        controller.parameterValues,
+        _globalOverrides,
+        lastGlobalWriteError,
+    ) { values, overrides, writeError -> Triple(values, overrides, writeError) }
+
     /**
      * The current [PresetListUiState], recombined whenever the controller's connection state,
-     * preset list, slot assignments, or active preset changes; a local alias changes; or a
-     * [selectPreset]/[assignToSlot] call fails. [PresetListUiState.initial] covers the one
-     * composition frame before this flow's first emission; every value after that is a full
-     * recomputation, never a patch, so there's no way for a stale item to survive an update to
-     * any one of its inputs.
+     * preset list, slot assignments, or active preset changes; a local alias changes; a
+     * [selectPreset]/[assignToSlot] call fails; or the six home-screen global parameter values
+     * change. [PresetListUiState.initial] covers the one composition frame before this flow's
+     * first emission; every value after that is a full recomputation, never a patch, so there's no
+     * way for a stale item to survive an update to any one of its inputs.
+     *
+     * Two-level `combine` (an inner 5-arg arm, then this outer 2-arg one) because
+     * [kotlinx.coroutines.flow.combine] only has typed overloads up to 5 flows and adding
+     * [globalParameterState] as a 6th arm here would exceed that ceiling.
      */
-    val uiState: StateFlow<PresetListUiState> = combine(
+    private val corePresetState = combine(
         controller.connectionState,
         pedalPresetState,
         controller.activePreset,
@@ -102,40 +135,66 @@ class PresetListViewModel(
     ) { connectionState, pedalState, activePreset, aliases, errors ->
         val (presets, slotAssignments) = pedalState
         val (selectError, assignError) = errors
-        buildUiState(connectionState, presets, activePreset, aliases, selectError, assignError, slotAssignments)
+        CorePresetState(connectionState, presets, activePreset, aliases, selectError, assignError, slotAssignments)
+    }
+
+    val uiState: StateFlow<PresetListUiState> = combine(
+        corePresetState,
+        globalParameterState,
+    ) { core, globalState ->
+        val (parameterValues, overrides, globalWriteError) = globalState
+        buildUiState(core, parameterValues, overrides, globalWriteError)
     }.stateIn(
         scope = scope,
         started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000),
         initialValue = PresetListUiState.initial(),
     )
 
+    private data class CorePresetState(
+        val connectionState: ConnectionState,
+        val presets: List<PresetInfo>,
+        val activePreset: PresetIndex?,
+        val aliases: List<String?>,
+        val selectError: TonexError?,
+        val assignError: TonexError?,
+        val slotAssignments: Map<PresetSlot, PresetIndex>,
+    )
+
     private fun buildUiState(
-        connectionState: ConnectionState,
-        presets: List<PresetInfo>,
-        activePreset: PresetIndex?,
-        aliases: List<String?>,
-        selectError: TonexError?,
-        assignError: TonexError?,
-        slotAssignments: Map<PresetSlot, PresetIndex>,
+        core: CorePresetState,
+        parameterValues: Map<ParameterId, Float>,
+        globalOverrides: Map<ParameterId, Float>,
+        globalWriteError: TonexError?,
     ): PresetListUiState {
-        val isLive = connectionState is ConnectionState.Ready
-        val presetsByIndex: Map<Int, PresetInfo> = presets.associateBy { it.index.value }
+        val isLive = core.connectionState is ConnectionState.Ready
+        val presetsByIndex: Map<Int, PresetInfo> = core.presets.associateBy { it.index.value }
         val items = (0..19).map { i ->
             val index = PresetIndex(i)
             buildPresetListItem(
                 index = index,
                 pedalInfo = presetsByIndex[i],
-                localAlias = aliases.getOrNull(i),
-                activePreset = activePreset,
+                localAlias = core.aliases.getOrNull(i),
+                activePreset = core.activePreset,
                 isLive = isLive,
-                slotAssignments = slotAssignments,
+                slotAssignments = core.slotAssignments,
             )
+        }
+        // issue #83: absence, not a ParameterRegistry default, is what gates this section's
+        // visibility - buildGlobalParametersUiState returns null the moment any of the six ids is
+        // not yet known, so the section simply doesn't render rather than showing a stale default
+        // the first touch could silently write back to the pedal.
+        val globalParameters = if (isLive) {
+            buildGlobalParametersUiState { id -> globalOverrides[id] ?: parameterValues[id] }
+        } else {
+            null
         }
         return PresetListUiState(
             items = items,
             isLive = isLive,
-            selectPresetError = selectError,
-            assignSlotError = assignError,
+            selectPresetError = core.selectError,
+            assignSlotError = core.assignError,
+            globalParameters = globalParameters,
+            globalWriteError = globalWriteError,
         )
     }
 
@@ -204,6 +263,68 @@ class PresetListViewModel(
                 aliasStore.setAlias(index, trimmed)
             }
         }
+    }
+
+    // ---- home-screen global-parameters section writes (issue #83) -------------------------------
+
+    /**
+     * Continuous slider drag for one of [ParameterCatalog.homeScreenGlobalIds]'s 3 RANGE controls
+     * — **updates the optimistic override only; it deliberately does not write.**
+     *
+     * Review finding 1 on PR #101: unlike a PRESET parameter (`ParameterWriteMessage`) or
+     * `MASTER_VOLUME` ([dev.tonexotg.protocol.message.MasterVolumeMessage]), each of these six
+     * writes costs a full state-blob read-modify-write inside
+     * `DefaultTonexController.writeParameterLocked` — a `RequestState` round trip, a
+     * `StateBlobPatcher` patch, then a `SetState` of the *entire* blob (slots, active preset,
+     * colour table and all). `selectPreset`/`restoreFootswitches` set the precedent of **one**
+     * such blob rewrite per discrete user action; writing per drag tick would instead issue tens
+     * of them per gesture, each with its own clobber window against anything that changed in
+     * between. The rate, not the mechanism, is the problem — so the write moves to
+     * [onGlobalRangeChangeFinished] (the pointer release). The displayed value stays responsive
+     * throughout because the override alone already drives it.
+     */
+    fun onGlobalRangeDrag(id: ParameterId, value: Float) {
+        _globalOverrides.update { it + (id to value) }
+    }
+
+    /**
+     * Pointer release on one of the 3 RANGE controls — the single write for the whole gesture,
+     * carrying whatever value [onGlobalRangeDrag] last recorded. Still routed through
+     * [globalWriteThrottler] so a flurry of quick successive releases conflates rather than
+     * queueing an unbounded backlog of full-blob rewrites.
+     */
+    fun onGlobalRangeChangeFinished(id: ParameterId) {
+        val value = _globalOverrides.value[id] ?: return
+        globalWriteThrottler.submit(id, value)
+    }
+
+    /**
+     * One switch toggle for one of [ParameterCatalog.homeScreenGlobalIds]'s 3 SWITCH controls.
+     * Routed through [globalWriteThrottler] rather than a bare [scope].launch (review finding 1 on
+     * PR #101) so a rapid double-tap conflates to a single blob rewrite instead of queueing two
+     * uncontrolled ones.
+     */
+    fun onGlobalSwitchToggle(id: ParameterId, checked: Boolean) {
+        val value = if (checked) 1f else 0f
+        _globalOverrides.update { it + (id to value) }
+        globalWriteThrottler.submit(id, value)
+    }
+
+    /** Once [id]'s write completes (success or failure), its optimistic override is no longer needed — same rationale as [dev.tonexotg.app.ui.screens.parameters.ParameterEditorViewModel.handleWriteResult]. */
+    private fun handleGlobalWriteResult(id: ParameterId, result: TonexResult<Unit>) {
+        // Dropped on success AND on failure: a local override must never keep pretending a
+        // rejected write actually landed, so the control falls back to the controller's own last
+        // known value either way.
+        _globalOverrides.update { it - id }
+        // ...and the failure itself is surfaced rather than swallowed (review finding 2 on PR
+        // #101), the same way selectPreset/assignToSlot failures already are on this screen — a
+        // control quietly sliding back to its old value is not a legible failure signal.
+        lastGlobalWriteError.value = (result as? TonexResult.Failure)?.error
+    }
+
+    /** Stops every in-flight/buffered throttled global-parameter write. Call from the caller's own teardown (e.g. `onDispose`). */
+    fun onGlobalParametersCleared() {
+        globalWriteThrottler.cancelAll()
     }
 }
 

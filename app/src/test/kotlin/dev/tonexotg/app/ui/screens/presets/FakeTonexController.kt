@@ -64,6 +64,17 @@ class FakeTonexController(
     /** What [assignPresetToSlot] returns the next time it's called; defaults to success. */
     var nextAssignPresetToSlotResult: TonexResult<Unit> = TonexResult.Success(Unit)
 
+    /** Every (id, value) pair [setParameter] was called with, in order — issue #83's home-screen global-parameter write tests' oracle. */
+    val setParameterCalls: MutableList<Pair<ParameterId, Float>> = mutableListOf()
+
+    /** What [setParameter] returns the next time it's called; defaults to success. */
+    var nextSetParameterResult: TonexResult<Unit> = TonexResult.Success(Unit)
+
+    /** Test helper: sets [id]'s live value directly, as if it had just been read from the pedal (issue #83). */
+    fun seedParameterValue(id: ParameterId, value: Float) {
+        _parameterValues.value = _parameterValues.value + (id to value)
+    }
+
     /** Directly pushes a new [ConnectionState], simulating what the real state machine would do. */
     fun setConnectionState(state: ConnectionState) {
         _connectionState.value = state
@@ -120,7 +131,15 @@ class FakeTonexController(
         return result
     }
 
-    override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> = TonexResult.Success(Unit)
+    override suspend fun setParameter(id: ParameterId, value: Float): TonexResult<Unit> {
+        setParameterCalls.add(id to value)
+        val result = nextSetParameterResult
+        nextSetParameterResult = TonexResult.Success(Unit)
+        if (result is TonexResult.Success) {
+            _parameterValues.value = _parameterValues.value + (id to value)
+        }
+        return result
+    }
 
     override suspend fun revertActivePreset(): TonexResult<Unit> = TonexResult.Success(Unit)
 

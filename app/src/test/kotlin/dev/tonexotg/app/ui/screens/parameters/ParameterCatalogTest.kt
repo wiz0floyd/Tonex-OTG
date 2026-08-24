@@ -35,7 +35,10 @@ class ParameterCatalogTest {
         }
 
         val coveredIds = placements.map { it.first }.toSet()
-        val missing = allRegistryIds - coveredIds
+        // issue #83: the 6 home-screen global ids are deliberately absent from every full-tier
+        // category/bank now (unlike MASTER_VOLUME, which keeps a category placement alongside its
+        // dock) - their one legitimate placement is ParameterCatalog.homeScreenGlobalIds instead.
+        val missing = allRegistryIds - coveredIds - ParameterCatalog.homeScreenGlobalIds.toSet()
         assertTrue("registry parameters missing from every full-tier category/bank: $missing", missing.isEmpty())
 
         val extra = coveredIds - allRegistryIds
@@ -46,6 +49,21 @@ class ParameterCatalogTest {
             "each id must appear in exactly one full-tier placement, but these appear in more than one: $duplicates",
             duplicates.isEmpty(),
         )
+
+        val homeScreenIdsStillInFullTier = coveredIds.intersect(ParameterCatalog.homeScreenGlobalIds.toSet())
+        assertTrue(
+            "home-screen global ids must not also appear in a full-tier category/bank: $homeScreenIdsStillInFullTier",
+            homeScreenIdsStillInFullTier.isEmpty(),
+        )
+    }
+
+    @Test
+    fun homeScreenGlobalIds_isExactlyTheSixIssue83Parameters() {
+        val expectedEnumNames = setOf("BPM", "INPUT_TRIM", "CABSIM_BYPASS", "TEMPO_SOURCE", "TUNING_REFERENCE", "BYPASS")
+        val actualEnumNames = ParameterCatalog.homeScreenGlobalIds
+            .map { id -> requireNotNull(ParameterRegistry.byIndex(id.index)) { "no ParameterSpec for $id" }.enumName }
+            .toSet()
+        assertEquals(expectedEnumNames, actualEnumNames)
     }
 
     @Test
