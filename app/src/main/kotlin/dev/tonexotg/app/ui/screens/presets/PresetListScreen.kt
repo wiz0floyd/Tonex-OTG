@@ -77,6 +77,7 @@ fun PresetListScreen(
         onEditAliasRequested = { index -> editingIndex = index.value },
         onAssignSlotRequested = { index -> assigningIndex = index.value },
         onGlobalRangeChange = viewModel::onGlobalRangeDrag,
+        onGlobalRangeChangeFinished = viewModel::onGlobalRangeChangeFinished,
         onGlobalSwitchToggle = viewModel::onGlobalSwitchToggle,
         modifier = modifier,
     )
@@ -126,6 +127,7 @@ fun PresetListContent(
     onEditAliasRequested: (PresetIndex) -> Unit,
     onAssignSlotRequested: (PresetIndex) -> Unit = {},
     onGlobalRangeChange: (ParameterId, Float) -> Unit = { _, _ -> },
+    onGlobalRangeChangeFinished: (ParameterId) -> Unit = {},
     onGlobalSwitchToggle: (ParameterId, Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
@@ -168,6 +170,18 @@ fun PresetListContent(
             )
         }
 
+        val globalWriteErrorPresentation = uiState.globalWriteErrorPresentation
+        if (globalWriteErrorPresentation != null) {
+            ConnectionErrorPanel(
+                presentation = globalWriteErrorPresentation,
+                onReconnect = {},
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(TonexTheme.spacing.space2)
+                    .testTag("globalParameters.error"),
+            )
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -180,6 +194,7 @@ fun PresetListContent(
                     GlobalParametersSection(
                         state = globalParameters,
                         onRangeChange = onGlobalRangeChange,
+                        onRangeChangeFinished = onGlobalRangeChangeFinished,
                         onSwitchToggle = onGlobalSwitchToggle,
                     )
                 }
@@ -227,6 +242,7 @@ fun PresetListContent(
 private fun GlobalParametersSection(
     state: GlobalParametersUiState,
     onRangeChange: (ParameterId, Float) -> Unit,
+    onRangeChangeFinished: (ParameterId) -> Unit,
     onSwitchToggle: (ParameterId, Boolean) -> Unit,
 ) {
     Surface(
@@ -248,6 +264,9 @@ private fun GlobalParametersSection(
                     valueRange = row.range,
                     valueText = row.valueText,
                     onValueChange = { onRangeChange(row.id, it) },
+                    // Review finding 1 on PR #101: the drag only moves the local override; the one
+                    // full state-blob rewrite this gesture costs happens here, on release.
+                    onValueChangeFinished = { onRangeChangeFinished(row.id) },
                     abbreviation = row.abbreviation,
                     modifier = Modifier.testTag("globalParameters.range.${row.id.index}"),
                 )

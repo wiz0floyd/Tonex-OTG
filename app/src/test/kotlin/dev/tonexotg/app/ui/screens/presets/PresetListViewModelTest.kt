@@ -5,6 +5,7 @@ import dev.tonexotg.app.data.alias.DataStorePresetAliasStore
 import dev.tonexotg.app.data.alias.InMemoryPreferencesDataStore
 import dev.tonexotg.app.ui.screens.parameters.ParameterCatalog
 import dev.tonexotg.protocol.ConnectionState
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.PresetIndex
 import dev.tonexotg.protocol.PresetInfo
 import dev.tonexotg.protocol.PresetSlot
@@ -13,6 +14,7 @@ import dev.tonexotg.protocol.TonexResult
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -481,7 +483,9 @@ class PresetListViewModelTest {
     }
 
     @Test
-    fun `onGlobalRangeDrag writes through to the controller and is reflected optimistically`() = runTest {
+    fun `onGlobalRangeDrag is reflected optimistically but does NOT write until the pointer is released`() = runTest {
+        // Review finding 1 on PR #101: each of these six writes costs a full state-blob
+        // read-modify-write, so a drag must not issue one per tick.
         val controller = FakeTonexController(initialState = ConnectionState.Ready)
         controller.setPresets(fakePresetInfoList())
         seedAllSixGlobals(controller)
@@ -490,11 +494,74 @@ class PresetListViewModelTest {
         viewModel.uiState.test {
             awaitItem { it.globalParameters != null }
 
+            viewModel.onGlobalRangeDrag(ParameterCatalog.bpmId, 85f)
+            viewModel.onGlobalRangeDrag(ParameterCatalog.bpmId, 88f)
             viewModel.onGlobalRangeDrag(ParameterCatalog.bpmId, 90f)
             val state = awaitItem { it.globalParameters?.bpm?.value == 90f }
             assertEquals(90f, requireNotNull(state.globalParameters).bpm.value)
         }
+        assertEquals(
+            "a drag must not write - the whole gesture costs one blob rewrite, on release",
+            emptyList<Pair<ParameterId, Float>>(),
+            controller.setParameterCalls,
+        )
+        viewModel.onGlobalParametersCleared()
+    }
+
+    @Test
+    fun `onGlobalRangeChangeFinished writes exactly once, with the last dragged value`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        seedAllSixGlobals(controller)
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            awaitItem { it.globalParameters != null }
+
+            viewModel.onGlobalRangeDrag(ParameterCatalog.bpmId, 85f)
+            viewModel.onGlobalRangeDrag(ParameterCatalog.bpmId, 90f)
+            viewModel.onGlobalRangeChangeFinished(ParameterCatalog.bpmId)
+            awaitItem { it.globalParameters?.bpm?.value == 90f }
+        }
         assertEquals(listOf(ParameterCatalog.bpmId to 90f), controller.setParameterCalls)
+        viewModel.onGlobalParametersCleared()
+    }
+
+    @Test
+    fun `onGlobalRangeChangeFinished with no preceding drag writes nothing`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        seedAllSixGlobals(controller)
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test { awaitItem { it.globalParameters != null } }
+        viewModel.onGlobalRangeChangeFinished(ParameterCatalog.bpmId)
+
+        assertEquals(emptyList<Pair<ParameterId, Float>>(), controller.setParameterCalls)
+        viewModel.onGlobalParametersCleared()
+    }
+
+    @Test
+    fun `a failed global write surfaces globalWriteError instead of being swallowed`() = runTest {
+        // Review finding 2 on PR #101: same fail-fast-and-loud rule selectPreset/assignToSlot
+        // already follow on this screen.
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        seedAllSixGlobals(controller)
+        val expected = TonexError.ProtocolStateViolation(state = ConnectionState.Ready, details = "write rejected")
+        controller.nextSetParameterResult = TonexResult.Failure(expected)
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            awaitItem { it.globalParameters != null }
+
+            viewModel.onGlobalSwitchToggle(ParameterCatalog.bypassId, true)
+            val state = awaitItem { it.globalWriteError != null }
+            assertEquals(expected, state.globalWriteError)
+            assertNotNull(state.globalWriteErrorPresentation)
+            // the optimistic override is dropped, so the control falls back to the real value
+            assertFalse(requireNotNull(state.globalParameters).bypass.checked)
+        }
         viewModel.onGlobalParametersCleared()
     }
 
@@ -513,6 +580,7 @@ class PresetListViewModelTest {
             assertTrue(requireNotNull(state.globalParameters).bypass.checked)
         }
         assertEquals(listOf(ParameterCatalog.bypassId to 1f), controller.setParameterCalls)
+        assertNull(viewModel.uiState.value.globalWriteError)
         viewModel.onGlobalParametersCleared()
     }
 }

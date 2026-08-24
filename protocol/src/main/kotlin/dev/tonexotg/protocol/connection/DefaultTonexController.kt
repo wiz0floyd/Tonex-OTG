@@ -634,7 +634,7 @@ class DefaultTonexController(
         // handshake blob - a pure decode of bytes already in hand, not a further round trip - so a
         // home-screen control never renders a ParameterRegistry default before its first live read.
         val initialGlobals = StateBlobReader.globalParameterValues(blob)
-        if (initialGlobals is TonexResult.Success) _parameterValues.value = initialGlobals.value
+        if (initialGlobals is TonexResult.Success) _parameterValues.update { it + initialGlobals.value }
         _connectionState.value = ConnectionState.Ready
 
         // ---- Post-Ready harvest -----------------------------------------------------------------
