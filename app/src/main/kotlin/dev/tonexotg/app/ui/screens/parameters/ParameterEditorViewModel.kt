@@ -189,14 +189,30 @@ class ParameterEditorViewModel(
     }
 
     /**
-     * The pointer came off the slider for [id] (issue #104). Ends the inbound-suppression window
-     * opened by [onRangeDrag] and drops the optimistic override, so [TonexController]'s own value —
-     * whether that is this drag's completed write or something the pedal reported meanwhile — takes
-     * over on the very next frame. That drop *is* the resync; there is nothing else to reconcile.
+     * The pointer came off the slider for [id] (issue #104), or the row was disposed mid-gesture.
+     * Ends the inbound-suppression window opened by [onRangeDrag].
+     *
+     * **Deliberately does not clear the override here.** [ParameterWriteThrottler] conflates, so at
+     * the instant of release the final value's write is usually still in flight; dropping the
+     * override now would fall back to the last *completed* write's value — a visible backward
+     * snap, immediately followed by a jump forward when the final write lands. That is PR #102's
+     * bug, reintroduced. [handleWriteResult] already owns the clear and now performs it, since the
+     * id is no longer suppressed: every drag tick submits, so the final value's own completion
+     * (success or failure) is what resyncs to the controller.
+     *
+     * Safe to call for an id that is not being dragged — it is also the disposal hook (see
+     * `ParameterEditorScreen`'s `DisposableEffect`), so it must be idempotent.
      */
     fun onRangeDragEnd(id: ParameterId) {
         _draggingIds.update { it - id }
-        _overrides.update { it - id }
+        // ...with one exception: if the controller has ALREADY caught up to the override, there is
+        // nothing in flight left to clear it, and leaving it would pin this control to the drag's
+        // final value forever - masking every later pedal-initiated change to it, which is the very
+        // thing this screen now exists to show. Clearing it here is invisible (the two values are
+        // equal by definition) and costs nothing when a write is still pending, since then they
+        // differ and handleWriteResult keeps ownership.
+        val settled = controller.parameterValues.value[id]
+        _overrides.update { current -> if (settled != null && current[id] == settled) current - id else current }
     }
 
     /** One `SWITCH` toggle tap (D3 §3.2). */

@@ -602,6 +602,64 @@ class ParameterEditorViewModelTest {
         vm.onCleared()
     }
 
+    @Test
+    fun `releasing the slider does not snap back to the last completed write while one is in flight`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 4f)
+        runCurrent() // 4f lands on the controller
+        controller.nextSetParameterGate = FakeTonexController.SetParameterGate() // hold the final write open
+        vm.onRangeDrag(gain, 9f)
+        runCurrent()
+
+        vm.onRangeDragEnd(gain)
+        runCurrent()
+
+        // The final write has not completed, so the override must survive: dropping it here would
+        // show 4f for a frame and then jump to 9f -- PR #102's bug, reintroduced.
+        assertEquals(9f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a drag whose final write already landed does not leave the control pinned`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 9f)
+        runCurrent() // the write completes DURING the gesture, so nothing is in flight at release
+        vm.onRangeDragEnd(gain)
+        runCurrent()
+
+        // A stale override here would mask every later pedal-initiated change for the session.
+        controller.seedParameterValue(gain, 2f)
+        runCurrent()
+
+        assertEquals(2f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `onRangeDragEnd is idempotent - it doubles as the row's disposal hook`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        // ParameterEditorScreen fires this from DisposableEffect.onDispose for rows that were never
+        // dragged; it must be harmless, and it must un-stick a gesture disposal interrupted.
+        vm.onRangeDragEnd(gain)
+        vm.onRangeDragEnd(gain)
+        runCurrent()
+        controller.seedParameterValue(gain, 6f)
+        runCurrent()
+
+        assertEquals(6f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
     private fun gainValue(vm: ParameterEditorViewModel): Float = rowValue(vm, gain)
 
     private fun rowValue(vm: ParameterEditorViewModel, id: ParameterId): Float =
