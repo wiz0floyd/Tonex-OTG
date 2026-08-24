@@ -132,6 +132,48 @@ class ParameterEditorViewModelTest {
     }
 
     @Test
+    fun `an older throttled write landing does not clobber a newer optimistic override (issue 84)`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        // v1's write starts and blocks in flight.
+        val gate1 = FakeTonexController.SetParameterGate()
+        controller.nextSetParameterGate = gate1
+        vm.onRangeDrag(gain, 1f)
+        runCurrent()
+        assertTrue(gate1.started.isCompleted)
+
+        // While v1 is still in flight, the drag continues past two more values; the throttler
+        // conflates them down to just v3, and onRangeDrag's own optimistic override is now v3.
+        vm.onRangeDrag(gain, 2f)
+        vm.onRangeDrag(gain, 3f)
+        runCurrent()
+
+        // Arm a second gate so v3's write also blocks in flight, right after v1's write lands -
+        // this is the exact window where the bug showed a one-frame jump back to v1.
+        val gate2 = FakeTonexController.SetParameterGate()
+        controller.nextSetParameterGate = gate2
+        gate1.release.complete(Unit)
+        runCurrent()
+
+        assertEquals("v1 has landed on the controller", 1f, controller.parameterValues.value[gain])
+        val cardMidTransition = vm.uiState.value.quickTier.first { it.row.id == gain }
+        assertEquals(
+            "v1 landing must not clobber the newer v3 override with the stale controller value",
+            3f,
+            cardMidTransition.row.value,
+        )
+
+        gate2.release.complete(Unit)
+        runCurrent()
+
+        assertEquals(listOf(gain to 1f, gain to 3f), controller.setParameterCalls)
+        assertEquals(3f, controller.parameterValues.value[gain])
+        vm.onCleared()
+    }
+
+    @Test
     fun `model select swaps the disclosed rows to only the newly selected model`() = runTest {
         val controller = FakeTonexController()
         val vm = ParameterEditorViewModel(controller, backgroundScope)
