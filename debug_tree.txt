@@ -1,0 +1,5 @@
+
+>   <system-out><![CDATA[]]></system-out>
+    <system-err><![CDATA[]]></system-err>
+  </testsuite>
+
