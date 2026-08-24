@@ -80,6 +80,27 @@ class DefaultTonexControllerSetParameterTest {
     }
 
     @Test
+    fun `an out-of-range BPM value is rejected before any re-read is issued - issue 83`() = runTest {
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(
+            scope = backgroundScope,
+            capabilities = FirmwareCapabilities(supportsSingleParameterWrite = true),
+        )
+        connectToReady(controller, fake)
+        val writesBefore = fake.writtenMessages().size
+
+        val result = controller.setParameter(bpmParam.id, bpmParam.max + 1f)
+
+        val error = (result as TonexResult.Failure).error
+        assertIs<TonexError.ParameterValueOutOfRange>(error)
+        assertEquals(
+            fake.writtenMessages().size,
+            writesBefore,
+            "no re-read or write should be issued for an out-of-range global-parameter value",
+        )
+    }
+
+    @Test
     fun `a value below min is rejected with ParameterValueOutOfRange`() = runTest {
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
@@ -179,7 +200,7 @@ class DefaultTonexControllerSetParameterTest {
     }
 
     @Test
-    fun `another global parameter (BPM) is rejected with ProtocolStateViolation - no write path exists`() = runTest {
+    fun `another global parameter (BPM) re-reads state and issues a whole-state write - issue 83`() = runTest {
         val fake = FakeTonexTransport()
         val controller = DefaultTonexController(
             scope = backgroundScope,
@@ -188,11 +209,34 @@ class DefaultTonexControllerSetParameterTest {
         connectToReady(controller, fake)
         val writesBefore = fake.writtenMessages().size
 
-        val result = controller.setParameter(bpmParam.id, bpmParam.min)
+        val setDeferred = async { controller.setParameter(bpmParam.id, bpmParam.min) }
+        testScheduler.runCurrent()
+        fake.emitMessage(stateUpdateMessage(plausibleBlob()))
+        testScheduler.runCurrent()
 
-        val error = (result as TonexResult.Failure).error
-        assertIs<TonexError.ProtocolStateViolation>(error)
-        assertEquals(fake.writtenMessages().size, writesBefore, "no write path exists for a non-master-volume global")
+        val result = setDeferred.await()
+        assertIs<TonexResult.Success<Unit>>(result)
+        val newWrites = fake.writtenMessages().drop(writesBefore)
+        assertEquals(2, newWrites.size, "expected [RequestState, SetState]")
+        assertRequestState(newWrites[0])
+        assertStateUpdateWrite(newWrites[1])
+    }
+
+    @Test
+    fun `every registered GLOBAL parameter has a known write path - dispatch table stays exhaustive`() = runTest {
+        // Documents that writeParameterLocked's dispatch is exhaustive over today's registry: the
+        // "no known write path" fallback exists purely as a future-proofing guard (a new GLOBAL
+        // parameter added to the registry without a matching branch here), not a reachable state
+        // today. Footswitch slot assignments remain the only pedal global with no per-parameter
+        // write path at all, and they are not a ParameterRegistry entry to begin with.
+        val globalEnumNames = ParameterRegistry.all()
+            .filter { it.scope == dev.tonexotg.protocol.ParameterScope.GLOBAL }
+            .map { it.enumName }
+            .toSet()
+        assertEquals(
+            setOf("BPM", "INPUT_TRIM", "CABSIM_BYPASS", "TEMPO_SOURCE", "TUNING_REFERENCE", "BYPASS", "MASTER_VOLUME"),
+            globalEnumNames,
+        )
     }
 
     // ---- parameterValues updated only after a successful write --------------------------------
@@ -272,6 +316,17 @@ class DefaultTonexControllerSetParameterTest {
     }
 
     // ---- shared setup -------------------------------------------------------------------------
+
+    /** `RequestStateMessage`'s outbound envelope type is `0x0000` (Unknown) -- identify it by its
+     * fixed opaque payload literal (`b9 02 81 06 03 0b`) instead. */
+    private fun assertRequestState(msg: dev.tonexotg.protocol.codec.DecodedMessage) {
+        assertEquals(byteArrayOf(0xB9.toByte(), 0x02, 0x81.toByte(), 0x06, 0x03, 0x0B).toList(), msg.payload.toList())
+    }
+
+    /** `SetStateMessage`'s outbound envelope type IS `0x0306` (`MessageType.StateUpdate`). */
+    private fun assertStateUpdateWrite(msg: dev.tonexotg.protocol.codec.DecodedMessage) {
+        assertEquals(dev.tonexotg.protocol.codec.MessageType.StateUpdate, msg.header.type)
+    }
 
     private suspend fun kotlinx.coroutines.test.TestScope.connectToReady(
         controller: DefaultTonexController,

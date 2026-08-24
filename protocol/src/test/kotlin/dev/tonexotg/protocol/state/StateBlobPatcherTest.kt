@@ -1270,4 +1270,219 @@ class StateBlobPatcherTest {
         // prepareForPatch's generation-consuming step.
         StateBlobPatcher.patchActiveSlot(state, session, PresetSlot.B).assertSuccess()
     }
+
+    // ---- global-parameter writes (issue #83) --------------------------------------------------
+
+    private fun floatBitsLe(bytes: ByteArray, index: Int): Int =
+        (bytes[index].toInt() and 0xFF) or
+            ((bytes[index + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[index + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[index + 3].toInt() and 0xFF) shl 24)
+
+    @Test
+    fun `patchBpm writes exactly the 4-byte little-endian float at END_BPM, nothing else changes`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchBpm(state, session, 120f).assertSuccess()
+
+        val index = original.size - StateBlobOffsets.END_BPM
+        assertEquals(120f.toRawBits(), floatBitsLe(patched, index))
+        for (i in original.indices) {
+            if (i in index until index + 4) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged")
+        }
+    }
+
+    @Test
+    fun `patchInputTrim writes exactly the 4-byte little-endian float at START_INPUT_TRIM, nothing else changes`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchInputTrim(state, session, -6.5f).assertSuccess()
+
+        val index = StateBlobOffsets.START_INPUT_TRIM
+        assertEquals((-6.5f).toRawBits(), floatBitsLe(patched, index))
+        for (i in original.indices) {
+            if (i in index until index + 4) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged")
+        }
+    }
+
+    @Test
+    fun `patchInputTrim writes the exact literal bytes for -15f, confirmed against upstream and a captured blob`() {
+        // Pins ENDIANNESS specifically, via literals independent of writeFloatLe's own shift
+        // sequence (see StateBlobOffsets' "Endianness and anchor confirmed byte-by-byte" KDoc for
+        // the upstream `usb_tonex_one.c` line-105 comment and the captured S22 hardware blob this
+        // is checked against). The anchor (start-relative vs. end-relative) is pinned by that same
+        // captured-blob evidence, not by this test.
+        val session = SessionId.create()
+        val state = stateFor(session, plausibleBlob())
+
+        val patched = StateBlobPatcher.patchInputTrim(state, session, -15f).assertSuccess()
+
+        val index = StateBlobOffsets.START_INPUT_TRIM
+        assertEquals(0x00.toByte(), patched[index])
+        assertEquals(0x00.toByte(), patched[index + 1])
+        assertEquals(0x70.toByte(), patched[index + 2])
+        assertEquals(0xC1.toByte(), patched[index + 3])
+    }
+
+    @Test
+    fun `patchTuningReference writes the exact literal bytes for 440Hz, confirmed against a captured blob`() {
+        // Pins ENDIANNESS specifically — see the sibling patchInputTrim literal test above.
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchTuningReference(state, session, 440f).assertSuccess()
+
+        val index = original.size - StateBlobOffsets.END_TUNING_REF
+        assertEquals(0xB8.toByte(), patched[index])
+        assertEquals(0x01.toByte(), patched[index + 1])
+    }
+
+    @Test
+    fun `patchCabSimBypass writes exactly the one byte at START_CAB_BYPASS, nothing else changes`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchCabSimBypass(state, session, 1f).assertSuccess()
+
+        val index = StateBlobOffsets.START_CAB_BYPASS
+        assertEquals(1.toByte(), patched[index])
+        for (i in original.indices) {
+            if (i == index) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged")
+        }
+    }
+
+    @Test
+    fun `patchTempoSource writes exactly the one byte at END_TEMPO_SOURCE, nothing else changes`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchTempoSource(state, session, 1f).assertSuccess()
+
+        val index = original.size - StateBlobOffsets.END_TEMPO_SOURCE
+        assertEquals(1.toByte(), patched[index])
+        for (i in original.indices) {
+            if (i == index) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged")
+        }
+    }
+
+    @Test
+    fun `patchTuningReference writes exactly the 2-byte little-endian uint16 at END_TUNING_REF, nothing else changes`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchTuningReference(state, session, 442f).assertSuccess()
+
+        val index = original.size - StateBlobOffsets.END_TUNING_REF
+        val value = (patched[index].toInt() and 0xFF) or ((patched[index + 1].toInt() and 0xFF) shl 8)
+        assertEquals(442, value)
+        for (i in original.indices) {
+            if (i in index..index + 1) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged")
+        }
+    }
+
+    @Test
+    fun `patchBypassMode writes exactly the one byte at END_BYPASS_MODE, nothing else changes`() {
+        val session = SessionId.create()
+        val original = plausibleBlob()
+        val state = stateFor(session, original)
+
+        val patched = StateBlobPatcher.patchBypassMode(state, session, 1f).assertSuccess()
+
+        val index = original.size - StateBlobOffsets.END_BYPASS_MODE
+        assertEquals(1.toByte(), patched[index])
+        for (i in original.indices) {
+            if (i == index) continue
+            assertEquals(original[i], patched[i], "byte at index $i must be unchanged")
+        }
+    }
+
+    @Test
+    fun `all six global-parameter patches are single-use, session-scoped, and length-checked identically to the other patch functions`() {
+        for (secondCall in listOf<(PedalState, SessionId) -> TonexResult<ByteArray>>(
+            { state, session -> StateBlobPatcher.patchBpm(state, session, 100f) },
+            { state, session -> StateBlobPatcher.patchInputTrim(state, session, 0f) },
+            { state, session -> StateBlobPatcher.patchCabSimBypass(state, session, 0f) },
+            { state, session -> StateBlobPatcher.patchTempoSource(state, session, 0f) },
+            { state, session -> StateBlobPatcher.patchTuningReference(state, session, 440f) },
+            { state, session -> StateBlobPatcher.patchBypassMode(state, session, 0f) },
+        )) {
+            val session = SessionId.create()
+            val read1 = stateFor(session, plausibleBlob())
+
+            StateBlobPatcher.patchSlotAssignment(read1, session, PresetSlot.A, PresetIndex(3)).assertSuccess()
+
+            val second = secondCall(read1, session)
+            assertTrue(second.assertFailure() is TonexError.StaleSessionState, "second call against the spent read1 must be rejected")
+        }
+    }
+
+    @Test
+    fun `a too-short blob is rejected for every global-parameter patch, same as the slot patches`() {
+        for (call in listOf<(PedalState, SessionId) -> TonexResult<ByteArray>>(
+            { state, session -> StateBlobPatcher.patchBpm(state, session, 100f) },
+            { state, session -> StateBlobPatcher.patchInputTrim(state, session, 0f) },
+            { state, session -> StateBlobPatcher.patchCabSimBypass(state, session, 0f) },
+            { state, session -> StateBlobPatcher.patchTempoSource(state, session, 0f) },
+            { state, session -> StateBlobPatcher.patchTuningReference(state, session, 440f) },
+            { state, session -> StateBlobPatcher.patchBypassMode(state, session, 0f) },
+        )) {
+            val session = SessionId.create()
+            val state = stateFor(session, ByteArray(0))
+
+            assertTrue(call(state, session).assertFailure() is TonexError.BlobTooShortToPatch)
+        }
+    }
+
+    // ---- regression: preset selection/assignment never touches END_BYPASS_MODE ----------------
+    //
+    // END_BYPASS_MODE is now a real named constant in StateBlobOffsets (issue #83), reused for a
+    // legitimate direct global-parameter write. This is the guarantee that naming it did not
+    // reopen the side-effect the issue #27 fix stripped: selectPreset/patchSlotAssignment/
+    // restoreSlotAssignments must still never touch this byte.
+
+    @Test
+    fun `selectPreset, patchSlotAssignment, and restoreSlotAssignments never touch END_BYPASS_MODE`() {
+        val sentinel = 0x77.toByte()
+
+        run {
+            val session = SessionId.create()
+            val original = plausibleBlob()
+            original[original.size - StateBlobOffsets.END_BYPASS_MODE] = sentinel
+            val state = stateFor(session, original)
+            val patched = StateBlobPatcher.selectPreset(state, session, PresetSlot.A, PresetIndex(4)).assertSuccess()
+            assertEquals(sentinel, patched[patched.size - StateBlobOffsets.END_BYPASS_MODE], "selectPreset must not touch END_BYPASS_MODE")
+        }
+
+        run {
+            val session = SessionId.create()
+            val original = plausibleBlob()
+            original[original.size - StateBlobOffsets.END_BYPASS_MODE] = sentinel
+            val state = stateFor(session, original)
+            val patched = StateBlobPatcher.patchSlotAssignment(state, session, PresetSlot.B, PresetIndex(4)).assertSuccess()
+            assertEquals(sentinel, patched[patched.size - StateBlobOffsets.END_BYPASS_MODE], "patchSlotAssignment must not touch END_BYPASS_MODE")
+        }
+
+        run {
+            val session = SessionId.create()
+            val original = plausibleBlob()
+            original[original.size - StateBlobOffsets.END_BYPASS_MODE] = sentinel
+            val state = stateFor(session, original)
+            val target = mapOf(PresetSlot.A to PresetIndex(1), PresetSlot.B to PresetIndex(2), PresetSlot.C to PresetIndex(3))
+            val patched = StateBlobPatcher.restoreSlotAssignments(state, session, target).assertSuccess()
+            assertEquals(sentinel, patched[patched.size - StateBlobOffsets.END_BYPASS_MODE], "restoreSlotAssignments must not touch END_BYPASS_MODE")
+        }
+    }
 }

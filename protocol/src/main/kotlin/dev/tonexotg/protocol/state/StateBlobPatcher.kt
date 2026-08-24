@@ -55,7 +55,10 @@ import dev.tonexotg.protocol.TonexResult
  * documented on that function** changed — every other byte, including bytes this module does not
  * know the meaning of, is bit-identical to what [PedalState.copyOfBytes] returned. This is
  * asserted exhaustively (over the *entire* array, not just near the patched offsets) in
- * `StateBlobPatcherTest`.
+ * `StateBlobPatcherTest`. The six global-parameter functions added by issue #83
+ * ([patchBpm], [patchInputTrim], [patchCabSimBypass], [patchTempoSource], [patchTuningReference],
+ * [patchBypassMode]) hold to the exact same contract — each touches only the bytes named on
+ * [StateBlobOffsets] for that parameter.
  */
 object StateBlobPatcher {
 
@@ -223,6 +226,148 @@ object StateBlobPatcher {
             bytes[bytes.size - StateBlobOffsets.endOffsetForSlotPreset(slot)] = preset.value.toByte()
         }
         return TonexResult.Success(bytes)
+    }
+
+    // ---- global-parameter writes (issue #83) -------------------------------------------------
+    //
+    // Six GLOBAL-scope parameters (ParameterIds 110-115) that upstream writes by patching this
+    // same whole-device state blob, not via any per-parameter wire message. Each function below is
+    // reachable only from DefaultTonexController.writeParameterLocked's per-parameter dispatch,
+    // which has already range-checked the incoming value against ParameterRegistry before calling
+    // here (reject-not-clamp) - unlike patchSlotAssignment/selectPreset's PresetIndex re-check,
+    // there is no @JvmInline value-class erasure gap for a bare Float to bypass, so no second range
+    // check is duplicated here. None of these functions is called from selectPreset,
+    // patchSlotAssignment, or restoreSlotAssignments, and none of them may ever be.
+
+    /**
+     * Patches the pedal's global BPM value in [state] to [bpm] — the 4-byte little-endian float at
+     * [StateBlobOffsets.END_BPM], leaving every other byte untouched.
+     *
+     * @param state a blob read from the pedal during [currentSession] — same freshness/single-use
+     *   contract as [patchSlotAssignment]; see that function's KDoc.
+     * @return the patched bytes, or a [TonexResult.Failure]; see [prepareForPatch].
+     */
+    fun patchBpm(state: PedalState, currentSession: SessionId, bpm: Float): TonexResult<ByteArray> {
+        val prepared = prepareForPatch(state, currentSession, preset = null)
+        if (prepared is TonexResult.Failure) return prepared
+        val bytes = (prepared as TonexResult.Success).value
+
+        writeFloatLe(bytes, bytes.size - StateBlobOffsets.END_BPM, bpm)
+        return TonexResult.Success(bytes)
+    }
+
+    /**
+     * Patches the pedal's global input-trim value in [state] to [trimDb] — the 4-byte
+     * little-endian float at [StateBlobOffsets.START_INPUT_TRIM], leaving every other byte
+     * untouched.
+     *
+     * @param state a blob read from the pedal during [currentSession] — same freshness/single-use
+     *   contract as [patchSlotAssignment]; see that function's KDoc.
+     * @return the patched bytes, or a [TonexResult.Failure]; see [prepareForPatch].
+     */
+    fun patchInputTrim(state: PedalState, currentSession: SessionId, trimDb: Float): TonexResult<ByteArray> {
+        val prepared = prepareForPatch(state, currentSession, preset = null)
+        if (prepared is TonexResult.Failure) return prepared
+        val bytes = (prepared as TonexResult.Success).value
+
+        writeFloatLe(bytes, StateBlobOffsets.START_INPUT_TRIM, trimDb)
+        return TonexResult.Success(bytes)
+    }
+
+    /**
+     * Patches the pedal's global cab-sim-bypass flag in [state] — the one byte at
+     * [StateBlobOffsets.START_CAB_BYPASS], leaving every other byte untouched.
+     *
+     * @param bypassed `1f` to bypass, `0f` otherwise — [ParameterType.SWITCH]'s own value shape.
+     * @param state a blob read from the pedal during [currentSession] — same freshness/single-use
+     *   contract as [patchSlotAssignment]; see that function's KDoc.
+     * @return the patched bytes, or a [TonexResult.Failure]; see [prepareForPatch].
+     */
+    fun patchCabSimBypass(state: PedalState, currentSession: SessionId, bypassed: Float): TonexResult<ByteArray> {
+        val prepared = prepareForPatch(state, currentSession, preset = null)
+        if (prepared is TonexResult.Failure) return prepared
+        val bytes = (prepared as TonexResult.Success).value
+
+        bytes[StateBlobOffsets.START_CAB_BYPASS] = bypassed.toInt().toByte()
+        return TonexResult.Success(bytes)
+    }
+
+    /**
+     * Patches the pedal's global tempo-source flag in [state] — the one byte at
+     * [StateBlobOffsets.END_TEMPO_SOURCE], leaving every other byte untouched.
+     *
+     * @param source `0f` = GLOBAL, `1f` = PRESET — [ParameterType.SWITCH]'s own value shape.
+     * @param state a blob read from the pedal during [currentSession] — same freshness/single-use
+     *   contract as [patchSlotAssignment]; see that function's KDoc.
+     * @return the patched bytes, or a [TonexResult.Failure]; see [prepareForPatch].
+     */
+    fun patchTempoSource(state: PedalState, currentSession: SessionId, source: Float): TonexResult<ByteArray> {
+        val prepared = prepareForPatch(state, currentSession, preset = null)
+        if (prepared is TonexResult.Failure) return prepared
+        val bytes = (prepared as TonexResult.Success).value
+
+        bytes[bytes.size - StateBlobOffsets.END_TEMPO_SOURCE] = source.toInt().toByte()
+        return TonexResult.Success(bytes)
+    }
+
+    /**
+     * Patches the pedal's global tuning-reference value in [state] to [hz] — the 2-byte
+     * little-endian `uint16` at [StateBlobOffsets.END_TUNING_REF], leaving every other byte
+     * untouched.
+     *
+     * @param state a blob read from the pedal during [currentSession] — same freshness/single-use
+     *   contract as [patchSlotAssignment]; see that function's KDoc.
+     * @return the patched bytes, or a [TonexResult.Failure]; see [prepareForPatch].
+     */
+    fun patchTuningReference(state: PedalState, currentSession: SessionId, hz: Float): TonexResult<ByteArray> {
+        val prepared = prepareForPatch(state, currentSession, preset = null)
+        if (prepared is TonexResult.Failure) return prepared
+        val bytes = (prepared as TonexResult.Success).value
+
+        val index = bytes.size - StateBlobOffsets.END_TUNING_REF
+        val value = hz.toInt()
+        bytes[index] = (value and 0xFF).toByte()
+        bytes[index + 1] = ((value ushr 8) and 0xFF).toByte()
+        return TonexResult.Success(bytes)
+    }
+
+    /**
+     * Patches the pedal's global bypass-mode flag in [state] — the one byte at
+     * [StateBlobOffsets.END_BYPASS_MODE], leaving every other byte untouched.
+     *
+     * This is the SAME byte upstream's `set_preset_in_slot()` writes as an unwanted side effect of
+     * preset selection — see [StateBlobOffsets]'s "Fields intentionally NOT modelled here" KDoc.
+     * This function is a different, legitimate write and is reachable only from a direct,
+     * user-initiated write of the `BYPASS` global parameter — never from [selectPreset],
+     * [patchSlotAssignment], or [restoreSlotAssignments].
+     *
+     * @param bypassed `1f` to bypass, `0f` otherwise — [ParameterType.SWITCH]'s own value shape.
+     * @param state a blob read from the pedal during [currentSession] — same freshness/single-use
+     *   contract as [patchSlotAssignment]; see that function's KDoc.
+     * @return the patched bytes, or a [TonexResult.Failure]; see [prepareForPatch].
+     */
+    fun patchBypassMode(state: PedalState, currentSession: SessionId, bypassed: Float): TonexResult<ByteArray> {
+        val prepared = prepareForPatch(state, currentSession, preset = null)
+        if (prepared is TonexResult.Failure) return prepared
+        val bytes = (prepared as TonexResult.Success).value
+
+        bytes[bytes.size - StateBlobOffsets.END_BYPASS_MODE] = bypassed.toInt().toByte()
+        return TonexResult.Success(bytes)
+    }
+
+    /**
+     * Writes [value] into [bytes] at [index]..[index]+3 as a 4-byte little-endian IEEE-754 float —
+     * see [StateBlobOffsets]'s "Endianness and anchor confirmed byte-by-byte" KDoc for the
+     * upstream-literal and captured-hardware-blob evidence confirming little-endian for these two
+     * fields specifically, rather than merely assuming it by analogy to
+     * [dev.tonexotg.protocol.message.MasterVolumeMessage].
+     */
+    private fun writeFloatLe(bytes: ByteArray, index: Int, value: Float) {
+        val bits = value.toRawBits()
+        bytes[index] = (bits and 0xFF).toByte()
+        bytes[index + 1] = ((bits ushr 8) and 0xFF).toByte()
+        bytes[index + 2] = ((bits ushr 16) and 0xFF).toByte()
+        bytes[index + 3] = ((bits ushr 24) and 0xFF).toByte()
     }
 
     /**
