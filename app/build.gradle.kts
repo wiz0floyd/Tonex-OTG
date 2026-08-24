@@ -39,8 +39,8 @@ android {
         // blocks forever and cannot be interrupted (AOSP issue 39522). Do not lower this.
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildFeatures {
