@@ -61,35 +61,111 @@ accordingly:
   can't tell which without checking. (This is not hypothetical: on this
   project, re-running the suite after two agents died turned out to
   contradict what one of them believed about its own test failures.)
-- **Auto-schedule a check-in nudge whenever background work is in flight.**
-  Any time this session dispatches agents that keep working without the
-  user watching, or is itself waiting out a usage-limit reset, schedule a
-  self wake-up by default — 5 hours out — using whatever scheduling tool is
-  available (e.g. `send_later` / `ScheduleWakeup`), without waiting to be
-  asked for it. Re-arm it at each check-in until the outstanding work is
-  actually merged or the user explicitly says to stop. Don't assume you, or
-  the user, will be there to notice when something needs attention;
-  schedule the reminder as part of dispatching the work, not as an
-  afterthought once someone asks for it.
+- **Don't rely on a scheduled check-in nudge — it dies with the session it
+  was meant to rescue.** Self wake-ups (`ScheduleWakeup` / `send_later` /
+  cron-style reminders) were the standing rule here and were removed on
+  2026-08-24: a usage-limit stop terminates the session, and the pending
+  nudge goes with it, so the one failure mode it existed to cover is
+  exactly the one it can't cover. Make the work itself durable instead —
+  push after every commit, and leave the current state in the PR
+  description or an issue comment so the next session picks it up from the
+  repo rather than from a timer that may never fire.
 
-## On sub agents 
+## On sub agents
 
 Give sub agents a descriptive name when setting them up. Each sub agent must only write to its own work tree. read only agents may enter another agents working directory when collaborating or reviewing. e.g., when a sonnet or haiku agent asks an opus architecture agent to validate a decision, the opus agent should enter their directory to see the lines of code in question.
 
-Match model cost to task risk and reasoning load, not uniformly:
+### Optimize cost per completed task, not cost per token
 
-- **Haiku** — mechanical, low-judgment work: posting/closing GitHub issues,
-  filing routine comments, text edits with an exact spec to follow. Fast
-  and cheap; don't spend a bigger model on rote GitHub hygiene.
-- **Sonnet** — the default workhorse: implementing stories, writing tests,
-  applying fixes from a review, general research and exploration.
-- **Opus** — adversarial code review, and only that. Reserve it for stories
-  where a wrong answer has real cost: anything that writes to the pedal,
-  anything touching state that could corrupt a user's only hardware device,
-  or adjudicating a disputed finding a Sonnet pass couldn't resolve on its
-  own. Opus reviews on this project have twice found a genuine blocker that
-  a Sonnet implementation pass reported as "criteria met, tests green" —
-  that gap is what justifies the cost, so don't skip the review to save it.
+The number that matters is what it costs to get the task *actually done
+and merged* — not the sticker rate of the model doing it. A cheaper model
+that needs three passes, a fix round, and a re-review is more expensive
+than a stronger one that lands it in a single pass, and it also burns
+three rounds of your context re-explaining the same brief. Per-token
+rates are one input to that estimate; turns-to-done, rework probability,
+and re-derived context are the others.
+
+Before choosing a model, estimate all four:
+
+1. **Turns to done** — can this model finish in one pass, or will it need
+   a fix round and a re-review?
+2. **Rework probability** — what's the chance it reports "criteria met,
+   tests green" on work that isn't? On this project that has happened
+   twice, both times on high-stakes protocol code.
+3. **Blast radius of a wrong answer** — pedal writes and response parsing
+   can corrupt the user's only hardware device. UI copy cannot.
+4. **Token rate** — the tiebreaker, not the first question.
+
+### Model per dispatch
+
+Pass `model` explicitly on every spawn — never inherit by default.
+Current API rates per 1M tokens (checked 2026-08-24):
+
+| Model | Input / Output | Dispatch when |
+| --- | --- | --- |
+| Haiku 4.5 | $1 / $5 | the spec is exact and judgment is near-zero: GitHub issue hygiene, routine comments, log/CSV parsing, applying an architect's template to one partition. One-pass-or-obviously-failed work. |
+| Sonnet 5 | $3 / $15 (intro $2 / $10 through 2026-08-31) | the default: implementing stories, writing tests, applying review fixes, research and exploration. Most work here lands in one Sonnet pass. |
+| Opus 5 | $5 / $25 | adversarial review of high-stakes code, novel architecture, cross-cutting refactors, adjudicating a disputed finding, or any task where a second Sonnet pass looks likely. |
+| Fable 5 | $10 / $50 | not used on this project — 2x Opus with no benefit that applies here. |
+
+**The Opus premium is 1.67x Sonnet on output, not the 5x it was when this
+file first said "Opus — adversarial code review, and only that."** That
+rationing rule is retired, because at 1.67x the break-even is roughly one
+avoided rework loop: if a Sonnet dispatch would plausibly need a second
+pass plus a review round, Opus in one pass is already the cheaper task.
+Opus is still not the default — Sonnet genuinely does clear most story
+work in one go — but the question is "which finishes this task in fewer
+passes," not "which is cheaper per token."
+
+Corollaries:
+
+- **Two failed Sonnet attempts is the signal to escalate, not to try a
+  third.** By then the Opus pass would have been cheaper outright.
+- **Don't downgrade to Haiku on anything with an unclear spec.** Haiku's
+  cost advantage evaporates the moment it needs a clarifying round trip;
+  ambiguity is what Sonnet is for.
+- **A dispatch that has to be re-briefed was mispriced.** Bad brief, wrong
+  model, or it should have been done inline — diagnose which before
+  respawning.
+
+What stays mandatory regardless of cost arithmetic: the **adversarial
+Opus review before merging anything that writes to the pedal or parses
+its responses** (see "Review rigor" below). That review has twice caught
+a genuine blocker a Sonnet pass reported as "criteria met, tests green" —
+that gap is the whole justification, so never skip it to save tokens.
+
+### Dispatch at all, or do it inline?
+
+A dispatch is not free even at Haiku rates: the sub agent cold-starts and
+re-derives context this session already holds, and its findings come back
+as a summary you can't audit line by line. Spawn only when at least one is
+true:
+
+1. The work is **well-isolated** — clear input, clear deliverable, no
+   back-and-forth needed to resolve scope.
+2. It **parallelizes across 3+ comparable units** (per-file, per-story,
+   per-partition), each in its own worktree.
+3. Its **raw output would blow up this context** — grep sweeps, log
+   trawls, broad source reading. Keep the findings here, not the dumps.
+4. It's an **adversarial review**, worth a separate pair of eyes precisely
+   because it hasn't seen your reasoning.
+
+Single lookups, one-file edits, and anything that would need a clarifying
+question: do inline. "The task has several parts" is not a reason to spawn.
+
+### Keeping a dispatch cheap
+
+- **Scope the brief before spawning.** Name the files or directories to
+  search and the exact deliverable. An unscoped "look into X" is the
+  single biggest cost-per-task multiplier there is.
+- **Attach primary evidence, not a summary of a summary.** Hand a reviewer
+  the raw log or the upstream file path; re-summarizing costs tokens and
+  loses the detail the review depends on.
+- **Prefer several small dispatches over one large one** — cheaper to
+  re-run, and less is lost if one is cut off mid-task (see "Session-limit
+  resilience").
+- **Ask the advisor one specific, answerable question**, not "review
+  this." Don't re-ask what a passing test already answered.
 
 ## Review rigor, scaled to blast radius
 
