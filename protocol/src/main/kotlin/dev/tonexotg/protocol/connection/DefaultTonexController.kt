@@ -444,11 +444,20 @@ class DefaultTonexController(
         // Master volume is index 0 *of kind 0x03 only*. Qualifying on `kind` is load-bearing:
         // ParameterId(0) is NOISE_GATE_POST, a switch this app renders, and its own notifications
         // arrive as index 0 of kind 0x02 (KIND_PARAMETER) - routing on the index alone would send
-        // a noise-gate toggle to the master-volume slider as nativeToDecibels(1f) = -35.7 dB.
-        // Confirmed in docs/hardware-probes/tonexprobe20260819_220308.log.txt:18936-18938, where
-        // the pedal answers RequestMasterVolume with `B9 04 03 00 00 88 9A 99 A9 40` - kind 0x03,
-        // index 0, 5.3 native. Upstream's own `if (param_index == 0x00)` sits inside a function
-        // whose 3-byte marker had already filtered to kind 0x03; that context has to be kept.
+        // a noise-gate toggle to the master-volume slider as nativeToDecibels(1f) = -35.7 dB, and
+        // the home screen would then write that back to the pedal on release (PR #101).
+        //
+        // CAUTION (issue #117): the only hardware evidence for "kind 0x03" is
+        // docs/hardware-probes/tonexprobe20260819_220308.log.txt:18933-18938, and that frame is a
+        // *solicited* `RequestMasterVolume` response (a WRITE at :18933-18935 immediately followed
+        // by this READ), not an unsolicited `ParameterChanged` notification from turning the
+        // physical knob. #106 separately confirmed that spontaneous notifications for every other
+        // parameter always carry kind 0x02 - whether a spontaneous master-volume knob turn also
+        // carries 0x02 (in which case it is silently misrouted to NOISE_GATE_POST below and never
+        // reaches the UI - the exact symptom #117 reports) or genuinely carries 0x03 is unconfirmed
+        // either way. Do not "fix" this by dropping the `kind` check without new hardware evidence:
+        // that trades a confirmed-real hazard (a noise-gate toggle silently becoming a volume
+        // write) for an unconfirmed one. See the #117 comment thread for the capture this needs.
         if (p.index == 0 && p.kind == SingleParameterPayloadCodec.KIND_MASTER_VOLUME) {
             val spec = ParameterRegistry.byEnumName("MASTER_VOLUME") ?: return
             applyInboundValue(spec.id, MasterVolumeMessage.nativeToDecibels(p.value), msg.payload)

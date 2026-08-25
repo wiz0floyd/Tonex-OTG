@@ -218,8 +218,11 @@ class DefaultTonexControllerParameterChangedTest {
         connectDeferred.await()
 
         // Routing on the index alone would send this to master volume as
-        // nativeToDecibels(1f) = -35.7 dB. The pedal's own master-volume frames carry kind 0x03
-        // (verified in docs/hardware-probes/tonexprobe20260819_220308.log.txt:18936-18938).
+        // nativeToDecibels(1f) = -35.7 dB. The pedal answers a *solicited* RequestMasterVolume
+        // with kind 0x03 (docs/hardware-probes/tonexprobe20260819_220308.log.txt:18933-18938) -
+        // whether a spontaneous (unsolicited) master-volume knob turn also carries 0x03 is
+        // unconfirmed; see issue #117 and the CAUTION comment on this branch in
+        // DefaultTonexController.applyParameterChanged before changing this routing.
         fake.emitMessage(parameterChanged(index = 0, value = 1f))
         testScheduler.runCurrent()
 
