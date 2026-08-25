@@ -1136,6 +1136,11 @@ class DefaultTonexController(
         // `currentActive` (same `fresh` re-read) against `index` is exact, not a heuristic — mirrors
         // restoreFootswitches's already-conditional arm (see that function's KDoc) rather than
         // relying solely on the short-circuit above being exhaustive.
+        // Given the holdingSlot preference above, this is currently always true — the
+        // `holdingSlot == activeSlot` short-circuit already catches every case where the active
+        // preset wouldn't move, so every path that reaches here has `currentActive != index` by
+        // construction. Kept deliberately (not simplified to an unconditional set) so a future
+        // regression in that preference can't silently resurrect #86 by re-arming unconditionally.
         val changesActivePreset = currentActive != index
         if (changesActivePreset) selfInitiatedPreset = index
         writeFramed(SetStateMessage.encode(patched)).orReturn {
@@ -1624,11 +1629,14 @@ class DefaultTonexController(
      * snapshot's target preset for [activeSlot] against what that slot currently holds — both
      * already decoded from the SAME `fresh` re-read — is what makes this conditional check exact
      * rather than a heuristic. [selectPreset] now arms its own latch the same way, for the same
-     * reason (issue #86): its `holdingSlot == activeSlot` short-circuit does NOT cover every case
-     * where the write wouldn't move the active preset — when two slots hold the same preset (a
-     * duplicate this function itself can faithfully restore from a snapshot, or one the user set
-     * directly at the physical footswitch), the short-circuit alone is not exhaustive, so
-     * [selectPreset] needs the same conditional-arm defense-in-depth this function has always had.
+     * reason (issue #86): it historically armed unconditionally, relying solely on its
+     * `holdingSlot == activeSlot` short-circuit — which was not exhaustive when two slots held the
+     * same preset (a duplicate this function itself can faithfully restore from a snapshot, or one
+     * the user set directly at the physical footswitch). Issue #87 closed that gap by making
+     * [selectPreset] prefer `activeSlot` when resolving `holdingSlot`, so the short-circuit is now
+     * exhaustive there too — but [selectPreset] keeps the same conditional-arm defense-in-depth
+     * this function has always had, matching its shape and guarding against a future regression in
+     * that preference silently re-arming unconditionally.
      */
     override suspend fun restoreFootswitches(): TonexResult<Unit> = operationMutex.withLock {
         // 1. Lifecycle.

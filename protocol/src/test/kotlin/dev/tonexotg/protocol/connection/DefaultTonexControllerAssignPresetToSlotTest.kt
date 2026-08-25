@@ -15,10 +15,14 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /**
  * Issue #85: `assignPresetToSlot`'s move/swap semantics — "presets can only occupy one assignment
@@ -226,6 +230,46 @@ class DefaultTonexControllerAssignPresetToSlotTest {
             mapOf(PresetSlot.A to PresetIndex(10), PresetSlot.B to PresetIndex(5), PresetSlot.C to PresetIndex(15)),
             controller.slotAssignments.value,
         )
+    }
+
+    // ---- InvalidPresetIndex guard (issue #90 finding 3) ---------------------------------------
+    //
+    // assignPresetToSlot's own "Defense-in-depth against @JvmInline erasure at the JVM ABI
+    // boundary" guard (DefaultTonexController.kt, next to TonexError.InvalidPresetIndex's KDoc)
+    // was untested, unlike the same class of guard on StateBlobPatcher.patchSlotAssignment and
+    // .selectPreset (StateBlobPatcherTest.kt). PresetIndex's constructor makes an out-of-range
+    // value impossible to construct through ordinary Kotlin call syntax, so exercising this guard
+    // requires the same reflection bypass those sibling tests use: invoke the compiled
+    // (name-mangled, per PresetIndex's own KDoc) method directly with a raw, un-boxed int.
+
+    @Test
+    fun `assignPresetToSlot rejects an out-of-range raw preset value smuggled past PresetIndex's own guard`() = runTest {
+        val fake = FakeTonexTransport()
+        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
+        connectToReady(controller, fake)
+
+        // Filtered to exactly the (PresetSlot, int, Continuation) shape: `declaredMethods` also
+        // surfaces a private static lambda helper compiled as `assignPresetToSlot_..._$lambda$0$0`
+        // that happens to share the same name prefix.
+        val method = DefaultTonexController::class.java.declaredMethods
+            .firstOrNull { it.name.startsWith("assignPresetToSlot") && it.parameterTypes.size == 3 }
+            ?: fail("could not find a 3-arg compiled method starting with \"assignPresetToSlot\" on DefaultTonexController")
+        method.isAccessible = true
+
+        // A no-op Continuation: the guard returns before any real suspension point (it runs before
+        // the mandatory re-read), and Mutex.withLock's uncontended fast path doesn't suspend either,
+        // so invoke() returns the actual TonexResult synchronously rather than resuming this later.
+        val continuation = object : Continuation<Any?> {
+            override val context: CoroutineContext = EmptyCoroutineContext
+            override fun resumeWith(result: Result<Any?>) {}
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val result = method.invoke(controller, PresetSlot.A, 255, continuation) as TonexResult<Unit>
+
+        val error = (result as TonexResult.Failure).error
+        assertIs<TonexError.InvalidPresetIndex>(error)
+        assertEquals(255, (error as TonexError.InvalidPresetIndex).value)
     }
 
     // ---- rejected before Ready -------------------------------------------------------------------
