@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -103,6 +104,7 @@ fun ParameterEditorScreen(
                 MasterVolumeDock(
                     row = row,
                     onValueChange = { viewModel.onRangeDrag(row.id, it) },
+                    onValueChangeFinished = { viewModel.onRangeDragEnd(row.id) },
                     onValueTextClick = { viewModel.onNumericEntryOpen(row.id) },
                 )
             }
@@ -121,6 +123,7 @@ fun ParameterEditorScreen(
                 QuickTierCardView(
                     card = card,
                     onValueChange = { viewModel.onRangeDrag(card.row.id, it) },
+                    onValueChangeFinished = { viewModel.onRangeDragEnd(card.row.id) },
                     onValueTextClick = { viewModel.onNumericEntryOpen(card.row.id) },
                 )
             }
@@ -139,6 +142,7 @@ fun ParameterEditorScreen(
                     expanded = category.title in uiState.expandedCategories,
                     onToggle = { viewModel.onCategoryToggle(category.title) },
                     onRangeChange = viewModel::onRangeDrag,
+                    onRangeChangeFinished = viewModel::onRangeDragEnd,
                     onValueTextClick = viewModel::onNumericEntryOpen,
                     onSwitchToggle = viewModel::onSwitchToggle,
                     onStepperChange = viewModel::onStepperChange,
@@ -203,14 +207,25 @@ fun ParameterEditorScreen(
 }
 
 @Composable
-private fun QuickTierCardView(card: QuickTierCardUiState, onValueChange: (Float) -> Unit, onValueTextClick: () -> Unit) {
+private fun QuickTierCardView(
+    card: QuickTierCardUiState,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit,
+    onValueTextClick: () -> Unit,
+) {
     Column(modifier = Modifier.testTag("quickTier.card.${card.row.id.index}")) {
+        // Same disposal hazard as ParameterRowView's Range branch: a quick-tier card can scroll out
+        // of the LazyColumn, or have its resolved id swapped by a model change, mid-drag.
+        DisposableEffect(card.row.id) {
+            onDispose { onValueChangeFinished() }
+        }
         ParameterControl(
             label = card.row.label,
             value = card.row.value,
             valueRange = card.row.range,
             valueText = card.row.valueText,
             onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
             abbreviation = card.row.abbreviation,
             onValueTextClick = onValueTextClick,
         )
@@ -230,6 +245,7 @@ private fun CategoryAccordion(
     expanded: Boolean,
     onToggle: () -> Unit,
     onRangeChange: (ParameterId, Float) -> Unit,
+    onRangeChangeFinished: (ParameterId) -> Unit,
     onValueTextClick: (ParameterId) -> Unit,
     onSwitchToggle: (ParameterId, Boolean) -> Unit,
     onStepperChange: (ParameterId, Int) -> Unit,
@@ -260,12 +276,12 @@ private fun CategoryAccordion(
                 when (category) {
                     is CategoryUiState.Flat ->
                         category.rows.forEach { row ->
-                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                            ParameterRowView(row, onRangeChange, onRangeChangeFinished, onValueTextClick, onSwitchToggle, onStepperChange)
                         }
 
                     is CategoryUiState.Banked -> {
                         category.alwaysOnRows.forEach { row ->
-                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                            ParameterRowView(row, onRangeChange, onRangeChangeFinished, onValueTextClick, onSwitchToggle, onStepperChange)
                         }
                         ParameterSelectChipRow(
                             options = category.selector.options,
@@ -277,7 +293,7 @@ private fun CategoryAccordion(
                         // D3 §2.1: only the selected model's rows are ever composed here — every
                         // other model's rows are absent, not grayed or collapsed.
                         category.modelRows.forEach { row ->
-                            ParameterRowView(row, onRangeChange, onValueTextClick, onSwitchToggle, onStepperChange)
+                            ParameterRowView(row, onRangeChange, onRangeChangeFinished, onValueTextClick, onSwitchToggle, onStepperChange)
                         }
                     }
                 }
@@ -290,21 +306,35 @@ private fun CategoryAccordion(
 private fun ParameterRowView(
     row: ParameterRow,
     onRangeChange: (ParameterId, Float) -> Unit,
+    onRangeChangeFinished: (ParameterId) -> Unit,
     onValueTextClick: (ParameterId) -> Unit,
     onSwitchToggle: (ParameterId, Boolean) -> Unit,
     onStepperChange: (ParameterId, Int) -> Unit,
 ) {
     when (row) {
-        is ParameterRow.Range -> ParameterControl(
-            label = row.label,
-            value = row.value,
-            valueRange = row.range,
-            valueText = row.valueText,
-            onValueChange = { onRangeChange(row.id, it) },
-            abbreviation = row.abbreviation,
-            onValueTextClick = { onValueTextClick(row.id) },
-            modifier = Modifier.testTag("paramRow.range.${row.id.index}"),
-        )
+        is ParameterRow.Range -> {
+            // `Slider.onValueChangeFinished` is the ONLY thing that ends a drag's
+            // inbound-suppression window, and it never fires if this row is disposed mid-gesture --
+            // an accordion collapsing, a model-selector chip swapping out the rows below it, a
+            // connection-state rebuild. A row left flagged as "being dragged" stops mirroring the
+            // pedal for the rest of the session, so disposal has to end the gesture too (issue
+            // #104). onRangeDragEnd is idempotent, so firing it for a row that was never dragged
+            // costs nothing.
+            DisposableEffect(row.id) {
+                onDispose { onRangeChangeFinished(row.id) }
+            }
+            ParameterControl(
+                label = row.label,
+                value = row.value,
+                valueRange = row.range,
+                valueText = row.valueText,
+                onValueChange = { onRangeChange(row.id, it) },
+                onValueChangeFinished = { onRangeChangeFinished(row.id) },
+                abbreviation = row.abbreviation,
+                onValueTextClick = { onValueTextClick(row.id) },
+                modifier = Modifier.testTag("paramRow.range.${row.id.index}"),
+            )
+        }
 
         is ParameterRow.Switch -> ParameterSwitch(
             label = row.label,

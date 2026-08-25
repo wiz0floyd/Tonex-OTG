@@ -54,6 +54,22 @@ sealed interface TonexEvent {
      * of the *previous* active preset is not valid for this one.
      */
     data class ExternalPresetChange(val newIndex: PresetIndex) : TonexEvent
+
+    /**
+     * An inbound `0x0309` `ParameterChanged` notification carried an [index] outside
+     * [ParameterId.PRESET_RANGE] and [ParameterId.GLOBAL_RANGE], so it could not be routed to any
+     * [ParameterId]. The value is **dropped**, never guessed onto a nearby parameter.
+     *
+     * This exists because issue #104's routing rests on one confirmed observation plus one
+     * assumption: #106 proved the pedal notifies for a preset-scoped parameter (`MODEL_GAIN`,
+     * index 20), and the product owner's working assumption is that master volume and the
+     * GLOBAL-scope parameters use the same index space. Rather than block on another hardware
+     * session, the routing is generic and this event is the loud failure for anything that does
+     * not fit — [payloadHex] carries the raw payload as uppercase, space-separated hex so a debug
+     * dump hands the next hardware session the truth directly, instead of needing a new probe
+     * written to go and find it.
+     */
+    data class UnroutableParameterNotification(val index: Int, val payloadHex: String) : TonexEvent
 }
 
 /**

@@ -549,4 +549,119 @@ class ParameterEditorViewModelTest {
         assertNull(vm.uiState.value.writeError)
         vm.onCleared()
     }
+
+    // ---- issue #104: pedal-initiated changes must not fight the user's own drag -----------------
+
+    @Test
+    fun `a pedal-initiated change to the parameter being dragged does not move the thumb`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 7f)
+        runCurrent() // the mid-drag throttled write completes and clears its own override
+
+        // The pedal reports its own knob moving for the SAME parameter, mid-gesture.
+        controller.seedParameterValue(gain, 1f)
+        runCurrent()
+
+        assertEquals(7f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `after the drag ends, the parameter follows the controller again`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 7f)
+        runCurrent()
+        vm.onRangeDragEnd(gain)
+        controller.seedParameterValue(gain, 1f)
+        runCurrent()
+
+        assertEquals(1f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a pedal-initiated change to a different parameter lands immediately during a drag`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 7f)
+        runCurrent()
+        controller.seedParameterValue(bass, 9f)
+        runCurrent()
+
+        // Suppression is per-id and per-gesture: this is the whole feature, not an exception to it.
+        assertEquals(9f, rowValue(vm, bass), 1e-4f)
+        assertEquals(7f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `releasing the slider does not snap back to the last completed write while one is in flight`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 4f)
+        runCurrent() // 4f lands on the controller
+        controller.nextSetParameterGate = FakeTonexController.SetParameterGate() // hold the final write open
+        vm.onRangeDrag(gain, 9f)
+        runCurrent()
+
+        vm.onRangeDragEnd(gain)
+        runCurrent()
+
+        // The final write has not completed, so the override must survive: dropping it here would
+        // show 4f for a frame and then jump to 9f -- PR #102's bug, reintroduced.
+        assertEquals(9f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `a drag whose final write already landed does not leave the control pinned`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        vm.onRangeDrag(gain, 9f)
+        runCurrent() // the write completes DURING the gesture, so nothing is in flight at release
+        vm.onRangeDragEnd(gain)
+        runCurrent()
+
+        // A stale override here would mask every later pedal-initiated change for the session.
+        controller.seedParameterValue(gain, 2f)
+        runCurrent()
+
+        assertEquals(2f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    @Test
+    fun `onRangeDragEnd is idempotent - it doubles as the row's disposal hook`() = runTest {
+        val controller = FakeTonexController()
+        val vm = ParameterEditorViewModel(controller, backgroundScope)
+        runCurrent()
+
+        // ParameterEditorScreen fires this from DisposableEffect.onDispose for rows that were never
+        // dragged; it must be harmless, and it must un-stick a gesture disposal interrupted.
+        vm.onRangeDragEnd(gain)
+        vm.onRangeDragEnd(gain)
+        runCurrent()
+        controller.seedParameterValue(gain, 6f)
+        runCurrent()
+
+        assertEquals(6f, gainValue(vm), 1e-4f)
+        vm.onCleared()
+    }
+
+    private fun gainValue(vm: ParameterEditorViewModel): Float = rowValue(vm, gain)
+
+    private fun rowValue(vm: ParameterEditorViewModel, id: ParameterId): Float =
+        vm.uiState.value.quickTier.first { it.row.id == id }.row.value
 }

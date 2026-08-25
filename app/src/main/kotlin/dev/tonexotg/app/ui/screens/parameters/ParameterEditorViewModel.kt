@@ -80,6 +80,21 @@ class ParameterEditorViewModel(
     )
 
     private val _overrides = MutableStateFlow<Map<ParameterId, Float>>(emptyMap())
+
+    /**
+     * Ids whose slider is under the user's finger right now — [onRangeDrag] to [onRangeDragEnd]
+     * (issue #104). The pedal streams `ParameterChanged` notifications at ~100 Hz while its own
+     * knob is turning, and those now flow into [TonexController.parameterValues] live; without
+     * this, a notification for the id being dragged would yank the thumb out from under the finger.
+     *
+     * It works by keeping [_overrides] intact for the duration of the gesture — see
+     * [handleWriteResult]. The override already beats [TonexController.parameterValues] in
+     * [buildUiState]; the gap this closes is the instant *between* a mid-drag throttled write
+     * completing (which used to clear the override) and the next drag tick setting a new one.
+     * Suppression is per-id and per-gesture only: a notification for any *other* parameter still
+     * lands immediately, which is the whole point of the feature.
+     */
+    private val _draggingIds = MutableStateFlow<Set<ParameterId>>(emptySet())
     private val _expandedCategories = MutableStateFlow<Set<String>>(emptySet())
     private val _numericEntryTargetId = MutableStateFlow<ParameterId?>(null)
     private val _firstWriteWarningVisible = MutableStateFlow(false)
@@ -135,10 +150,19 @@ class ParameterEditorViewModel(
                         throttler.cancelAll()
                         _numericEntryTargetId.value = null
                         _overrides.value = emptyMap()
+                        // The gesture, like the overrides it was protecting, belongs to the stale
+                        // preset -- do not keep suppressing inbound values for the new one.
+                        _draggingIds.value = emptySet()
                         val name = controller.presets.value.firstOrNull { it.index == event.newIndex }?.pedalName
                             ?: "preset ${event.newIndex.value + 1}"
                         _externalPresetChangeMessage.value = "Pedal switched to $name (footswitch)"
                     }
+
+                    // Logged by TonexSessionHolder with the raw payload hex (issue #104). Nothing
+                    // for this screen to show: the pedal reported a parameter this app has no
+                    // control for, so there is no control to update and nothing a player could act
+                    // on -- the audience for it is the next hardware session's debug dump.
+                    is TonexEvent.UnroutableParameterNotification -> Unit
                 }
             }
         }
@@ -159,8 +183,36 @@ class ParameterEditorViewModel(
     fun onRangeDrag(id: ParameterId, rawValue: Float) {
         val spec = ParameterRegistry.byIndex(id.index) ?: return
         val clamped = rawValue.coerceIn(spec.min, effectiveBounds.effectiveMax(id))
+        _draggingIds.update { it + id }
         _overrides.update { it + (id to clamped) }
         throttler.submit(id, clamped)
+    }
+
+    /**
+     * The pointer came off the slider for [id] (issue #104), or the row was disposed mid-gesture.
+     * Ends the inbound-suppression window opened by [onRangeDrag].
+     *
+     * **Deliberately does not clear the override here.** [ParameterWriteThrottler] conflates, so at
+     * the instant of release the final value's write is usually still in flight; dropping the
+     * override now would fall back to the last *completed* write's value — a visible backward
+     * snap, immediately followed by a jump forward when the final write lands. That is PR #102's
+     * bug, reintroduced. [handleWriteResult] already owns the clear and now performs it, since the
+     * id is no longer suppressed: every drag tick submits, so the final value's own completion
+     * (success or failure) is what resyncs to the controller.
+     *
+     * Safe to call for an id that is not being dragged — it is also the disposal hook (see
+     * `ParameterEditorScreen`'s `DisposableEffect`), so it must be idempotent.
+     */
+    fun onRangeDragEnd(id: ParameterId) {
+        _draggingIds.update { it - id }
+        // ...with one exception: if the controller has ALREADY caught up to the override, there is
+        // nothing in flight left to clear it, and leaving it would pin this control to the drag's
+        // final value forever - masking every later pedal-initiated change to it, which is the very
+        // thing this screen now exists to show. Clearing it here is invisible (the two values are
+        // equal by definition) and costs nothing when a write is still pending, since then they
+        // differ and handleWriteResult keeps ownership.
+        val settled = controller.parameterValues.value[id]
+        _overrides.update { current -> if (settled != null && current[id] == settled) current - id else current }
     }
 
     /** One `SWITCH` toggle tap (D3 §3.2). */
@@ -247,6 +299,7 @@ class ParameterEditorViewModel(
     /** Stops every in-flight/buffered throttled write. Call from the caller's own teardown (e.g. `onDispose`). */
     fun onCleared() {
         throttler.cancelAll()
+        _draggingIds.value = emptySet()
     }
 
     private fun onDiscreteChange(id: ParameterId, rawValue: Float) {
@@ -293,7 +346,11 @@ class ParameterEditorViewModel(
      * call clears it once *that* write lands.
      */
     private fun handleWriteResult(id: ParameterId, value: Float, result: TonexResult<Unit>) {
-        _overrides.update { current -> if (current[id] == value) current - id else current }
+        // Never clear an override for a slider still under the finger (issue #104) -- see
+        // [_draggingIds]. onRangeDragEnd is what clears it once the gesture is actually over.
+        if (id !in _draggingIds.value) {
+            _overrides.update { current -> if (current[id] == value) current - id else current }
+        }
         when (result) {
             is TonexResult.Success -> _writeError.update { current -> if (current?.id == id) null else current }
             is TonexResult.Failure -> _writeError.value = WriteError(id, result.error.message)

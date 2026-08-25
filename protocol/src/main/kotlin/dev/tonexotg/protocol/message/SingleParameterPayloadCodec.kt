@@ -20,22 +20,20 @@ import dev.tonexotg.protocol.codec.VarintValue
  * `value`. See [SingleParameterPayloadCodec] for the wire shape this decodes.
  *
  * @property kind [SingleParameterPayloadCodec.KIND_PARAMETER] or
- *   [SingleParameterPayloadCodec.KIND_MASTER_VOLUME] on messages this app itself constructs; on an
- *   inbound [dev.tonexotg.protocol.codec.MessageType.ParameterChanged] notification upstream is
- *   observed to always send `0x03` here (see `usb_tonex_one.c:833`'s `param_start_marker`),
- *   regardless of which parameter changed — this codec does not enforce that as a decode-time
- *   invariant, since a future firmware sending a different value here is not this codec's business
- *   to reject.
- * @property index the wire-position parameter index this payload concerns. On an inbound
- *   parameter-changed notification, upstream is confirmed (`usb_tonex_one.c:856`,
- *   `if (param_index == 0x00)`) to use `index == 0` specifically to mean master volume — master
- *   volume has no ordinary preset/global slot in this message's own index space, unlike a regular
- *   parameter, whose `index` here is not independently confirmed by the upstream source examined
- *   for this story to line up with [dev.tonexotg.protocol.ParameterId]'s own 0-108/110-116
- *   numbering beyond that one master-volume case. Treat that wider correspondence as plausible but
- *   unconfirmed, not as fact. **For a nonzero value specifically, this field is decoded by a
- *   read path upstream's own control flow never actually exercises** — see
- *   [SingleParameterPayloadCodec]'s "Read side" and "S20 hardware probe" KDoc sections.
+ *   [SingleParameterPayloadCodec.KIND_MASTER_VOLUME] on messages this app itself constructs. On an
+ *   inbound [dev.tonexotg.protocol.codec.MessageType.ParameterChanged] notification the pedal is
+ *   **confirmed by hardware capture (#106) to send `0x02`** — [SingleParameterPayloadCodec.KIND_PARAMETER],
+ *   not the `0x03` upstream's own `param_start_marker` (`usb_tonex_one.c:868`) searches for. This
+ *   codec does not enforce any particular value here as a decode-time invariant: a future firmware
+ *   sending something else is not this codec's business to reject.
+ * @property index the wire-position parameter index this payload concerns, read from a single wire
+ *   byte on both the read and the write side (see [SingleParameterPayloadCodec]'s "Index byte").
+ *   `index == 0` means **master volume** specifically — upstream (`usb_tonex_one.c:891`,
+ *   `if (param_index == 0x00)`) uses it that way, and master volume has no ordinary preset/global
+ *   slot in this message's index space. Every other index lines up with
+ *   [dev.tonexotg.protocol.ParameterId]'s own 0-108/110-116 numbering; #106 confirmed that
+ *   directly for index `20` (`MODEL_GAIN`) by sweeping the pedal's physical knob and reading the
+ *   resulting notifications.
  * @property value the parameter's new value, in whatever units the wire uses for this `kind`/`index`
  *   pair — for master volume specifically, this is the pedal's **native** `0..10` range, not the
  *   engineering `-40..3` dB range [dev.tonexotg.protocol.params.ParameterRegistry] stores; see
@@ -48,72 +46,39 @@ data class SingleParameterPayload(val kind: Int, val index: Int, val value: Floa
  * single-parameter write ([ParameterWriteMessage]), the master-volume write
  * ([MasterVolumeMessage]), and inbound `TYPE_PARAM_CHANGED` notifications
  * ([dev.tonexotg.protocol.codec.MessageType.ParameterChanged]) all share this exact 10-byte payload
- * *shape* — `B9 04 <kind> <2 index-field bytes> 88 <value: float32, little-endian>` — but, as detailed
- * below, [encode] (the write side) and [decode] (the read side) place the index within those 2 bytes
- * **differently**, because they are ported from two independently-sourced upstream functions that
- * are not, in fact, byte-for-byte consistent with each other. This is not a bug in this codec; it is
- * this codec faithfully reproducing an asymmetry that exists in the upstream reference itself.
+ * shape:
  *
- * ## Write side (used by [encode]) — `usb_tonex_one_send_single_parameter`/`_master_volume`
+ * ```
+ * B9 04 <kind> 00 <index> 88 <value: float32, little-endian>
+ * ```
  *
- * Confirmed against `usb_tonex_one.c:265-295` (`usb_tonex_one_send_single_parameter`) and
- * `usb_tonex_one.c:304-331` (`usb_tonex_one_send_master_volume`) — both build
- * `{0xB9, 0x04, kind, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00}` and then execute exactly one
- * assignment into the two index-field bytes: **`payload[4] = index;`**. `payload[3]` is never
- * written and keeps its initial `0x00`. Every valid parameter index (0-116, see [ParameterId])
- * fits in one byte, so this single assignment is upstream's complete index-write logic — there is
- * no confirmed write-side behaviour for an index that would need the second byte.
+ * [encode] and [decode] are inverses of each other. Both place the index in `payload[4]` alone and
+ * leave `payload[3]` as `0x00` padding.
  *
- * ## Read side (used by [decode]) — `usb_tonex_one_parse_param_changed`
+ * ## Index byte — `payload[4]` alone, confirmed by hardware (#106)
  *
- * Sourced from `usb_tonex_one.c:827-877` — reads a 3-byte marker (`0xB9, 0x04, 0x03`; inbound
- * notifications are confirmed to always carry `kind = 0x03`), then explicitly 2 index bytes:
- * `param_index = *temp_ptr++; param_index |= (*temp_ptr << 8);`. The *first* byte encountered
- * after the marker (i.e. the payload position immediately after `kind`) is read as the **low**
- * byte; the *second* as the **high** byte — an ordinary little-endian 2-byte read, *as written*.
+ * Upstream's writer (`usb_tonex_one.c:265-295` `usb_tonex_one_send_single_parameter`, and
+ * `:304-331` `usb_tonex_one_send_master_volume`) builds
+ * `{0xB9, 0x04, kind, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00}` and executes exactly one
+ * assignment into the index field: **`payload[4] = index;`**. `payload[3]` is never written.
  *
- * **This 2-byte read is never exercised for a nonzero index on real hardware, as far as upstream's
- * own source shows.** `param_index`'s only use in that function is `if (param_index == 0x00) { ...
- * } ` (`:856`) — there is no `else` branch. Every nonzero `param_index` is computed and then
- * discarded; the value is correct-by-accident for index `0` (which decodes identically regardless
- * of which byte is "low"), but nothing in upstream's own control flow has ever depended on the
- * 2-byte read's behaviour for a nonzero index. Upstream's own literal-table comment for this
- * message (`:274-275`) also labels the byte at `payload[3]` alone as `unknown`, with `param index`
- * against `payload[4]` alone — i.e. its own author's column-aligned annotation disagrees with the
- * 2-byte read this function performs. And `0x0309` is one message ID used in *both* directions
- * (this app's own outbound writes and the pedal's inbound notifications), not two message IDs with
- * independently-confirmed, structurally-distinct layouts — so "read side" and "write side" here
- * describes which upstream function was ported, not a confirmed protocol-level distinction.
+ * Upstream's *reader* (`usb_tonex_one_parse_param_changed`, `usb_tonex_one.c:862`) disagrees with its own
+ * writer: it performs a 2-byte little-endian read, `param_index = *temp_ptr++;
+ * param_index |= (*temp_ptr << 8);`. That read is dead code in upstream's own control flow —
+ * `param_index`'s only use is `if (param_index == 0x00)`, with no `else` branch, so every
+ * nonzero index it computes is discarded unexamined.
  *
- * ## Why [encode] and [decode] are not inverses of each other for a nonzero index
+ * **Real hardware settles it in the writer's favour.** The #106 capture (a physical `MODEL_GAIN`
+ * knob sweep, decoded by hand in issue #104) shows `payload[3..4] == 00 14`: the index, 20
+ * (`MODEL_GAIN`), sits in `payload[4]`, and `payload[3]` is `0x00`. Upstream's 2-byte read would
+ * have decoded that same frame as `0x1400` = 5120, which is not a valid
+ * [dev.tonexotg.protocol.ParameterId] at all. [decode] therefore reads `payload[4]` alone, matching
+ * [encode] and upstream's writer, and this codec round-trips its own output for every valid index.
  *
- * Lining the two up by wire position: the write side's sole assignment lands on what the read
- * side's code would call the index's *high* byte, leaving what the read side's code would call the
- * *low* byte at its untouched `0x00`. Decoding a payload this app just encoded with a nonzero index
- * would therefore **not** recover that index under [decode] as currently written — it would recover
- * `index * 256`. [decode] is deliberately left matching upstream's `usb_tonex_one_parse_param_changed`
- * source text as-written, rather than "corrected" into a symmetric round trip, because the two
- * candidate fixes (trust the 2-byte read, or conclude `payload[3]` is unrelated padding and the
- * real index is `payload[4]` alone, matching the write side) are indistinguishable from the source
- * alone and this is not resolvable without a hardware capture — see "S20 hardware probe" below for
- * the exact steps that would settle it and the exact fix each outcome implies.
- *
- * ## S20 hardware probe — the fix this is waiting on
- *
- * Trigger a change to a **non**-master-volume parameter from the pedal's own front panel or the IK
- * editor (not from this app), capture the resulting inbound `0x0309` frame, and read `payload[2]`
- * (`kind`) first — upstream's own marker search is for the 3 bytes `B9 04 03`, so a notification
- * whose `kind` is `0x02` (this codec's [KIND_PARAMETER]) rather than `0x03` would not even match
- * upstream's marker; establish first whether the pedal emits nonzero-index notifications carrying
- * `kind = 0x03` at all. Then read `payload[3]` and `payload[4]`:
- * - If `payload[4] == index` and `payload[3] == 0x00` → [decode] is wrong; move the index read to
- *   `payload[4]` alone, matching the write side, and delete the 2-byte read.
- * - If `payload[3] == index` and `payload[4] == 0x00` → the asymmetry against [encode] is real and
- *   confirmed; [decode] is already correct as written, and this KDoc's uncertainty language should
- *   be upgraded to a confirmed fact.
- * - If no nonzero-index notification is ever observed on real hardware → `index` is unreachable
- *   dead code for the nonzero case (matching upstream's own dead `param_index` branch) and the
- *   field should be deleted from [SingleParameterPayload] entirely.
+ * The same capture also settles the `kind` byte: inbound notifications carry `0x02`
+ * ([KIND_PARAMETER]), **not** the `0x03` upstream's 3-byte `B9 04 03` marker search requires — so
+ * upstream's own marker would never have matched a real inbound frame. This codec's 2-byte `B9 04`
+ * scan (see [decode]) is what makes these notifications decodable at all.
  *
  * The `0x88`-prefixed `float32` form ([TonexVarint.encodeFloat] / [TonexVarint.decode]) is reused
  * for the value field rather than reimplemented here.
@@ -131,7 +96,7 @@ object SingleParameterPayloadCodec {
 
     /**
      * Encodes [kind]/[index]/[value] into the 10-byte wire shape described in the class KDoc's
-     * "Write side" section: `B9 04 <kind> 00 <index> 88 <value: float32, little-endian>` — i.e.
+     * "Index byte" section: `B9 04 <kind> 00 <index> 88 <value: float32, little-endian>` — i.e.
      * `payload[4] = index`, byte-exact against `payload[4] = index;` in both
      * `usb_tonex_one_send_single_parameter` and `usb_tonex_one_send_master_volume`.
      */
@@ -154,20 +119,17 @@ object SingleParameterPayloadCodec {
      * Decodes a [SingleParameterPayload] from [payload].
      *
      * Scans for the `B9 04` marker rather than assuming it starts at offset 0 — mirroring
-     * upstream's own `memmem`-based search (`usb_tonex_one.c:836`) rather than a fixed-offset read,
+     * upstream's own `memmem`-based search (`usb_tonex_one.c:871`) rather than a fixed-offset read,
      * since nothing in the reverse-engineered protocol rules out leading bytes before this shape in
-     * some future context. **This is the class KDoc's "Read side" byte layout, not the inverse of
-     * [encode]'s "Write side" layout** — decoding a payload this app just [encode]d does *not*
-     * recover the same index for a nonzero value; see the class KDoc's "Why encode and decode are
-     * not inverses" section.
+     * some future context. This is the exact inverse of [encode] — see the class KDoc's
+     * "Index byte" section.
      *
      * ## Marker matching: 2 bytes, with retry — not upstream's 3-byte marker
      *
-     * Upstream's own search is for the **3**-byte marker `B9 04 03` (`kind` fixed to `0x03`) —
-     * every inbound notification it decodes carries that `kind`. This codec's [decode] is shared
-     * more broadly, including by this file's own tests decoding a `kind = 0x02` payload this app
-     * just built with [encode] (see the class KDoc), so matching only `B9 04 03` would make [decode]
-     * unable to read back its own writes at all. It therefore matches the shorter 2-byte `B9 04` and
+     * Upstream's own search is for the **3**-byte marker `B9 04 03`, i.e. `kind` fixed to `0x03`.
+     * Real inbound notifications carry `kind = 0x02` (#106), so that marker would never match one;
+     * matching only `B9 04 03` would also make [decode] unable to read back this app's own
+     * [encode]d writes. It therefore matches the shorter 2-byte `B9 04` and
      * reads `kind` as data rather than as part of the marker — but a *plain* first-match, no-retry
      * 2-byte scan has a real false-positive hazard: [PresetNameExtractor]'s own 6-byte
      * `ToneOnePresetByteMarker` (`B9 04 B9 02 BC 21`) itself begins with `B9 04`, and any other
@@ -212,9 +174,10 @@ object SingleParameterPayloadCodec {
             }
 
             val kind = payload[kindPos].toInt() and 0xFF
-            val indexLo = payload[kindPos + 1].toInt() and 0xFF
-            val indexHi = payload[kindPos + 2].toInt() and 0xFF
-            val index = indexLo or (indexHi shl 8)
+            // The index is `payload[kindPos + 2]` alone (`payload[4]` for a marker at offset 0) --
+            // `payload[kindPos + 1]` is padding and is always 0x00. Confirmed against real hardware
+            // in #106; see the class KDoc's "Index byte" section.
+            val index = payload[kindPos + 2].toInt() and 0xFF
 
             when (val result = TonexVarint.decode(payload, floatMarkerPos)) {
                 is TonexResult.Failure -> lastFailure = result

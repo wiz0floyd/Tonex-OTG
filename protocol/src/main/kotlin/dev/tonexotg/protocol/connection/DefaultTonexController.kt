@@ -127,6 +127,71 @@ class DefaultTonexController(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
+    /**
+     * Rate-limits the ~100 Hz inbound `ParameterChanged` stream on its way into [_parameterValues]
+     * (issue #104). Leading-edge: a one-off frame still applies synchronously — see
+     * [InboundParameterThrottle]'s KDoc, which explains why that is load-bearing here.
+     *
+     * The `Ready` guard is a teardown race, not a niceness: [cancelAll] cancels the flush
+     * coroutine, but a flush that has already copied its batch and released the monitor has no
+     * suspension point left before `apply`, so cancellation cannot preempt it. Without this check
+     * that in-flight flush could repopulate [_parameterValues] microseconds after [tearDown]
+     * cleared it — the exact stale-session write the `cancelAll()` call there exists to prevent.
+     */
+    private val inboundParameterThrottle = InboundParameterThrottle(scope) { updates ->
+        if (_connectionState.value is ConnectionState.Ready) {
+            _parameterValues.update { it + updates }
+        }
+    }
+
+    /**
+     * Values this controller has written to the pedal and is still expecting to see echoed back,
+     * keyed by the `(kind, index)` pair they were sent with.
+     *
+     * **The pedal echoes every successful single-parameter write back as an unsolicited
+     * `0x0309 ParameterChanged` frame, ~3 ms later, with a byte-identical payload.** This is not a
+     * response to a request — [writeParameterLocked] never awaits one — so before issue #104 those
+     * echoes simply fell through the reader and were discarded by `applyParameterChanged`'s old
+     * `index != 0` guard. Now that inbound frames are routed for real, they must be recognised for
+     * what they are. Confirmed in this repo's own captured log,
+     * `docs/hardware-probes/tonexprobe20260819_220308.log.txt:19313-19318` — a write of EQ_MID
+     * (index `0x0D`) at value `41 20 00 00` (10.0f), and 3 ms later a READ carrying that same
+     * `B9 04 02 00 0D 88 00 00 20 41` payload back; it repeats for every write in that drill.
+     *
+     * Letting an echo through would not merely be redundant, it would corrupt the display. A drag
+     * conflates into writes v1 then v2; v2's own `parameterValues` update lands immediately, but
+     * v1's echo can still be sitting in [inboundParameterThrottle]'s pending batch and would flush
+     * *over* v2 up to one interval later — leaving the app showing a value the pedal is no longer
+     * at, with nothing else coming to correct it.
+     *
+     * Matching is on the exact float that was sent, and each match consumes one entry, so a genuine
+     * knob turn to some *other* value is never swallowed. The one accepted cost: if a user's own
+     * physical knob happens to land on precisely the value the app last wrote, that single frame is
+     * dropped — at ~100 frames a second, its neighbours still track the knob. Bounded at
+     * [MAX_PENDING_ECHOES_PER_KEY] entries per key so a write path the pedal turns out not to echo
+     * can leak at most that many stale values rather than growing without limit.
+     */
+    private val pendingEchoes = mutableMapOf<Pair<Int, Int>, ArrayDeque<Float>>()
+    private val pendingEchoesLock = Any()
+
+    /** Records that a `(kind, index, value)` write just went out and its echo should be ignored. */
+    private fun recordExpectedEcho(kind: Int, index: Int, value: Float) {
+        synchronized(pendingEchoesLock) {
+            val queue = pendingEchoes.getOrPut(kind to index) { ArrayDeque() }
+            if (queue.size >= MAX_PENDING_ECHOES_PER_KEY) queue.removeFirst()
+            queue.addLast(value)
+        }
+    }
+
+    /** True if this inbound frame is the echo of one of our own writes — consuming that expectation. */
+    private fun consumeExpectedEcho(kind: Int, index: Int, value: Float): Boolean =
+        synchronized(pendingEchoesLock) {
+            val queue = pendingEchoes[kind to index] ?: return false
+            val removed = queue.remove(value)
+            if (queue.isEmpty()) pendingEchoes.remove(kind to index)
+            removed
+        }
+
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
     override val activePreset: StateFlow<PresetIndex?> = _activePreset.asStateFlow()
     override val presets: StateFlow<List<PresetInfo>> = _presets.asStateFlow()
@@ -338,21 +403,91 @@ class DefaultTonexController(
     }
 
     /**
-     * Applies a `ParameterChanged` notification to [parameterValues] — restrained to `index == 0`
-     * (master volume) only. [SingleParameterPayloadCodec]'s KDoc is explicit that the nonzero-index
-     * correspondence to [ParameterId]'s numbering is "plausible but unconfirmed" and not exercised
-     * by upstream's own control flow; mapping a nonzero index here would be inventing protocol
-     * truth. **Do not "fix" this restraint** — see issue #25 / S20 for the hardware probe that
-     * would resolve it.
+     * Applies a `ParameterChanged` notification to [parameterValues] (issue #104).
+     *
+     * The pedal streams these unsolicited, at ~100 Hz, for as long as a physical knob is being
+     * turned — that is how a knob turn on the hardware becomes a moving control in the app,
+     * without polling, a request/response round trip, or a preset reselect. Confirmed against real
+     * hardware in #106; see [SingleParameterPayloadCodec]'s KDoc for the frame layout that capture
+     * settled.
+     *
+     * ## Routing
+     * - **`index == 0` is master volume**, not `ParameterId(0)`. Upstream uses index 0 that way
+     *   specifically (`usb_tonex_one.c:891`, `if (param_index == 0x00)`), and the value arrives in
+     *   the pedal's native `0..10` range, so it is converted to the engineering `-40..3` dB the
+     *   registry stores via [MasterVolumeMessage.nativeToDecibels] — reused, not reimplemented.
+     * - **Any other valid index** ([ParameterId.PRESET_RANGE] / [ParameterId.GLOBAL_RANGE]) routes
+     *   straight to that [ParameterId], value stored as received: #106 swept `MODEL_GAIN`
+     *   (index 20) from 1.9 to 4.8, inside its registered `0f..10f`, so these are already in
+     *   engineering units with no conversion needed.
+     * - **Anything else is dropped, loudly** — a [TonexEvent.UnroutableParameterNotification]
+     *   carrying the raw payload hex, never silently swallowed and never guessed onto a nearby
+     *   parameter.
+     *
+     * That last branch is the point. #106 proves only the preset-scoped case; that master volume
+     * and the GLOBAL-scope parameters (110..116) notify through this same index space is the
+     * product owner's stated working assumption, not an observation. Routing generically and
+     * failing loud is the deliberate alternative to blocking the whole story on another hardware
+     * session — if the assumption is wrong, the next debug dump says so in raw hex.
+     *
+     * Values go through [inboundParameterThrottle] rather than into [_parameterValues] directly;
+     * see that class for why the first frame of a burst still applies synchronously.
      */
     private fun applyParameterChanged(msg: TonexMessage.ParameterChanged) {
         val decoded = SingleParameterPayloadCodec.decode(msg.payload)
         if (decoded !is TonexResult.Success) return
         val p = decoded.value
-        if (p.index != 0) return
-        val spec = ParameterRegistry.byEnumName("MASTER_VOLUME") ?: return
-        val decibels = MasterVolumeMessage.nativeToDecibels(p.value)
-        _parameterValues.update { it + (spec.id to decibels) }
+
+        // Our own write coming back at us, not the pedal reporting a knob — see [pendingEchoes].
+        if (consumeExpectedEcho(p.kind, p.index, p.value)) return
+
+        // Master volume is index 0 *of kind 0x03 only*. Qualifying on `kind` is load-bearing:
+        // ParameterId(0) is NOISE_GATE_POST, a switch this app renders, and its own notifications
+        // arrive as index 0 of kind 0x02 (KIND_PARAMETER) - routing on the index alone would send
+        // a noise-gate toggle to the master-volume slider as nativeToDecibels(1f) = -35.7 dB.
+        // Confirmed in docs/hardware-probes/tonexprobe20260819_220308.log.txt:18936-18938, where
+        // the pedal answers RequestMasterVolume with `B9 04 03 00 00 88 9A 99 A9 40` - kind 0x03,
+        // index 0, 5.3 native. Upstream's own `if (param_index == 0x00)` sits inside a function
+        // whose 3-byte marker had already filtered to kind 0x03; that context has to be kept.
+        if (p.index == 0 && p.kind == SingleParameterPayloadCodec.KIND_MASTER_VOLUME) {
+            val spec = ParameterRegistry.byEnumName("MASTER_VOLUME") ?: return
+            applyInboundValue(spec.id, MasterVolumeMessage.nativeToDecibels(p.value), msg.payload)
+            return
+        }
+
+        if (p.index in ParameterId.PRESET_RANGE || p.index in ParameterId.GLOBAL_RANGE) {
+            applyInboundValue(ParameterId(p.index), p.value, msg.payload)
+            return
+        }
+
+        _events.tryEmit(
+            TonexEvent.UnroutableParameterNotification(p.index, msg.payload.toSpacedHex()),
+        )
+    }
+
+    /**
+     * Applies one routed inbound value, but only if it is actually in range for [id] — otherwise
+     * reports it as unroutable and drops it.
+     *
+     * The bounds check is not defensive padding; it is what keeps a wrong assumption from becoming
+     * a silently wrong number. `MASTER_VOLUME` is `ParameterId(116)`, which sits inside
+     * [ParameterId.GLOBAL_RANGE], so there are two routes to that one id: index 0 (native `0..10`,
+     * converted above) and index 116 (taken as-is). If the pedal ever uses the latter with native
+     * units, an unconverted `5.0` would land in a slot the UI renders — and the home screen then
+     * writes back — as dB. Validating against the registry's own range turns that from a plausible
+     * -looking wrong value into a loud [TonexEvent.UnroutableParameterNotification]: `5.0` is
+     * outside master volume's `-40..3`, so it is refused rather than displayed.
+     *
+     * Bounding against the *effective* max (issue #80), not the static one, so a legitimately
+     * self-widened value the write path would accept is not rejected on the way back in.
+     */
+    private fun applyInboundValue(id: ParameterId, value: Float, rawPayload: ByteArray) {
+        val spec = ParameterRegistry.byIndex(id.index)
+        if (spec == null || value < spec.min || value > effectiveBounds.effectiveMax(id)) {
+            _events.tryEmit(TonexEvent.UnroutableParameterNotification(id.index, rawPayload.toSpacedHex()))
+            return
+        }
+        inboundParameterThrottle.submit(id, value)
     }
 
     // ---- awaiting a response (§6.5) ----------------------------------------------------------
@@ -529,6 +664,10 @@ class DefaultTonexController(
         selfInitiatedPreset = null
         footswitchSnapshot = null
         snapshotStore.clear()
+        // Before the flows are cleared below: anything still buffered describes a session that no
+        // longer exists, and must not be flushed back into a map that is about to be emptied.
+        inboundParameterThrottle.cancelAll()
+        synchronized(pendingEchoesLock) { pendingEchoes.clear() }
         _presets.value = emptyList()
         _activePreset.value = null
         _slotAssignments.value = emptyMap()
@@ -1156,6 +1295,8 @@ class DefaultTonexController(
         if (spec.scope == ParameterScope.PRESET) {
             val encoded = ParameterWriteMessage.encode(id, value, capabilities, effectiveBounds).orReturn { return it }
             writeFramed(encoded).orReturn { return it }
+            // The pedal will echo this back within a few ms; ignore it when it arrives.
+            recordExpectedEcho(SingleParameterPayloadCodec.KIND_PARAMETER, id.index, value)
             _parameterValues.update { it + (id to value) } // AFTER success only
             return TonexResult.Success(Unit)
         }
@@ -1163,6 +1304,13 @@ class DefaultTonexController(
         if (spec.enumName == "MASTER_VOLUME") {
             val encoded = MasterVolumeMessage.encode(value, capabilities).orReturn { return it }
             writeFramed(encoded).orReturn { return it }
+            // The echo carries the NATIVE value that went on the wire, not the dB stored below --
+            // MasterVolumeMessage.encode clamps in dB and then converts, so mirror both steps.
+            recordExpectedEcho(
+                SingleParameterPayloadCodec.KIND_MASTER_VOLUME,
+                0,
+                MasterVolumeMessage.decibelsToNative(ParameterRegistry.clamp(id, value)),
+            )
             _parameterValues.update { it + (id to value) } // AFTER success only
             return TonexResult.Success(Unit)
         }
@@ -1567,3 +1715,18 @@ class DefaultTonexController(
      */
     suspend fun <T> withOperationLock(block: suspend () -> T): T = operationMutex.withLock { block() }
 }
+
+/**
+ * How many un-echoed writes to remember per `(kind, index)` key — see
+ * `DefaultTonexController.pendingEchoes`. A drag conflates to a handful of writes at most, so this
+ * is generous for the real case; its job is to bound the leak if some write path turns out not to
+ * be echoed at all.
+ */
+private const val MAX_PENDING_ECHOES_PER_KEY: Int = 8
+
+/**
+ * `"B9 04 02 00 6D 88 00 00 00 00"` — uppercase, space-separated, one byte per group. Used for
+ * [TonexEvent.UnroutableParameterNotification]'s raw payload, so an unroutable notification reaches
+ * a debug dump in a form the next hardware session can decode by hand (issue #104).
+ */
+private fun ByteArray.toSpacedHex(): String = joinToString(" ") { "%02X".format(it) }

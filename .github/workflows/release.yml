@@ -67,10 +67,27 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
 
+      - name: Generate changelog
+        id: changelog
+        run: |
+          CURRENT_TAG="${{ inputs.tag || github.ref_name }}"
+          PREV_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
+
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG="Initial release"
+          else
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --reverse --pretty=format:"- %s (%h)")
+          fi
+
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: app/build/outputs/apk/release/*.apk
+          body: ${{ steps.changelog.outputs.changelog }}
           # workflow_dispatch dry runs (no real tag push) publish as a draft so a scratch trigger
           # never creates a public release; a real `v*` tag push publishes normally.
           draft: ${{ github.event_name == 'workflow_dispatch' }}
