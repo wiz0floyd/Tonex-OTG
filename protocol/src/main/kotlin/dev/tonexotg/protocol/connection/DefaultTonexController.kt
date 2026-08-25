@@ -413,7 +413,7 @@ class DefaultTonexController(
      *
      * ## Routing
      * - **`index == 0` is master volume**, not `ParameterId(0)`. Upstream uses index 0 that way
-     *   specifically (`usb_tonex_one.c:856`, `if (param_index == 0x00)`), and the value arrives in
+     *   specifically (`usb_tonex_one.c:891`, `if (param_index == 0x00)`), and the value arrives in
      *   the pedal's native `0..10` range, so it is converted to the engineering `-40..3` dB the
      *   registry stores via [MasterVolumeMessage.nativeToDecibels] — reused, not reimplemented.
      * - **Any other valid index** ([ParameterId.PRESET_RANGE] / [ParameterId.GLOBAL_RANGE]) routes

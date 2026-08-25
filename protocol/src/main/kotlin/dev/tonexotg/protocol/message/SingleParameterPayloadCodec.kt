@@ -23,12 +23,12 @@ import dev.tonexotg.protocol.codec.VarintValue
  *   [SingleParameterPayloadCodec.KIND_MASTER_VOLUME] on messages this app itself constructs. On an
  *   inbound [dev.tonexotg.protocol.codec.MessageType.ParameterChanged] notification the pedal is
  *   **confirmed by hardware capture (#106) to send `0x02`** — [SingleParameterPayloadCodec.KIND_PARAMETER],
- *   not the `0x03` upstream's own `param_start_marker` (`usb_tonex_one.c:833`) searches for. This
+ *   not the `0x03` upstream's own `param_start_marker` (`usb_tonex_one.c:868`) searches for. This
  *   codec does not enforce any particular value here as a decode-time invariant: a future firmware
  *   sending something else is not this codec's business to reject.
  * @property index the wire-position parameter index this payload concerns, read from a single wire
  *   byte on both the read and the write side (see [SingleParameterPayloadCodec]'s "Index byte").
- *   `index == 0` means **master volume** specifically — upstream (`usb_tonex_one.c:856`,
+ *   `index == 0` means **master volume** specifically — upstream (`usb_tonex_one.c:891`,
  *   `if (param_index == 0x00)`) uses it that way, and master volume has no ordinary preset/global
  *   slot in this message's index space. Every other index lines up with
  *   [dev.tonexotg.protocol.ParameterId]'s own 0-108/110-116 numbering; #106 confirmed that
@@ -119,7 +119,7 @@ object SingleParameterPayloadCodec {
      * Decodes a [SingleParameterPayload] from [payload].
      *
      * Scans for the `B9 04` marker rather than assuming it starts at offset 0 — mirroring
-     * upstream's own `memmem`-based search (`usb_tonex_one.c:836`) rather than a fixed-offset read,
+     * upstream's own `memmem`-based search (`usb_tonex_one.c:871`) rather than a fixed-offset read,
      * since nothing in the reverse-engineered protocol rules out leading bytes before this shape in
      * some future context. This is the exact inverse of [encode] — see the class KDoc's
      * "Index byte" section.
