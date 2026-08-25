@@ -583,6 +583,70 @@ class PresetListViewModelTest {
         assertNull(viewModel.uiState.value.globalWriteError)
         viewModel.onGlobalParametersCleared()
     }
+
+    // --- sticky home-screen master-volume row (issue #107) ------------------------------------
+
+    @Test
+    fun `masterVolume is null while not connected, even if its value happens to be known`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Idle)
+        controller.seedParameterValue(ParameterCatalog.masterVolumeId, -8f)
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val state = awaitItem { true }
+            assertNull(state.masterVolume)
+        }
+    }
+
+    @Test
+    fun `masterVolume is null while live but its value is not yet known`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val state = awaitItem { it.isLive }
+            assertNull(
+                "masterVolume must be null until the pedal has actually reported it, not filled with a registry default",
+                state.masterVolume,
+            )
+        }
+    }
+
+    @Test
+    fun `masterVolume reflects the live decoded value once known and connected`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.seedParameterValue(ParameterCatalog.masterVolumeId, -8f)
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            val state = awaitItem { it.masterVolume != null }
+            assertEquals(-8f, requireNotNull(state.masterVolume).value)
+        }
+    }
+
+    @Test
+    fun `onMasterVolumeDrag writes on every tick, unlike the release-only home-screen globals`() = runTest {
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.seedParameterValue(ParameterCatalog.masterVolumeId, -8f)
+        val viewModel = newViewModel(controller)
+
+        viewModel.uiState.test {
+            awaitItem { it.masterVolume != null }
+
+            // MASTER_VOLUME writes through a dedicated wire message, not a full state-blob
+            // rewrite (see onMasterVolumeDrag's own kdoc) -- so unlike onGlobalRangeDrag, every
+            // drag tick writes immediately; there is no separate "changeFinished" call for this
+            // control.
+            viewModel.onMasterVolumeDrag(-5f)
+            val state = awaitItem { it.masterVolume?.value == -5f }
+            assertEquals(-5f, requireNotNull(state.masterVolume).value)
+        }
+        assertEquals(listOf(ParameterCatalog.masterVolumeId to -5f), controller.setParameterCalls)
+        viewModel.onGlobalParametersCleared()
+    }
 }
 
 /**
