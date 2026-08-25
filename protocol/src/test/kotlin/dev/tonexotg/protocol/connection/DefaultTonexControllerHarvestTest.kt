@@ -166,23 +166,8 @@ class DefaultTonexControllerHarvestTest {
         assertFalse(controller.parameterValues.value.containsKey(masterVolumeSpec.id))
     }
 
-    // ---- nonzero-index ParameterChanged is ignored (§6.4 restraint) ----------------------------
-
-    @Test
-    fun `a nonzero-index ParameterChanged notification is ignored, not applied to parameterValues`() = runTest {
-        val fake = FakeTonexTransport()
-        val controller = DefaultTonexController(scope = backgroundScope, capabilities = FirmwareCapabilities.NONE_CONFIRMED)
-
-        val connectDeferred = async { controller.connect(fake) }
-        driveHandshake(this, fake)
-        connectDeferred.await()
-
-        val before = controller.parameterValues.value
-        fake.emitMessage(parameterChanged(index = 3, value = 42f))
-        testScheduler.runCurrent()
-
-        assertEquals(before, controller.parameterValues.value, "a nonzero-index notification must not change parameterValues")
-    }
+    // (Nonzero-index ParameterChanged routing moved to DefaultTonexControllerParameterChangedTest
+    // when issue #104 replaced the old index == 0 restraint with generic routing.)
 
     // ---- shared handshake driver -----------------------------------------------------------
 

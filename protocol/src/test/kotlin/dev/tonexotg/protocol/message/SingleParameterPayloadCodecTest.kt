@@ -1,8 +1,8 @@
 package dev.tonexotg.protocol.message
 
+import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.TonexError
 import dev.tonexotg.protocol.TonexResult
-import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -108,37 +108,45 @@ class SingleParameterPayloadCodecTest {
         assertEquals(0x03, SingleParameterPayloadCodec.KIND_MASTER_VOLUME)
     }
 
-    // ---- decode: read-side byte layout, byte-exact against usb_tonex_one_parse_param_changed ------
+    // ---- decode: byte-exact against the #106 hardware capture ------------------------------------
 
     @Test
-    fun `decode reads kind index and value from a synthetic read-side fixture`() {
-        // Read-side layout per usb_tonex_one_parse_param_changed: marker B9 04 <kind=03>, then
-        // index low byte, index high byte, then the 0x88-prefixed float.
-        // index = 0x1234 (indexLo=0x34, indexHi=0x12), value = 1.0f (LE: 00 00 80 3F)
-        val fixture = hex("b9 04 03 34 12 88 00 00 80 3f")
+    fun `decode reads the literal MODEL_GAIN notification frame captured from real hardware`() {
+        // THE acceptance-criterion test for issue #104. This is a real inbound frame's payload,
+        // hand-decoded from the #106 debug dump of a physical MODEL_GAIN knob turn - a literal,
+        // NOT a round trip. A round-trip test passed against the old (wrong) 2-byte index read and
+        // is exactly what hid the bug; see CLAUDE.md, "Byte-exact / literal-exact acceptance
+        // criteria are gold".
+        //
+        //   b9 04 | 02       | 00      | 14        | 88 9a 99 59 40
+        //   marker  kind=0x02  padding   index=20    float32 LE = 3.4f
+        //                                (MODEL_GAIN)
+        val fixture = hex("b9 04 02 00 14 88 9a 99 59 40")
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
-        assertEquals(0x03, decoded.kind)
-        assertEquals(0x1234, decoded.index)
-        assertEquals(1.0f, decoded.value)
+        assertEquals(0x02, decoded.kind, "inbound kind is 0x02, not upstream's assumed 0x03")
+        assertEquals(20, decoded.index, "index is payload[4] alone; the old 2-byte read gave 5120")
+        assertEquals(3.4f, decoded.value, 1e-4f)
     }
 
     @Test
-    fun `decode treats the first index byte after kind as the low byte`() {
-        val fixture = hex("b9 04 03 01 00 88 00 00 00 00")
+    fun `decode reads the index from payload 4 alone`() {
+        val fixture = hex("b9 04 02 00 01 88 00 00 00 00")
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
         assertEquals(1, decoded.index)
     }
 
     @Test
-    fun `decode treats the second index byte after kind as the high byte`() {
-        val fixture = hex("b9 04 03 00 01 88 00 00 00 00")
+    fun `decode ignores payload 3 - it is padding, not an index byte`() {
+        // Upstream's own reader would have decoded this as 0x0100 = 256. #106 confirms payload[3]
+        // is always 0x00 padding on a real frame; a stray nonzero there must not shift the index.
+        val fixture = hex("b9 04 02 01 00 88 00 00 00 00")
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
-        assertEquals(256, decoded.index)
+        assertEquals(0, decoded.index)
     }
 
     @Test
     fun `decode finds the marker even when preceded by leading bytes`() {
-        val fixture = hex("aa bb cc b9 04 02 05 00 88 00 00 00 00")
+        val fixture = hex("aa bb cc b9 04 02 00 05 88 00 00 00 00")
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
         assertEquals(0x02, decoded.kind)
         assertEquals(5, decoded.index)
@@ -151,7 +159,7 @@ class SingleParameterPayloadCodecTest {
         // The first "b9 04" at offset 0 is not followed by a 0x88 marker at the shape's predicted
         // offset (it has "ff ff ff" instead) - a naive first-match scan would report MalformedFrame
         // even though a genuine, fully-valid occurrence follows starting at offset 5.
-        val fixture = hex("b9 04 ff ff ff b9 04 02 05 00 88 00 00 b0 40")
+        val fixture = hex("b9 04 ff ff ff b9 04 02 00 05 88 00 00 b0 40")
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(fixture))
         assertEquals(0x02, decoded.kind)
         assertEquals(5, decoded.index)
@@ -181,31 +189,28 @@ class SingleParameterPayloadCodecTest {
         assertIs<TonexError.MalformedFrame>(result.error)
     }
 
-    // ---- encode and decode are NOT inverses of each other for a nonzero index ---------------------
+    // ---- encode and decode ARE inverses of each other (issue #104) --------------------------------
 
-    @Disabled(
-        "Pins the CURRENT decode() behaviour for a nonzero index (index * 256), which is most " +
-            "likely reproducing a latent, never-actually-exercised upstream bug rather than " +
-            "confirmed intended behaviour - see SingleParameterPayloadCodec KDoc's 'Read side' and " +
-            "'S20 hardware probe' sections. Left active, this assertion would fail CI the moment " +
-            "the S20 hardware probe resolves the ambiguity and decode() is corrected to read the " +
-            "index from payload[4] alone. Do not re-enable without first re-deriving the expected " +
-            "value from the S20 probe's outcome.",
-    )
     @Test
-    fun `decoding a payload this app just encoded does not recover the same nonzero index`() {
-        // This pins down a real, independently-confirmed asymmetry between the write-side
-        // (payload[4] = index) and read-side (index = lowByte | highByte << 8) upstream sources -
-        // see SingleParameterPayloadCodec class KDoc. Decoding what encode() just wrote for a
-        // nonzero index recovers index * 256, not index - that is expected, not a bug.
-        val encoded = SingleParameterPayloadCodec.encode(kind = 0x02, index = 5, value = 1.0f)
+    fun `decoding a payload this app just encoded recovers the same nonzero index`() {
+        val encoded = SingleParameterPayloadCodec.encode(kind = 0x02, index = 20, value = 3.4f)
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(encoded))
-        assertEquals(5 * 256, decoded.index)
-        assertTrue(decoded.index != 5)
+        assertEquals(0x02, decoded.kind)
+        assertEquals(20, decoded.index)
+        assertEquals(3.4f, decoded.value, 1e-4f)
     }
 
     @Test
-    fun `encode and decode agree for index 0 - the only value where the asymmetry is invisible`() {
+    fun `encode and decode round-trip every valid parameter index`() {
+        for (index in ParameterId.PRESET_RANGE + ParameterId.GLOBAL_RANGE) {
+            val encoded = SingleParameterPayloadCodec.encode(kind = 0x02, index = index, value = 1.0f)
+            val decoded = assertSuccess(SingleParameterPayloadCodec.decode(encoded))
+            assertEquals(index, decoded.index, "index=$index must round-trip")
+        }
+    }
+
+    @Test
+    fun `encode and decode agree for index 0 - master volume`() {
         val encoded = SingleParameterPayloadCodec.encode(kind = 0x03, index = 0, value = 2.5f)
         val decoded = assertSuccess(SingleParameterPayloadCodec.decode(encoded))
         assertEquals(0, decoded.index)
