@@ -500,7 +500,7 @@ private fun buildRow(id: ParameterId, rawValue: Float, effectiveBounds: Effectiv
 
         ParameterType.SWITCH -> ParameterRow.Switch(
             id = id,
-            label = friendlyLabel(spec.enumName),
+            label = ParameterCatalog.switchLabelOverride(id) ?: friendlyLabel(spec.enumName),
             abbreviation = abbreviationFor(spec, id),
             checked = (rawValue >= 0.5f) != ParameterCatalog.isBypassSemantic(id),
         )

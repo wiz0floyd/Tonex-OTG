@@ -778,9 +778,9 @@ private val previewGlobalParameters = GlobalParametersUiState(
     bpm = ParameterRow.Range(ParameterId(110), "BPM", "BPM · index 110", 120f, 40f..300f, "120", 0, ""),
     inputTrim = ParameterRow.Range(ParameterId(111), "Input Trim", "INPUT_TRIM · index 111", -2f, -20f..20f, "-2 dB", 1, "dB"),
     tuningReference = ParameterRow.Range(ParameterId(114), "Tuning Reference", "TUNING_REFERENCE · index 114", 440f, 400f..480f, "440 Hz", 0, "Hz"),
-    cabSimBypass = ParameterRow.Switch(ParameterId(112), "Cab Sim Bypass", "CABSIM_BYPASS · index 112", checked = true),
+    cabSimBypass = ParameterRow.Switch(ParameterId(112), "Cab Sim", "CABSIM_BYPASS · index 112", checked = true),
     tempoSource = ParameterRow.Switch(ParameterId(113), "Tempo Source", "GLOBAL", checked = false),
-    bypass = ParameterRow.Switch(ParameterId(115), "Bypass", "BYPASS · index 115", checked = false),
+    bypass = ParameterRow.Switch(ParameterId(115), "Engaged", "BYPASS · index 115", checked = false),
 )
 
 private val previewGlobalsTrayState = previewLiveState.copy(

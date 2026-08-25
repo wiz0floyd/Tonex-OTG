@@ -198,4 +198,17 @@ object ParameterCatalog {
      */
     fun isBypassSemantic(id: ParameterId): Boolean =
         ParameterRegistry.byIndex(id.index)?.enumName?.endsWith("BYPASS") == true
+
+    /**
+     * A friendlier label for a bypass-semantics switch ([isBypassSemantic]) than its raw
+     * `enumName` would produce. `"Cab Sim Bypass"`/`"Bypass"` read backwards once the switch is
+     * on-means-active (see [isBypassSemantic]'s kdoc): "Cab Sim Bypass: on" sounds like cab sim
+     * *is* bypassed, when it now means the opposite. `null` for every other switch — callers fall
+     * back to the registry-derived label unchanged.
+     */
+    fun switchLabelOverride(id: ParameterId): String? = when (id) {
+        cabSimBypassId -> "Cab Sim"
+        bypassId -> "Engaged"
+        else -> null
+    }
 }
