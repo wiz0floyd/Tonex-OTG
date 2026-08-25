@@ -39,8 +39,12 @@ android {
         // blocks forever and cannot be interrupted (AOSP issue 39522). Do not lower this.
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.9.2"
+        // `-PversionCodeOverride=<int>`/`-PversionNameOverride=<string>` let CI stamp a nightly
+        // build (nightly.yml) with its own monotonically-increasing versionCode without touching
+        // this file on every push to main — the tagged-release versionCode/versionName above stay
+        // the manual, deliberate values every local build and release.yml use unchanged.
+        versionCode = (project.findProperty("versionCodeOverride") as String?)?.toInt() ?: 6
+        versionName = project.findProperty("versionNameOverride") as String? ?: "0.9.2"
     }
 
     buildFeatures {
