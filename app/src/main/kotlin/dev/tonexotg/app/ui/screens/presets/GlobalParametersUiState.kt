@@ -42,9 +42,10 @@ internal fun buildGlobalParametersUiState(value: (ParameterId) -> Float?): Globa
             values.getValue(ParameterCatalog.tuningReferenceId),
             labelOverride = "Tuning Reference",
         ),
-        cabSimBypass = switchRow(ParameterCatalog.cabSimBypassId, values.getValue(ParameterCatalog.cabSimBypassId), label = "Cab Sim Bypass"),
+        // Labels read "active" now, not "bypassed" -- see ParameterCatalog.switchLabelOverride's kdoc.
+        cabSimBypass = switchRow(ParameterCatalog.cabSimBypassId, values.getValue(ParameterCatalog.cabSimBypassId), label = "Cab Sim"),
         tempoSource = tempoSourceRow(values.getValue(ParameterCatalog.tempoSourceId)),
-        bypass = switchRow(ParameterCatalog.bypassId, values.getValue(ParameterCatalog.bypassId), label = "Bypass"),
+        bypass = switchRow(ParameterCatalog.bypassId, values.getValue(ParameterCatalog.bypassId), label = "Engaged"),
     )
 }
 

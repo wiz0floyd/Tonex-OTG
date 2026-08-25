@@ -124,9 +124,9 @@ class PresetListGlobalsTrayTest {
         composeTestRule.onNodeWithContentDescription("BPM, 120 BPM", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Input Trim, -2 dB", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tuning Reference, 440 Hz", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Cab Sim Bypass, off", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Cab Sim, off", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tempo Source, GLOBAL", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Bypass, on", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Engaged, on", useUnmergedTree = true).assertIsDisplayed()
     }
 
     // ---- The header is one merged tap target, not six separately-focusable chips -----------------
@@ -149,9 +149,9 @@ class PresetListGlobalsTrayTest {
             "BPM, 120 BPM",
             "Input Trim, -2 dB",
             "Tuning Reference, 440 Hz",
-            "Cab Sim Bypass, off",
+            "Cab Sim, off",
             "Tempo Source, GLOBAL",
-            "Bypass, on",
+            "Engaged, on",
         )
         val resolvedTestTags = descriptions.map { description ->
             composeTestRule.onNodeWithContentDescription(description).fetchSemanticsNode()
@@ -189,9 +189,9 @@ class PresetListGlobalsTrayTest {
         composeTestRule.onNodeWithContentDescription("BPM, 120 BPM", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Input Trim, -2 dB", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tuning Reference, 440 Hz", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Cab Sim Bypass, off", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Cab Sim, off", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tempo Source, GLOBAL", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Bypass, on", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Engaged, on", useUnmergedTree = true).assertIsDisplayed()
 
         val headerNode = composeTestRule.onNodeWithTag("globalParameters.header").fetchSemanticsNode()
         val widthPx = headerNode.size.width
