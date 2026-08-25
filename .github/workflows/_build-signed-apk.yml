@@ -1,0 +1,84 @@
+name: Build signed APK (reusable)
+
+# Shared by nightly.yml and release.yml so the build/sign/verify steps live in exactly one
+# place. Callers compute their own version-code/version-name (see each workflow for its
+# scheme) and pass them in here; this workflow only builds, signs, and verifies.
+on:
+  workflow_call:
+    inputs:
+      version-code:
+        required: true
+        type: string
+      version-name:
+        required: true
+        type: string
+    secrets:
+      RELEASE_KEYSTORE_BASE64:
+        required: true
+      RELEASE_KEYSTORE_PASSWORD:
+        required: true
+      RELEASE_KEY_ALIAS:
+        required: true
+      RELEASE_KEY_PASSWORD:
+        required: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # 21, not 17 — see app/build.gradle.kts jvmToolchain(21)
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: chmod +x gradlew
+
+      # Required repo secrets: RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD,
+      # RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD. The keystore itself lives only as a base64
+      # secret and a runner-local temp file — never committed, never logged.
+      - name: Decode release keystore
+        run: |
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed APK
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleRelease --stacktrace \
+            -PversionCodeOverride=${{ inputs.version-code }} \
+            -PversionNameOverride=${{ inputs.version-name }}
+
+      # Guards against a signingConfig regression silently shipping an unsigned "release" APK
+      # (see app/build.gradle.kts's fail-fast check for the build-config half of this guard).
+      #
+      # GitHub's ubuntu-latest runners ship multiple build-tools versions side by side, so a
+      # bare glob (build-tools/*/apksigner) expands to more than one path on one command line —
+      # the second path lands where "verify" belongs and apksigner reports "Unsupported
+      # command: <path>" instead of verifying anything. `sort -V | tail -n1` picks exactly one,
+      # the highest installed version.
+      - name: Verify APK is signed
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1)/apksigner"
+          echo "Verifying: $APK (with $APKSIGNER)"
+          "$APKSIGNER" verify --verbose "$APK"
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 1

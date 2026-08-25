@@ -15,69 +15,67 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: release
+  version:
+    name: version
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    outputs:
+      code: ${{ steps.version.outputs.code }}
+      name: ${{ steps.version.outputs.name }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-          fetch-depth: 0
+          fetch-depth: 0   # need full history to count commits and diff previous tags
 
-      - uses: actions/setup-java@v4
+      # versionCode is the total commit count up to this tag -- the same counter nightly.yml
+      # uses -- so a tagged release and a nightly built off the same or a later commit share one
+      # strictly-increasing number, and either can always install over the other. versionName is
+      # the tag itself (leading "v" stripped, matching this project's existing 0.9.1-style
+      # versionName convention).
+      - name: Compute release version
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "code=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          echo "name=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: version
+    uses: ./.github/workflows/_build-signed-apk.yml
+    with:
+      version-code: ${{ needs.version.outputs.code }}
+      version-name: ${{ needs.version.outputs.name }}
+    secrets: inherit
+
+  publish:
+    name: publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
         with:
-          distribution: temurin
-          java-version: '21'   # 21, not 17 — see app/build.gradle.kts jvmToolchain(21)
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0   # need full tag history for the changelog diff below
 
-      - uses: gradle/actions/setup-gradle@v4
-
-      - run: chmod +x gradlew
-
-      # Required repo secrets: RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD,
-      # RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD. The keystore itself lives only as a base64
-      # secret and a runner-local temp file — never committed, never logged.
-      - name: Decode release keystore
-        run: |
-          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
-
-      - name: Build signed release APK
-        env:
-          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
-          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: ./gradlew :app:assembleRelease --stacktrace
-
-      # Guards against a signingConfig regression silently shipping an unsigned "release" APK
-      # (see app/build.gradle.kts's fail-fast check for the build-config half of this guard).
-      #
-      # GitHub's ubuntu-latest runners ship multiple build-tools versions side by side, so a
-      # bare glob (build-tools/*/apksigner) expands to more than one path on one command line —
-      # the second path lands where "verify" belongs and apksigner reports "Unsupported
-      # command: <path>" instead of verifying anything. `sort -V | tail -n1` picks exactly one,
-      # the highest installed version.
-      - name: Verify APK is signed
-        run: |
-          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1)/apksigner"
-          echo "Verifying: $APK (with $APKSIGNER)"
-          "$APKSIGNER" verify --verbose "$APK"
-
-      - name: Clean up keystore
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-apk
 
       - name: Generate changelog
         id: changelog
         run: |
-          CURRENT_TAG="${{ inputs.tag || github.ref_name }}"
+          CURRENT_TAG="${{ needs.version.outputs.tag }}"
           PREV_TAG=$(git tag -l 'v*' --sort=-version:refname | grep -v "^${CURRENT_TAG}$" | head -1)
 
           if [ -z "$PREV_TAG" ]; then
             CHANGELOG="Initial release"
           else
-            CHANGELOG=$(git log ${PREV_TAG}..HEAD --reverse --pretty=format:"- %s (%h)")
+            CHANGELOG=$(git log ${PREV_TAG}..${CURRENT_TAG} --reverse --pretty=format:"- %s (%h)")
           fi
 
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
@@ -86,8 +84,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: app/build/outputs/apk/release/*.apk
+          tag_name: ${{ needs.version.outputs.tag }}
+          files: '*.apk'
           body: ${{ steps.changelog.outputs.changelog }}
           # workflow_dispatch dry runs (no real tag push) publish as a draft so a scratch trigger
           # never creates a public release; a real `v*` tag push publishes normally.
