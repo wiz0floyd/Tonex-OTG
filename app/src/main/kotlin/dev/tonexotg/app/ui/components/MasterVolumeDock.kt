@@ -18,11 +18,19 @@ import dev.tonexotg.app.ui.theme.TonexTheme
  *
  * D1 §2.1 `surface.raised-1` (top app bar / bottom bar token) — global scope reads as chrome, not
  * as belonging to whichever preset is open (D3 §1.1).
+ *
+ * [onValueChangeFinished] is optional because the two mount points need it for different reasons:
+ * the Parameter Editor screen's mount wires it to `ParameterEditorViewModel.onRangeDragEnd`, which
+ * closes issue #104's per-gesture inbound-suppression window (`_draggingIds`) — every `ParameterControl`
+ * range drag on that screen needs that call on release regardless of write cadence. The home-screen
+ * mount (issue #107) omits it: `PresetListViewModel.onMasterVolumeDrag` writes on every tick with no
+ * separate release step, and that screen has no equivalent suppression window to close.
  */
 @Composable
 fun MasterVolumeDock(
     row: ParameterRow.Range,
     onValueChange: (Float) -> Unit,
+    onValueChangeFinished: (() -> Unit)? = null,
     onValueTextClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -33,6 +41,7 @@ fun MasterVolumeDock(
             valueRange = row.range,
             valueText = row.valueText,
             onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
             abbreviation = row.abbreviation,
             onValueTextClick = onValueTextClick,
             modifier = Modifier
