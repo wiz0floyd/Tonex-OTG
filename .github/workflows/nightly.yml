@@ -1,0 +1,101 @@
+name: Nightly
+
+# Signed dev builds off every push to main, so `git pull && install` never needs an
+# uninstall/reinstall between them (Android refuses to install a lower versionCode over an
+# existing app with the same applicationId + signature, and a debug-keystore build isn't
+# guaranteed to share a signature across machines/CI runs the way this does). Reuses the same
+# RELEASE_KEYSTORE_* secrets release.yml uses (see #67) rather than a second keystore, so a
+# nightly install can also upgrade in place to (or from) a real tagged release — one signature
+# for both channels, by design.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# A rapid string of pushes to main only needs the latest nightly built -- cancel any run this
+# push supersedes rather than queueing every one.
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  nightly:
+    name: nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # 21, not 17 — see app/build.gradle.kts jvmToolchain(21)
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: chmod +x gradlew
+
+      - name: Compute nightly version
+        id: version
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          # 900000000 is comfortably above any versionCode this project's manual tagged releases
+          # will reach for the foreseeable future (see app/build.gradle.kts's own versionCode),
+          # and run_number only ever increases -- together that keeps every nightly's versionCode
+          # both distinct from, and always newer than, whatever tagged release is on the same
+          # device, so installing a new nightly (or a real release, later) never needs a manual
+          # uninstall first.
+          echo "code=$((900000000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          echo "name=0.0.0-nightly.${GITHUB_RUN_NUMBER}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+
+      # Required repo secrets: RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD,
+      # RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD — same ones release.yml decodes; the keystore
+      # itself lives only as a base64 secret and a runner-local temp file, never committed.
+      - name: Decode release keystore
+        run: |
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed nightly APK
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleRelease --stacktrace \
+            -PversionCodeOverride=${{ steps.version.outputs.code }} \
+            -PversionNameOverride=${{ steps.version.outputs.name }}
+
+      # Same guard as release.yml — see that file's own comment for why this exists and the
+      # `sort -V | tail -n1` apksigner-path detail.
+      - name: Verify APK is signed
+        run: |
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1)/apksigner"
+          echo "Verifying: $APK (with $APKSIGNER)"
+          "$APKSIGNER" verify --verbose "$APK"
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      # A single moving "nightly" tag/release, updated in place on every push -- not one release
+      # per commit. softprops/action-gh-release updates the existing release's assets/notes when
+      # tag_name already exists rather than failing, so this never accumulates old nightly APKs.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Nightly (${{ steps.version.outputs.name }})"
+          body: |
+            Automatic dev build off `main` @ ${{ github.sha }}. Not a tagged release — see
+            [Releases](../../releases) for those. Signed with the same key, so installing this
+            over a tagged release (or vice versa) never requires uninstalling first.
+          files: app/build/outputs/apk/release/*.apk
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
