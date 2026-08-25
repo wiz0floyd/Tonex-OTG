@@ -164,6 +164,31 @@ class PresetListViewModelTest {
         }
     }
 
+    @Test
+    fun `dismissSelectError clears a stuck selectPresetError without a retry`() = runTest {
+        // Issue #93: previously the only way to clear this was a subsequent *successful*
+        // selectPreset -- a single failure left the panel permanently stuck.
+        val controller = FakeTonexController(initialState = ConnectionState.Ready)
+        controller.setPresets(fakePresetInfoList())
+        controller.nextSelectPresetResult = TonexResult.Failure(
+            TonexError.ProtocolStateViolation(state = ConnectionState.Connecting, details = "not ready"),
+        )
+        val viewModel = newViewModel(controller)
+
+        viewModel.selectPreset(PresetIndex(2))
+
+        viewModel.uiState.test {
+            awaitItem { it.selectPresetError != null }
+
+            viewModel.dismissSelectError()
+
+            val cleared = awaitItem { it.selectPresetError == null }
+            assertEquals(null, cleared.selectPresetError)
+        }
+        // Dismissing does not retry the write -- still exactly the one original call.
+        assertEquals(listOf(PresetIndex(2)), controller.selectPresetCalls)
+    }
+
     // --- FR6: footswitch-initiated external changes update the list with no local call ----
 
     @Test

@@ -86,6 +86,7 @@ fun ConnectionErrorPanel(
     presentation: ErrorPresentation,
     onReconnect: () -> Unit,
     modifier: Modifier = Modifier,
+    onDismiss: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -112,12 +113,28 @@ fun ConnectionErrorPanel(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (presentation.recommendReconnect) {
-            TextButton(
-                onClick = onReconnect,
-                modifier = Modifier.minTouchTarget(TonexTheme.touchTargets.secondary),
-            ) {
-                Text("Reconnect")
+        if (presentation.recommendReconnect || onDismiss != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space2)) {
+                if (presentation.recommendReconnect) {
+                    TextButton(
+                        onClick = onReconnect,
+                        modifier = Modifier.minTouchTarget(TonexTheme.touchTargets.secondary),
+                    ) {
+                        Text("Reconnect")
+                    }
+                }
+                // issue #93: without this, a failed write leaves this panel permanently stuck —
+                // it previously only cleared on a subsequent *successful* call of the same kind,
+                // and recommendReconnect is false for most write failures (they aren't connection
+                // errors), so there was often no button here at all.
+                if (onDismiss != null) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.minTouchTarget(TonexTheme.touchTargets.secondary),
+                    ) {
+                        Text("Dismiss")
+                    }
+                }
             }
         }
     }

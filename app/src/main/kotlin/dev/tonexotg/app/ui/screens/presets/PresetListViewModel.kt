@@ -360,6 +360,27 @@ class PresetListViewModel(
     fun onGlobalParametersCleared() {
         globalWriteThrottler.cancelAll()
     }
+
+    // ---- error dismissal (issue #93) -------------------------------------------------------------
+    // Each of the three write-error slots above only clears itself on a subsequent *successful*
+    // call of the same kind, which left the panel permanently stuck after a single failure with no
+    // way to get it off the screen. These give the panel's "Dismiss" button somewhere real to go,
+    // independent of ever retrying the action that failed.
+
+    /** Clears [lastSelectError], dismissing [PresetListUiState.selectPresetError]'s panel. */
+    fun dismissSelectError() {
+        lastSelectError.value = null
+    }
+
+    /** Clears [lastAssignError], dismissing [PresetListUiState.assignSlotError]'s panel. */
+    fun dismissAssignError() {
+        lastAssignError.value = null
+    }
+
+    /** Clears [lastGlobalWriteError], dismissing [PresetListUiState.globalWriteError]'s panel. */
+    fun dismissGlobalWriteError() {
+        lastGlobalWriteError.value = null
+    }
 }
 
 /**
