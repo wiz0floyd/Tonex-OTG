@@ -97,6 +97,9 @@ fun PresetListScreen(
         onGlobalRangeChangeFinished = viewModel::onGlobalRangeChangeFinished,
         onGlobalSwitchToggle = viewModel::onGlobalSwitchToggle,
         onMasterVolumeChange = viewModel::onMasterVolumeDrag,
+        onDismissSelectError = viewModel::dismissSelectError,
+        onDismissAssignError = viewModel::dismissAssignError,
+        onDismissGlobalWriteError = viewModel::dismissGlobalWriteError,
         modifier = modifier,
     )
 
@@ -148,6 +151,9 @@ fun PresetListContent(
     onGlobalRangeChangeFinished: (ParameterId) -> Unit = {},
     onGlobalSwitchToggle: (ParameterId, Boolean) -> Unit = { _, _ -> },
     onMasterVolumeChange: (Float) -> Unit = {},
+    onDismissSelectError: () -> Unit = {},
+    onDismissAssignError: () -> Unit = {},
+    onDismissGlobalWriteError: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // #107: default collapsed, survives rotation/process death. Hoisted here (rather than inside
@@ -178,6 +184,7 @@ fun PresetListContent(
             ConnectionErrorPanel(
                 presentation = errorPresentation,
                 onReconnect = {},
+                onDismiss = onDismissSelectError,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(TonexTheme.spacing.space2),
@@ -189,6 +196,7 @@ fun PresetListContent(
             ConnectionErrorPanel(
                 presentation = assignErrorPresentation,
                 onReconnect = {},
+                onDismiss = onDismissAssignError,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(TonexTheme.spacing.space2),
@@ -200,6 +208,7 @@ fun PresetListContent(
             ConnectionErrorPanel(
                 presentation = globalWriteErrorPresentation,
                 onReconnect = {},
+                onDismiss = onDismissGlobalWriteError,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(TonexTheme.spacing.space2)
