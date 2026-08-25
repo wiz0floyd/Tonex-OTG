@@ -13,8 +13,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -308,6 +311,13 @@ private fun GlobalParametersSection(
             AnimatedVisibility(visible = expanded, enter = expandVertically(), exit = shrinkVertically()) {
                 Column(
                     modifier = Modifier
+                        // #116: this tray sits above the LazyColumn, outside its scrolling items
+                        // (see the #107 comment on PresetListContent), so on a real device short
+                        // enough that all 6 rows don't fit, the body has no scroll of its own and
+                        // both it and the preset list below it become unreachable. Bound the height
+                        // and let this section scroll independently instead.
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState())
                         .padding(TonexTheme.spacing.space3)
                         .testTag("globalParameters.body"),
                     verticalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space2),

@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import dev.tonexotg.app.data.alias.DataStorePresetAliasStore
 import dev.tonexotg.app.data.alias.InMemoryPreferencesDataStore
@@ -30,11 +31,11 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 // Robolectric's default test window (320x470dp) is too short to fit the sticky master-volume
-// row + the tray's header + all 6 expanded controls without the last one being squeezed to zero
-// height in this non-scrolling Column -- a Robolectric-viewport artifact, not a real-device
-// layout bug (h1400dp is generously larger than any real phone purely so every expanded control
-// has room to measure and assert on; it's not claiming phones are this tall). w360dp is also the
-// exact width the 360dp-fit test below needs to pin.
+// row + the tray's header + all 6 expanded controls above the fold. h1400dp is generously larger
+// than any real phone so every expanded control has room to measure and assert on without a
+// scroll being strictly required to find it in the tree -- it's not claiming phones are this
+// tall, and the expanded body itself is bounded/scrollable regardless of viewport height (#116).
+// w360dp is also the exact width the 360dp-fit test below needs to pin.
 @Config(sdk = [34], qualifiers = "w360dp-h1400dp")
 class PresetListGlobalsTrayTest {
 
@@ -92,7 +93,12 @@ class PresetListGlobalsTrayTest {
 
         composeTestRule.onNodeWithTag("globalParameters.body").assertIsDisplayed()
         composeTestRule.onNodeWithTag("globalParameters.range.${ParameterCatalog.bpmId.index}").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("globalParameters.switch.${ParameterCatalog.bypassId.index}").assertIsDisplayed()
+        // #116: the body now scrolls internally (bounded height) rather than overflowing off
+        // screen, so the last of the 6 rows needs an explicit scroll to come into view -- exactly
+        // the behavior this fix adds.
+        composeTestRule.onNodeWithTag("globalParameters.switch.${ParameterCatalog.bypassId.index}")
+            .performScrollTo()
+            .assertIsDisplayed()
 
         // Tapping again collapses it back -- same one merged target does both directions.
         composeTestRule.onNodeWithTag("globalParameters.header").performClick()
