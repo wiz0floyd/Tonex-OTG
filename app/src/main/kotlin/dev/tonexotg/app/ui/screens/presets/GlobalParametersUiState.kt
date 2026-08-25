@@ -54,7 +54,7 @@ private fun switchRow(id: ParameterId, rawValue: Float, label: String): Paramete
         id = id,
         label = label,
         abbreviation = abbreviationFor(spec, id),
-        checked = rawValue >= 0.5f,
+        checked = (rawValue >= 0.5f) != ParameterCatalog.isBypassSemantic(id),
     )
 }
 

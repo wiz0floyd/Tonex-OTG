@@ -528,10 +528,12 @@ class ParameterEditorViewModelTest {
         runCurrent()
 
         val cabsimBypass = ParameterId(112) // CABSIM_BYPASS - GLOBAL scope, :protocol write path since PR #100
+        // Bypass-semantics switch: checked=true means "active" on screen, which is raw 0f on the
+        // wire (1f is bypassed) -- see ParameterCatalog.isBypassSemantic.
         vm.onSwitchToggle(cabsimBypass, true)
         runCurrent()
 
-        assertEquals(listOf(cabsimBypass to 1f), controller.setParameterCalls)
+        assertEquals(listOf(cabsimBypass to 0f), controller.setParameterCalls)
         assertNull(vm.uiState.value.writeError)
         vm.onCleared()
     }

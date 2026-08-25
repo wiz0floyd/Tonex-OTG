@@ -181,4 +181,21 @@ object ParameterCatalog {
     val tempoSourceId: ParameterId get() = homeScreenGlobalIds[3]
     val tuningReferenceId: ParameterId get() = homeScreenGlobalIds[4]
     val bypassId: ParameterId get() = homeScreenGlobalIds[5]
+
+    /**
+     * True for a `SWITCH` whose raw wire value is *bypass* semantics (`1` = disabled/bypassed,
+     * `0` = active) rather than *enable* semantics (`1` = active). `CABSIM_BYPASS`/`BYPASS` are the
+     * only two registry entries named this way today, but this checks [ParameterRegistry]'s
+     * `enumName` rather than hardcoding those two ids, so any future `*_BYPASS` switch is covered
+     * automatically. Every other SWITCH in the registry (`*_ENABLE`, `*_POST`) is already
+     * on-means-active and must not be inverted.
+     *
+     * The UI is the only place this polarity flip belongs: the wire format's `1 = bypassed` is a
+     * pedal-firmware fact, not a UI choice, so [dev.tonexotg.protocol.state.StateBlobPatcher] and
+     * [dev.tonexotg.protocol.state.StateBlobReader] keep reading/writing that raw value unchanged.
+     * Only the on-screen switch (checked state) and its write path invert around it, so "on" always
+     * means "active" no matter which side of the polarity the underlying byte uses.
+     */
+    fun isBypassSemantic(id: ParameterId): Boolean =
+        ParameterRegistry.byIndex(id.index)?.enumName?.endsWith("BYPASS") == true
 }
