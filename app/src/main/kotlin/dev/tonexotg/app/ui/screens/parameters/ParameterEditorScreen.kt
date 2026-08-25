@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -26,7 +27,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -356,16 +359,17 @@ private fun ParameterRowView(
 }
 
 @Composable
-private fun FirstDestructiveWriteNotice(presetName: String, onDismiss: () -> Unit) {
+private fun FirstDestructiveWriteNotice(presetName: String, onDismiss: (dontShowAgain: Boolean) -> Unit) {
     // D3 §5.2: a single "Got it" button, no Cancel — dismissing the dialog *is* proceeding,
     // because the write it describes has already happened. Structurally different from
     // DestructiveActionConfirmationDialog (two buttons, inverted hierarchy, gates an action that
     // has not happened yet), so this is its own small dialog rather than a forced reuse.
+    var dontShowAgain by remember { mutableStateOf(false) }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { onDismiss(dontShowAgain) },
         confirmButton = {
             TextButton(
-                onClick = onDismiss,
+                onClick = { onDismiss(dontShowAgain) },
                 modifier = Modifier
                     .minTouchTarget(TonexTheme.touchTargets.secondary)
                     .testTag("firstWriteNotice.gotIt"),
@@ -375,11 +379,24 @@ private fun FirstDestructiveWriteNotice(presetName: String, onDismiss: () -> Uni
         },
         title = { Text("Heads up") },
         text = {
-            Text(
-                "Tonex-OTG writes every change straight to the pedal as you make it. There's no undo " +
-                    "on the pedal itself. A snapshot of $presetName was taken the moment it became " +
-                    "active. You can revert to it any time from Settings — until then, experiment freely.",
-            )
+            Column {
+                Text(
+                    "Tonex-OTG writes every change straight to the pedal as you make it. There's no undo " +
+                        "on the pedal itself. A snapshot of $presetName was taken the moment it became " +
+                        "active. You can revert to it any time from Settings — until then, experiment freely.",
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .minTouchTarget(TonexTheme.touchTargets.secondary)
+                        .clickable { dontShowAgain = !dontShowAgain }
+                        .testTag("firstWriteNotice.dontShowAgain"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = dontShowAgain, onCheckedChange = { dontShowAgain = it })
+                    Text("Don't show again")
+                }
+            }
         },
     )
 }

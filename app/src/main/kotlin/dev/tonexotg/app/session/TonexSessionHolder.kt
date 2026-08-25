@@ -10,6 +10,10 @@ import dev.tonexotg.app.data.alias.PresetAliasStore
 import dev.tonexotg.app.data.alias.presetAliasDataStore
 import dev.tonexotg.app.data.params.WidenedParameterBoundsStore
 import dev.tonexotg.app.data.params.parameterBoundsDataStore
+import dev.tonexotg.app.data.prefs.DataStoreUiPreferencesStore
+import dev.tonexotg.app.data.prefs.InMemoryUiPreferencesStore
+import dev.tonexotg.app.data.prefs.UiPreferencesStore
+import dev.tonexotg.app.data.prefs.uiPreferencesDataStore
 import dev.tonexotg.app.usb.connection.UsbConnectionManager
 import dev.tonexotg.app.usb.connection.UsbConnectionService
 import dev.tonexotg.app.usb.connection.UsbConnectionState
@@ -152,6 +156,14 @@ class TonexSessionHolder internal constructor(
      * supplies a real, DataStore-seeded [SelfWideningParameterBounds] in production.
      */
     val effectiveBounds: EffectiveParameterBounds = EffectiveParameterBounds.STATIC,
+    /**
+     * The "Don't show again" persistence [ParameterEditorViewModel] needs for the
+     * first-destructive-write notice. Defaults to [InMemoryUiPreferencesStore] for the same reason
+     * [effectiveBounds] defaults to [EffectiveParameterBounds.STATIC] above -- existing
+     * `internal constructor` test call sites keep compiling unchanged; [build] supplies a real
+     * DataStore-backed instance in production.
+     */
+    val uiPreferences: UiPreferencesStore = InMemoryUiPreferencesStore(),
     /**
      * Tears down [UsbConnectionManager]'s own state (production:
      * [UsbConnectionManager.disconnect]) -- see class KDoc, "Recovering from a controller-side
@@ -374,6 +386,7 @@ class TonexSessionHolder internal constructor(
                 aliasStore = DataStorePresetAliasStore(appContext.presetAliasDataStore),
                 scope = scope,
                 effectiveBounds = effectiveBounds,
+                uiPreferences = DataStoreUiPreferencesStore(appContext.uiPreferencesDataStore),
                 disconnectUsb = usbConnectionManager::disconnect,
             )
         }

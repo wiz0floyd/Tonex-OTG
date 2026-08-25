@@ -484,10 +484,12 @@ class PresetListViewModelTest {
             assertEquals(120f, globals.bpm.value)
             assertEquals(-3f, globals.inputTrim.value)
             assertEquals(440f, globals.tuningReference.value)
-            assertFalse(globals.cabSimBypass.checked)
+            // Both are bypass-semantics (ParameterCatalog.isBypassSemantic): a seeded raw 0f means
+            // "not bypassed," which is on-screen checked=true.
+            assertTrue(globals.cabSimBypass.checked)
             assertFalse(globals.tempoSource.checked)
             assertEquals("GLOBAL", globals.tempoSource.abbreviation)
-            assertFalse(globals.bypass.checked)
+            assertTrue(globals.bypass.checked)
         }
     }
 
@@ -584,8 +586,9 @@ class PresetListViewModelTest {
             val state = awaitItem { it.globalWriteError != null }
             assertEquals(expected, state.globalWriteError)
             assertNotNull(state.globalWriteErrorPresentation)
-            // the optimistic override is dropped, so the control falls back to the real value
-            assertFalse(requireNotNull(state.globalParameters).bypass.checked)
+            // the optimistic override is dropped, so the control falls back to the real (seeded
+            // raw 0f) value -- bypass-semantics, so that decodes as checked=true (not bypassed).
+            assertTrue(requireNotNull(state.globalParameters).bypass.checked)
         }
         viewModel.onGlobalParametersCleared()
     }
@@ -600,9 +603,12 @@ class PresetListViewModelTest {
         viewModel.uiState.test {
             awaitItem { it.globalParameters != null }
 
-            viewModel.onGlobalSwitchToggle(ParameterCatalog.bypassId, true)
-            val state = awaitItem { it.globalParameters?.bypass?.checked == true }
-            assertTrue(requireNotNull(state.globalParameters).bypass.checked)
+            // seedAllSixGlobals seeds bypassId's raw value at 0f -- bypass-semantics
+            // (ParameterCatalog.isBypassSemantic), so that's already checked=true (active).
+            // Toggle to false (raw 1f, bypassed) to produce an observable state change.
+            viewModel.onGlobalSwitchToggle(ParameterCatalog.bypassId, false)
+            val state = awaitItem { it.globalParameters?.bypass?.checked == false }
+            assertFalse(requireNotNull(state.globalParameters).bypass.checked)
         }
         assertEquals(listOf(ParameterCatalog.bypassId to 1f), controller.setParameterCalls)
         assertNull(viewModel.uiState.value.globalWriteError)

@@ -1,5 +1,7 @@
 package dev.tonexotg.app.ui.screens.parameters
 
+import dev.tonexotg.app.data.prefs.InMemoryUiPreferencesStore
+import dev.tonexotg.app.data.prefs.UiPreferencesStore
 import dev.tonexotg.protocol.ConnectionState
 import dev.tonexotg.protocol.ParameterId
 import dev.tonexotg.protocol.ParameterSpec
@@ -72,6 +74,7 @@ class ParameterEditorViewModel(
     private val controller: TonexController,
     private val scope: CoroutineScope,
     private val effectiveBounds: EffectiveParameterBounds = EffectiveParameterBounds.STATIC,
+    private val uiPreferences: UiPreferencesStore = InMemoryUiPreferencesStore(),
 ) {
     private val throttler = ParameterWriteThrottler(
         scope = scope,
@@ -98,6 +101,14 @@ class ParameterEditorViewModel(
     private val _expandedCategories = MutableStateFlow<Set<String>>(emptySet())
     private val _numericEntryTargetId = MutableStateFlow<ParameterId?>(null)
     private val _firstWriteWarningVisible = MutableStateFlow(false)
+
+    /**
+     * Mirrors [UiPreferencesStore.firstWriteWarningDismissed] — gates whether a future
+     * [TonexEvent.FirstDestructiveWrite] is even allowed to flip [_firstWriteWarningVisible].
+     * Read at event-handling time (below), not cached at construction, so a "Don't show again"
+     * checked during this same session takes effect for any later preset's own first write too.
+     */
+    private var firstWriteWarningPermanentlyDismissed = false
     private val _revertConfirmVisible = MutableStateFlow(false)
     private val _revertError = MutableStateFlow<String?>(null)
 
@@ -140,9 +151,15 @@ class ParameterEditorViewModel(
 
     init {
         scope.launch {
+            uiPreferences.firstWriteWarningDismissed.collect { dismissed ->
+                firstWriteWarningPermanentlyDismissed = dismissed
+            }
+        }
+        scope.launch {
             controller.events.collect { event ->
                 when (event) {
-                    is TonexEvent.FirstDestructiveWrite -> _firstWriteWarningVisible.value = true
+                    is TonexEvent.FirstDestructiveWrite ->
+                        if (!firstWriteWarningPermanentlyDismissed) _firstWriteWarningVisible.value = true
 
                     is TonexEvent.ExternalPresetChange -> {
                         // D3 §6.3: an in-flight drag or open sheet belongs to the *stale* preset
@@ -215,8 +232,15 @@ class ParameterEditorViewModel(
         _overrides.update { current -> if (settled != null && current[id] == settled) current - id else current }
     }
 
-    /** One `SWITCH` toggle tap (D3 §3.2). */
-    fun onSwitchToggle(id: ParameterId, checked: Boolean) = onDiscreteChange(id, if (checked) 1f else 0f)
+    /**
+     * One `SWITCH` toggle tap (D3 §3.2). [checked] is on-screen "active" polarity; for a
+     * bypass-semantics switch ([ParameterCatalog.isBypassSemantic]) the raw wire value is the
+     * opposite of [checked] — see that function's kdoc.
+     */
+    fun onSwitchToggle(id: ParameterId, checked: Boolean) {
+        val raw = checked != ParameterCatalog.isBypassSemantic(id)
+        onDiscreteChange(id, if (raw) 1f else 0f)
+    }
 
     /** One stepper ±1 tap, for a `SELECT` with no known option labels (D3 §3.2). */
     fun onStepperChange(id: ParameterId, value: Int) = onDiscreteChange(id, value.toFloat())
@@ -251,9 +275,17 @@ class ParameterEditorViewModel(
         _expandedCategories.update { if (title in it) it - title else it + title }
     }
 
-    /** `Got it` on the first-destructive-write notice (D3 §5.2) — presentation only; the underlying gate already fired. */
-    fun onFirstWriteWarningDismiss() {
+    /**
+     * `Got it` on the first-destructive-write notice (D3 §5.2). [dontShowAgain] persists through
+     * [uiPreferences] so the notice never fires again on any future first write, this session or
+     * any later one — otherwise this is presentation only; the underlying gate already fired.
+     */
+    fun onFirstWriteWarningDismiss(dontShowAgain: Boolean = false) {
         _firstWriteWarningVisible.value = false
+        if (dontShowAgain) {
+            firstWriteWarningPermanentlyDismissed = true
+            scope.launch { uiPreferences.setFirstWriteWarningDismissed(true) }
+        }
     }
 
     /** The external-preset-change snackbar (D3 §6.2) has finished displaying. */
@@ -470,7 +502,7 @@ private fun buildRow(id: ParameterId, rawValue: Float, effectiveBounds: Effectiv
             id = id,
             label = friendlyLabel(spec.enumName),
             abbreviation = abbreviationFor(spec, id),
-            checked = rawValue >= 0.5f,
+            checked = (rawValue >= 0.5f) != ParameterCatalog.isBypassSemantic(id),
         )
 
         // Every SELECT reaching this function is one of D3 §3.2's *unlabeled* selectors — the 4

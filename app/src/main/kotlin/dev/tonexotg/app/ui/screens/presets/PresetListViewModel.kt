@@ -319,7 +319,8 @@ class PresetListViewModel(
      * uncontrolled ones.
      */
     fun onGlobalSwitchToggle(id: ParameterId, checked: Boolean) {
-        val value = if (checked) 1f else 0f
+        val raw = checked != ParameterCatalog.isBypassSemantic(id)
+        val value = if (raw) 1f else 0f
         _globalOverrides.update { it + (id to value) }
         globalWriteThrottler.submit(id, value)
     }

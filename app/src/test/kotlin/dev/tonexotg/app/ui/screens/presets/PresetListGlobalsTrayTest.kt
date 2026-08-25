@@ -47,6 +47,8 @@ class PresetListGlobalsTrayTest {
         controller.seedParameterValue(ParameterCatalog.bpmId, 120f)
         controller.seedParameterValue(ParameterCatalog.inputTrimId, -2f)
         controller.seedParameterValue(ParameterCatalog.tuningReferenceId, 440f)
+        // Bypass-semantics (ParameterCatalog.isBypassSemantic): raw 1f = bypassed = on-screen "off";
+        // raw 0f = not bypassed = on-screen "on". Chosen so the two chips illustrate both states.
         controller.seedParameterValue(ParameterCatalog.cabSimBypassId, 1f)
         controller.seedParameterValue(ParameterCatalog.tempoSourceId, 0f)
         controller.seedParameterValue(ParameterCatalog.bypassId, 0f)
@@ -122,9 +124,9 @@ class PresetListGlobalsTrayTest {
         composeTestRule.onNodeWithContentDescription("BPM, 120 BPM", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Input Trim, -2 dB", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tuning Reference, 440 Hz", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Cab Sim Bypass, on", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Cab Sim Bypass, off", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tempo Source, GLOBAL", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Bypass, off", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Bypass, on", useUnmergedTree = true).assertIsDisplayed()
     }
 
     // ---- The header is one merged tap target, not six separately-focusable chips -----------------
@@ -147,9 +149,9 @@ class PresetListGlobalsTrayTest {
             "BPM, 120 BPM",
             "Input Trim, -2 dB",
             "Tuning Reference, 440 Hz",
-            "Cab Sim Bypass, on",
+            "Cab Sim Bypass, off",
             "Tempo Source, GLOBAL",
-            "Bypass, off",
+            "Bypass, on",
         )
         val resolvedTestTags = descriptions.map { description ->
             composeTestRule.onNodeWithContentDescription(description).fetchSemanticsNode()
@@ -187,9 +189,9 @@ class PresetListGlobalsTrayTest {
         composeTestRule.onNodeWithContentDescription("BPM, 120 BPM", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Input Trim, -2 dB", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tuning Reference, 440 Hz", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Cab Sim Bypass, on", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Cab Sim Bypass, off", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Tempo Source, GLOBAL", useUnmergedTree = true).assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Bypass, off", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Bypass, on", useUnmergedTree = true).assertIsDisplayed()
 
         val headerNode = composeTestRule.onNodeWithTag("globalParameters.header").fetchSemanticsNode()
         val widthPx = headerNode.size.width
