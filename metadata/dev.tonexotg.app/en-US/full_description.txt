@@ -1,0 +1,16 @@
+Tonex-OTG is a native Android app that controls an IK Multimedia ToneX One guitar pedal over a wired USB-OTG connection — full preset and parameter control from your phone, no laptop needed for field or live use.
+
+The ToneX One has no built-in MIDI or wireless control, and IK Multimedia's official control app only supports the newer ToneX One+. Tonex-OTG fills that gap for the original ToneX One:
+
+* Browse and switch between all 20 stored presets, not limited to the pedal's own 2-3 footswitch slots
+* Read and edit preset parameters — gain, EQ, gate, compressor, reverb, and the rest of the parameter set exposed by the pedal
+* Toggle individual effects blocks on/off
+* Live connection status and reconnect handling for the USB link
+
+Scope, by design: wired USB-OTG only (no Bluetooth, no WiFi), and ToneX One only (not the ToneX One+, the full-size ToneX Pedal, or ToneX Cab/Amp software).
+
+Requirements: an Android phone or tablet with USB On-The-Go (OTG) host mode support, Android 8.0 or newer, a USB-OTG cable/adapter, and a ToneX One pedal.
+
+This project is not affiliated with or endorsed by IK Multimedia. TONEX is a registered trademark of IK Multimedia Production Srl.
+
+This app ports USB protocol logic from two upstream open-source reverse-engineering projects (Builty/TonexOneController, Apache-2.0; vit3k/tonex_controller, MIT) — see the in-app Credits screen or the project's CREDITS.md for full attribution.
