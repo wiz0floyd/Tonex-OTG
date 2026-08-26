@@ -36,17 +36,20 @@ jobs:
       # versionCode is the total commit count on main -- the same counter release.yml uses --
       # so nightly and tagged releases share one strictly-increasing number and either can
       # always install over the other. versionName is the last tagged release with a
-      # "-nightly+<sha>" suffix, so it's obvious at a glance which release a nightly sits on
-      # top of. See release.yml's own "Compute release version" step for the other half of
-      # this scheme.
+      # "-nightly.<UTC timestamp>+<sha>" suffix. The timestamp is zero-padded YYYYMMDDHHMM (UTC)
+      # so two nightly versionNames sort lexicographically in build order -- lets you eyeball
+      # which of two installed nightlies is newer, or bisect a regression by date, without
+      # cross-referencing commit history. See release.yml's own "Compute release version" step
+      # for the other half of this scheme.
       - name: Compute nightly version
         id: version
         run: |
           SHORT_SHA="$(git rev-parse --short HEAD)"
+          TIMESTAMP="$(date -u +%Y%m%d%H%M)"
           LAST_TAG="$(git tag -l 'v*' --sort=-version:refname --merged HEAD | head -1)"
           LAST_TAG="${LAST_TAG:-v0.0.0}"
           echo "code=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
-          echo "name=${LAST_TAG#v}-nightly+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "name=${LAST_TAG#v}-nightly.${TIMESTAMP}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
   build:
     name: build
