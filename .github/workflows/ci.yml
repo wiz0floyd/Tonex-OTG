@@ -15,8 +15,39 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      # Required status checks ("protocol", "android") can't be scoped by the pull_request
+      # trigger's own `paths:` filter — GitHub leaves a PR permanently "pending" if a required
+      # check's workflow never runs at all. Instead the workflow always runs, and this job
+      # decides whether the build jobs below have anything to do; a job skipped via `if:` is
+      # reported to branch protection as a passing required check, so a docs-only PR clears
+      # "protocol"/"android" without ever invoking Gradle.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'app/**'
+              - 'protocol/**'
+              - 'build.gradle.kts'
+              - 'settings.gradle.kts'
+              - 'gradle.properties'
+              - 'gradle/**'
+              - 'gradlew'
+              - 'gradlew.bat'
+              - '.github/workflows/ci.yml'
+
   protocol:
     name: protocol
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -50,6 +81,8 @@ jobs:
 
   android:
     name: android
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
