@@ -1,5 +1,32 @@
 # Contributing to Tonex-OTG
 
+This is a hobby project — contributions, bug reports, and hardware findings
+are welcome, but expect a personal-project pace, not a corporate one.
+
+## Getting started
+
+- `:protocol` is pure Kotlin/JVM and needs no Android SDK:
+  `./gradlew :protocol:test`
+- `:app` needs the Android SDK (API 36): `./gradlew :app:assembleDebug`,
+  `./gradlew :app:testDebugUnitTest`, `./gradlew :app:lintDebug`
+- Run the full local check before opening a PR: tests **and** lint. Lint has
+  caught real bugs test suites missed on this project — don't skip it.
+
+## Opening a pull request
+
+1. Branch off `main`.
+2. Keep the PR scoped to one logical change.
+3. Make sure tests and lint are green locally.
+4. Open the PR against `main` with a description of what changed and why.
+   Link the issue it closes (`Fixes #N`) if there is one.
+
+## Reporting bugs
+
+Open a [GitHub issue](https://github.com/wiz0floyd/tonex-otg/issues/new)
+with your Android version, phone model, and what you expected vs. what
+happened. Since the USB protocol is reverse-engineered, concrete detail
+(a captured log, the exact preset/parameter involved) is especially useful.
+
 ## Porting code from upstream projects
 
 This project ports USB protocol logic from two upstream open-source
