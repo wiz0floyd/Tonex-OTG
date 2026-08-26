@@ -71,9 +71,20 @@ jobs:
         with:
           name: signed-apk
 
-      # A single moving "nightly" tag/release, updated in place on every push -- not one release
-      # per commit. softprops/action-gh-release updates the existing release's assets/notes when
-      # tag_name already exists rather than failing, so this never accumulates old nightly APKs.
+      # Delete any existing "nightly" release before recreating it below (not just updating its
+      # assets/notes in place) so the release's published_at timestamp -- and the "X ago" the
+      # GitHub UI derives from it -- reflects this build, not whenever the nightly release was
+      # first ever created. Only the release object goes; --cleanup-tag is omitted so the
+      # "nightly" tag itself is left alone for the next step to reuse. || true covers the
+      # first-ever run, when no release exists yet to delete.
+      - name: Delete previous nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete nightly --yes --repo "${{ github.repository }}" || true
+
+      # A single moving "nightly" tag/release, one release recreated on every push -- not one
+      # release per commit. This never accumulates old nightly APKs, since the previous release
+      # (and its assets) was just deleted above.
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
