@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import dev.tonexotg.app.probe.ProbeActivity
+import dev.tonexotg.app.ui.screens.about.loadAppVersionInfo
 import dev.tonexotg.app.ui.theme.TonexTheme
 
 /**
@@ -25,6 +26,10 @@ import dev.tonexotg.app.ui.theme.TonexTheme
  * longer does. Launching it via an explicit [Intent] here (rather than folding its Compose UI
  * into this NavHost) keeps that Activity's own lifecycle/CoroutineScope contract (see its KDoc,
  * "Deliberately NOT scope.cancel()...") unchanged.
+ *
+ * Issue #126: also the discoverable "Report a bug" entry point for regular users, as its own
+ * "Support" section above "Diagnostics" -- the debug menu's own GitHub-issue shortcut
+ * (`buildDebugDumpIssueUri`, issue #96) stays diagnostic-only per issue #126's "out of scope".
  */
 @Composable
 fun SettingsScreen(modifier: Modifier = Modifier) {
@@ -38,6 +43,25 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(TonexTheme.spacing.space3),
         ) {
             Text(text = "Settings", style = MaterialTheme.typography.headlineSmall)
+
+            HorizontalDivider()
+
+            Text(text = "Support", style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = "Found a problem? Report it and we'll take a look.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(
+                onClick = {
+                    val appVersionInfo = loadAppVersionInfo(context)
+                    val uri = buildBugReportIssueUri(appVersionInfo)
+                    context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Report a bug")
+            }
 
             HorizontalDivider()
 
