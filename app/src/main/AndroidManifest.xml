@@ -12,27 +12,28 @@
 
     <!--
       Declaring RECORD_AUDIO (below) makes Play implicitly require android.hardware.microphone.
-      Overridden to required="false" for the same reason as usb.host above: the Tonex is itself a
-      USB audio-class device, so audio capture happens over USB, not a built-in mic — a device
-      with no on-board microphone must not be filtered out of install eligibility.
+      Overridden to required="false" for the same reason as usb.host above: the app never uses a
+      built-in mic — it interacts with the Tonex as a USB audio-class device — so a phone with no
+      on-board microphone must not be filtered out of install eligibility.
     -->
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />
 
     <!--
-      USB-audio I/O with the pedal: routing phone playback out through the Tonex and capturing the
-      processed signal back from it (the Tonex enumerates as a USB audio-class device).
+      Using the Tonex with phone audio: it enumerates as a USB audio-class device, so the app
+      routes phone playback out to it and takes over routing while it's the active output.
 
-      RECORD_AUDIO is the API 23+ runtime (dangerous) permission required to open any capture
-      stream from the USB audio device. MODIFY_AUDIO_SETTINGS is normal-protection (auto-granted
-      at install) and covers changing audio routing/mode to direct output at the USB device.
-      Playback itself needs no permission and so adds nothing here.
-
-      As with POST_NOTIFICATIONS above, these are declared so the manifest is honest about what
-      the audio path needs, but no code consumes them yet and this change adds no runtime-request
-      flow for RECORD_AUDIO — that belongs with the story that actually implements the audio
-      stream. Until then RECORD_AUDIO stays ungranted and no capture stream can be opened.
+      RECORD_AUDIO: the app does NOT capture audio. It's declared because Android treats a USB
+      audio-class device as an input source too, and a foreground app that engages such a device
+      without holding RECORD_AUDIO trips a framework warning / access restriction on the audio
+      path. Holding the permission (even ungranted, just declared) is what the framework checks
+      for here; it is the API 23+ runtime (dangerous) permission, but this change adds no
+      runtime-request flow — as with POST_NOTIFICATIONS above, it's declared so the manifest is
+      honest about what the audio path touches, and a later story wires any prompt if one proves
+      necessary. MODIFY_AUDIO_SETTINGS is normal-protection (auto-granted at install) and covers
+      changing audio routing/mode to direct output at the USB device. Playback itself needs no
+      permission.
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
