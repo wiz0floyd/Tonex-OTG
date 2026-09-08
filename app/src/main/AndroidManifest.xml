@@ -11,6 +11,33 @@
         android:required="false" />
 
     <!--
+      Declaring RECORD_AUDIO (below) makes Play implicitly require android.hardware.microphone.
+      Overridden to required="false" for the same reason as usb.host above: the Tonex is itself a
+      USB audio-class device, so audio capture happens over USB, not a built-in mic — a device
+      with no on-board microphone must not be filtered out of install eligibility.
+    -->
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
+    <!--
+      USB-audio I/O with the pedal: routing phone playback out through the Tonex and capturing the
+      processed signal back from it (the Tonex enumerates as a USB audio-class device).
+
+      RECORD_AUDIO is the API 23+ runtime (dangerous) permission required to open any capture
+      stream from the USB audio device. MODIFY_AUDIO_SETTINGS is normal-protection (auto-granted
+      at install) and covers changing audio routing/mode to direct output at the USB device.
+      Playback itself needs no permission and so adds nothing here.
+
+      As with POST_NOTIFICATIONS above, these are declared so the manifest is honest about what
+      the audio path needs, but no code consumes them yet and this change adds no runtime-request
+      flow for RECORD_AUDIO — that belongs with the story that actually implements the audio
+      stream. Until then RECORD_AUDIO stays ungranted and no capture stream can be opened.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!--
       S13 (issue #18): UsbConnectionService's foreground-service requirements. FOREGROUND_SERVICE
       is the general FGS permission every foreground service needs since API 28;
       FOREGROUND_SERVICE_CONNECTED_DEVICE is the per-type permission the `connectedDevice`
